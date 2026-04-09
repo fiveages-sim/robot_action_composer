@@ -1,6 +1,7 @@
 # robot-action-composer
 
 - **Motion / task queue**: uses **`ROS2RobotInterface` only** (no `ROS2Robot`). Runners call `interface.connect()` / `interface.disconnect()`; context field is `ctx.interface`.
+- **Navigation** (`task_runtime/skills/navigation.py`): Nav2 helpers — `robot.send_nav_goal`, `robot.wait_nav_arrived`, `robot.navigate_to_pose`, `robot.navigate_to_object`, `robot.movej_to_config`; base pose refresh via `isaac_sim.get_entity_pose_world_service`.
 - **Dataset recording** (`[recording]` extra): builds **`ROS2Robot`** for `get_observation()` / LeRobot datasets; motion during episodes uses **`robot.ros2_interface`** (same underlying connection).
 
 ## Install (monorepo)

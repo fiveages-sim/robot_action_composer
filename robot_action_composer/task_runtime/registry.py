@@ -14,6 +14,8 @@ _REGISTRY: dict[str, SkillFn] = {}
 
 def register_skill(name: str, fn: SkillFn) -> None:
     if name in _REGISTRY:
+        if _REGISTRY[name] is fn:
+            return
         raise ValueError(f"Skill already registered: {name}")
     _REGISTRY[name] = fn
 
