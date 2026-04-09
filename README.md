@@ -7,10 +7,10 @@
 
 ```bash
 pip install -e submodules/ros2_robot_interface
-pip install -e robot_action_composer
+pip install -e submodules/robot_action_composer
 # Recording:
 pip install -e lerobot_robot_ros2
-pip install -e "robot_action_composer[recording]"
+pip install -e "submodules/robot_action_composer[recording]"
 ```
 
 ROS 2 Python (`rclpy`, messages, `cv_bridge`) comes from your ROS environment.

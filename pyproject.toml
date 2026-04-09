@@ -20,8 +20,8 @@ recording = [
     "lerobot",
     "lerobot-robot-ros2",
 ]
-# Motion / task queue: pip install -e robot_action_composer
-# Recording (ROS2Robot + datasets): pip install -e "robot_action_composer[recording]"
+# Motion / task queue (monorepo): pip install -e submodules/robot_action_composer
+# Recording (ROS2Robot + datasets): pip install -e "submodules/robot_action_composer[recording]"
 # lerobot_robot_ros2 still needed for pose_utils in drawer / isaac_sim until vendored.
 
 [tool.setuptools.packages.find]
