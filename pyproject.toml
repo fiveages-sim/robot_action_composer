@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-action-composer"
+version = "0.1.0"
+description = "Task queue and motion generation on ROS2RobotInterface; optional LeRobot recording"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "numpy>=1.20",
+    "pyyaml>=6",
+    "ros2-robot-interface",
+]
+
+[project.optional-dependencies]
+recording = [
+    "lerobot",
+    "lerobot-robot-ros2",
+]
+# Motion / task queue: pip install -e robot_action_composer
+# Recording (ROS2Robot + datasets): pip install -e "robot_action_composer[recording]"
+# lerobot_robot_ros2 still needed for pose_utils in drawer / isaac_sim until vendored.
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["robot_action_composer*"]
