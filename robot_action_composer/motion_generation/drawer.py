@@ -12,7 +12,7 @@ Configuration is a :class:`DrawerPickPlaceTaskConfig` — a **subclass** of
 :class:`~motion_generation.pick_place.PickPlaceFlowTaskConfig` with extra fields
 only for drawer phases. Task YAML/``TASK_CONFIG`` may use optional nested keys:
 
-- ``pick`` / ``place`` — merged via :func:`motion_generation.pick_place.flatten_pick_place_task_overrides`
+- ``pick`` / ``place`` — merged via :func:`robot_action_composer.task_config_io.flatten_pick_place_task_overrides`
 - ``drawer`` — merged last via :func:`flatten_drawer_pick_place_task_overrides`
 """
 
@@ -65,10 +65,8 @@ from robot_action_composer.isaac_sim import (
 )
 from robot_action_composer.demo_preset_utils import resolve_dataclass_cfg_from_presets
 
-from robot_action_composer.motion_generation.pick_place import (  # pyright: ignore[reportMissingImports]
-    PickPlaceFlowTaskConfig,
-    flatten_pick_place_task_overrides,
-)
+from robot_action_composer.task_config_io import flatten_pick_place_task_overrides
+from robot_action_composer.motion_generation.pick_place import PickPlaceFlowTaskConfig  # pyright: ignore[reportMissingImports]
 
 def euler_to_quaternion(roll, pitch, yaw):
     """
@@ -102,7 +100,7 @@ def _make_interface(robot_cfg: Any) -> Any:
 
 
 def flatten_drawer_pick_place_task_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Like :func:`~motion_generation.pick_place.flatten_pick_place_task_overrides` but also
+    """Like :func:`~robot_action_composer.task_config_io.flatten_pick_place_task_overrides` but also
     merges an optional top-level ``drawer`` mapping (drawer-only field overrides).
     """
     if not isinstance(raw, Mapping):

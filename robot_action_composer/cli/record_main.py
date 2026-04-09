@@ -14,10 +14,8 @@ def _build_task_config(task_entry_cfg: Any) -> Any:
         return task_entry_cfg
     task_kind = task_entry_cfg.get("kind")
     if task_kind == "pick_place":
-        from robot_action_composer.motion_generation.pick_place import (  # pyright: ignore[reportMissingImports]
-            PickPlaceFlowTaskConfig,
-            flatten_pick_place_task_overrides,
-        )
+        from robot_action_composer.motion_generation.pick_place import PickPlaceFlowTaskConfig  # pyright: ignore[reportMissingImports]
+        from robot_action_composer.task_config_io import flatten_pick_place_task_overrides
 
         flat = flatten_pick_place_task_overrides(task_entry_cfg["base_task_overrides"])
         return PickPlaceFlowTaskConfig(**flat)
@@ -134,9 +132,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
         )
         preset_raw: dict[str, object] = scene_presets.get(scene_key, {})
         if task_entry.get("task_kind") == "pick_place":
-            from robot_action_composer.motion_generation.pick_place import (  # pyright: ignore[reportMissingImports]
-                flatten_pick_place_task_overrides,
-            )
+            from robot_action_composer.task_config_io import flatten_pick_place_task_overrides
 
             preset_raw = flatten_pick_place_task_overrides(preset_raw)
         elif task_entry.get("task_kind") == "handover":

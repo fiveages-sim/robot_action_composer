@@ -36,6 +36,7 @@ from robot_action_composer.isaac_sim import (
     reset_simulation_and_randomize_object,
 )
 from robot_action_composer.demo_preset_utils import resolve_dataclass_cfg_from_presets
+from robot_action_composer.task_config_io import flatten_pick_place_task_overrides
 from robot_action_composer.motion_generation.movej_return import (
     capture_initial_arm_joint_positions,
     movej_return_to_initial_state,
@@ -94,31 +95,6 @@ class PickPlaceFlowTaskConfig:
     pose_tol_ori: float = 0.08
     require_orientation_reach: bool = False
     use_object_orientation: bool = False
-
-
-def flatten_pick_place_task_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge optional nested ``pick`` / ``place`` dicts into flat override kwargs.
-
-    Order of precedence for duplicate keys: top-level (excluding ``pick``/``place``) <
-    ``pick`` < ``place`` (later wins).
-
-    This keeps task config files readable while :class:`PickPlaceFlowTaskConfig` and
-    dataclass ``replace`` still receive a flat mapping.
-    """
-    if not isinstance(raw, Mapping):
-        raise TypeError(f"pick_place overrides must be a mapping, got {type(raw).__name__}")
-    merged: dict[str, Any] = {k: v for k, v in raw.items() if k not in ("pick", "place", "skill_params")}
-    pick = raw.get("pick")
-    place = raw.get("place")
-    if pick is not None:
-        if not isinstance(pick, Mapping):
-            raise TypeError(f'"pick" must be a mapping, got {type(pick).__name__}')
-        merged.update(dict(pick))
-    if place is not None:
-        if not isinstance(place, Mapping):
-            raise TypeError(f'"place" must be a mapping, got {type(place).__name__}')
-        merged.update(dict(place))
-    return merged
 
 
 def resolve_pick_place_cfg_from_presets(

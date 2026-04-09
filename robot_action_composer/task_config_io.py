@@ -5,7 +5,29 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+
+def flatten_pick_place_task_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge optional nested ``pick`` / ``place`` dicts into flat override kwargs.
+
+    Order: top-level (excluding ``pick``/``place``/``skill_params``) < ``pick`` < ``place``.
+    Used by motion flows, recording CLI, and IsaacSim ``inference.py`` (same rules as task YAML).
+    """
+    if not isinstance(raw, Mapping):
+        raise TypeError(f"pick_place overrides must be a mapping, got {type(raw).__name__}")
+    merged: dict[str, Any] = {k: v for k, v in raw.items() if k not in ("pick", "place", "skill_params")}
+    pick = raw.get("pick")
+    place = raw.get("place")
+    if pick is not None:
+        if not isinstance(pick, Mapping):
+            raise TypeError(f'"pick" must be a mapping, got {type(pick).__name__}')
+        merged.update(dict(pick))
+    if place is not None:
+        if not isinstance(place, Mapping):
+            raise TypeError(f'"place" must be a mapping, got {type(place).__name__}')
+        merged.update(dict(place))
+    return merged
 
 
 def _load_module(module_name: str, file_path: Path) -> Any:
@@ -92,3 +114,10 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> dict[st
             raise ValueError(f"Task config {stem!r} must define string task_key: {task_cfg_dir}")
         tasks[task_key] = dict(raw)
     return tasks
+
+
+__all__ = [
+    "discover_task_configs",
+    "flatten_pick_place_task_overrides",
+    "load_task_dict_from_yaml",
+]

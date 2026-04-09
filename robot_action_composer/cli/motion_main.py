@@ -159,9 +159,9 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
         flatten_handover_task_overrides,
         format_handover_task_cfg_summary,
     )
+    from robot_action_composer.task_config_io import flatten_pick_place_task_overrides
     from robot_action_composer.motion_generation.pick_place import (  # pyright: ignore[reportMissingImports]
         PickPlaceFlowTaskConfig,
-        flatten_pick_place_task_overrides,
         format_pick_place_cfg_summary,
         run_pick_place_demo,
     )
