@@ -63,4 +63,4 @@ pip install -e "submodules/robot_action_composer[recording]"
 
 ## 备注
 
-部分模块（如 `isaac_sim`、`motion_generation/tasks/drawer`）仍引用 **`lerobot_robot_ros2.utils.pose_utils`** 做四元数等工具函数（**不**依赖 `ROS2Robot` 类）。若要去掉该依赖，可将这些 helper 迁入本包。
+**`motion_generation/`** 下未引用 LeRobot pose 工具。通用四元数与 **`pose_from_tuple`** 在 **`ros2_robot_interface.utils.quat_pose`**（`drawer` 技能、`isaac_sim` 等直接依赖接口包）。**`lerobot_robot_ros2.utils.pose_utils`** 仍提供 **`action_from_pose` / `obs_to_pose` / rot6d 转换** 并从接口包再导出上述通用函数以保持兼容。

@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
-from lerobot_robot_ros2.utils.pose_utils import (  # pyright: ignore[reportMissingImports]
+from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
     pose_from_tuple,
     quat_conjugate,
     quat_multiply,

@@ -147,7 +147,7 @@ flowchart TB
 
 - **运行时运动路径**只依赖 **`ROS2RobotInterface`**（见根目录 `README.md` 说明）。
 - **录制**额外依赖 **`lerobot_robot_ros2`** 等（可选安装）。
-- 部分几何仍引用 **`lerobot_robot_ros2.utils.pose_utils`**（与 `ROS2Robot` 类无关）；README 中注明未来可 vendor。
+- **`isaac_sim`** 与 **`task_runtime/skills/drawer`** 使用 **`ros2_robot_interface.utils.quat_pose`**（**`motion_generation/`** 未用）。LeRobot 专用 **`action_from_pose` / rot6d** 等仍在 **`lerobot_robot_ros2.utils.pose_utils`**。
 
 ---
 
