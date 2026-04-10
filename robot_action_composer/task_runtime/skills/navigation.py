@@ -36,19 +36,15 @@ from typing import Any
 
 from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMissingImports]
 
-from robot_action_composer.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.sequence.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.isaac_sim import get_entity_pose_world_service  # pyright: ignore[reportMissingImports]
 
-from robot_action_composer.task_runtime.context import (  # pyright: ignore[reportMissingImports]
-    BaseBimanualMotionContext,
-    SingleArmMotionContext,
-)
+from robot_action_composer.task_runtime.context import QueueRuntimeContext  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.registry import register_skill  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.types import ExecutionMeta  # pyright: ignore[reportMissingImports]
 
-# 支持导航 skill 的 context 类型
-_NavContext = SingleArmMotionContext | BaseBimanualMotionContext
+_NavContext = QueueRuntimeContext
 
 
 def _refresh_base_pose(ctx: _NavContext) -> None:
@@ -68,7 +64,7 @@ def _default_meta(ctx: _NavContext) -> ExecutionMeta:
     return ExecutionMeta(
         send_mode=SendMode.STAMPED if getattr(ctx, "use_stamped", True) else SendMode.UNSTAMPED,
         frame_id=getattr(ctx, "frame_id", "arm_base"),
-        warn_prefix="robot.nav",
+        warn_prefix="nav",
     )
 
 
@@ -195,7 +191,7 @@ def skill_navigate_to_object(
     )
     if not object_path:
         raise ValueError(
-            "robot.navigate_to_object requires 'object_entity_path' param "
+            "nav.navigate_to_object requires 'object_entity_path' param "
             "or ctx.task_cfg.source_object_entity_path"
         )
 
@@ -349,11 +345,11 @@ def skill_movej_to_config(
 
 
 def _register_navigation_skills() -> None:
-    register_skill("robot.send_nav_goal",       skill_send_nav_goal)
-    register_skill("robot.wait_nav_arrived",    skill_wait_nav_arrived)
-    register_skill("robot.navigate_to_pose",    skill_navigate_to_pose)
-    register_skill("robot.navigate_to_object",  skill_navigate_to_object)
-    register_skill("robot.movej_to_config",     skill_movej_to_config)
+    register_skill("nav.send_nav_goal", skill_send_nav_goal)
+    register_skill("nav.wait_nav_arrived", skill_wait_nav_arrived)
+    register_skill("nav.navigate_to_pose", skill_navigate_to_pose)
+    register_skill("nav.navigate_to_object", skill_navigate_to_object)
+    register_skill("joint.movej_to_config", skill_movej_to_config)
 
 
 _register_navigation_skills()

@@ -1,17 +1,14 @@
-"""Drawer-specific skills for the single-arm task queue.
+"""抽屉相关 ``single_arm.drawer.*`` 技能（拉手 / 关抽屉 / 撤退）。
 
-Composite flow: ``single_arm.pregrasp`` → ``single_arm.drawer.pull_open`` → ``single_arm.pick``
-→ ``single_arm.place`` → ``single_arm.drawer.close_push`` → ``single_arm.drawer.retreat_to_home``.
-
-``pull_open`` computes the handle reference frame, runs the pull sequence, and rewrites
-``ctx.task_cfg.place_position`` for the apple (same heuristic as :func:`run_drawer_demo`).
-Drawer runtime state lives in ``ctx.drawer`` (:class:`DrawerPhaseState`).
+``pull_open`` 计算把手参考系、执行拉开序列，并改写 ``ctx.task_cfg.place`` 的苹果中间放置提示。
+阶段状态在 ``ctx.drawer``（:class:`DrawerPhaseState`）；几何配置在 ``ctx.drawer_geometry``。
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from lerobot_robot_ros2.utils.pose_utils import (  # pyright: ignore[reportMissingImports]
@@ -21,7 +18,7 @@ from lerobot_robot_ros2.utils.pose_utils import (  # pyright: ignore[reportMissi
     quat_normalize,
 )
 
-from robot_action_composer.cartesian_stages import (  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     SendMode,
     StageTarget,
     execute_stage_sequence,
@@ -29,32 +26,31 @@ from robot_action_composer.cartesian_stages import (  # pyright: ignore[reportMi
 
 from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
 
-from dataclasses import replace
-
-from robot_action_composer.motion_generation.drawer import (  # pyright: ignore[reportMissingImports]
-    DrawerPickPlaceTaskConfig,
+from robot_action_composer.motion_generation.tasks.drawer import (  # pyright: ignore[reportMissingImports]
+    DrawerGeometryConfig,
     _apply_target_pose_offset,
     build_single_arm_back_home_sequence,
     build_single_arm_close_drawer_sequence,
     build_single_arm_pull_drawer_sequence,
 )
-from robot_action_composer.task_runtime.context import DrawerPhaseState, SingleArmMotionContext
+from robot_action_composer.task_runtime.config.single_arm import QueueSingleArmSlice  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.context import DrawerPhaseState, QueueRuntimeContext
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.types import ExecutionMeta
 
 
-def _stamped_mode(ctx: SingleArmMotionContext) -> SendMode:
+def _stamped_mode(ctx: QueueRuntimeContext) -> SendMode:
     return SendMode.STAMPED if ctx.use_stamped else SendMode.UNSTAMPED
 
 
-def _require_drawer_cfg(ctx: SingleArmMotionContext) -> DrawerPickPlaceTaskConfig:
-    cfg = ctx.task_cfg
-    if not isinstance(cfg, DrawerPickPlaceTaskConfig):
+def _require_drawer_geometry(ctx: QueueRuntimeContext) -> DrawerGeometryConfig:
+    d = ctx.drawer_geometry
+    if d is None:
         raise TypeError(
-            "single_arm.drawer.* skills require task_cfg to be DrawerPickPlaceTaskConfig "
-            f"(kind: drawer); got {type(cfg).__name__}"
+            "single_arm.drawer.* skills require drawer_geometry "
+            "(set source_object_path_drawer and drawer fields in task YAML / merged flat)"
         )
-    return cfg
+    return d
 
 
 def _rotate_vector_by_quat(
@@ -67,13 +63,13 @@ def _rotate_vector_by_quat(
     return (rotated[0], rotated[1], rotated[2])
 
 
-def _primary_arm_handler(ctx: SingleArmMotionContext) -> Any:
+def _primary_arm_handler(ctx: QueueRuntimeContext) -> Any:
     if ctx.source_is_right:
         return ctx.interface.right_arm_handler
     return ctx.interface.left_arm_handler
 
 
-def _require_drawer_phase(ctx: SingleArmMotionContext) -> DrawerPhaseState:
+def _require_drawer_phase(ctx: QueueRuntimeContext) -> DrawerPhaseState:
     d = ctx.drawer
     if d is None:
         raise RuntimeError("Drawer phase state missing; run single_arm.drawer.pull_open first")
@@ -81,9 +77,9 @@ def _require_drawer_phase(ctx: SingleArmMotionContext) -> DrawerPhaseState:
 
 
 def skill_drawer_pull_open(
-    ctx: SingleArmMotionContext, _params: Mapping[str, Any]
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
-    dcfg = _require_drawer_cfg(ctx)
+    dcfg = _require_drawer_geometry(ctx)
     path_drawer = dcfg.source_object_path_drawer
     if not path_drawer:
         raise ValueError("source_object_path_drawer is required for single_arm.drawer.pull_open")
@@ -138,11 +134,16 @@ def skill_drawer_pull_open(
         handle_offset_rotated=handle_offset,
     )
 
+    tc = ctx.task_cfg
+    if not isinstance(tc, QueueSingleArmSlice):
+        raise TypeError(f"drawer pull_open expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
+
     gripper_open = ctx.gripper_open
     gripper_closed = ctx.gripper_closed
     sequence = build_single_arm_pull_drawer_sequence(
         target_pose=source_target_pose_d,
-        task_cfg=dcfg,
+        pick=tc.pick,
+        drawer=dcfg,
         arm_side=ctx.arm_side,
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
@@ -156,10 +157,13 @@ def skill_drawer_pull_open(
         place_pose_ref[2] + 0.15,
     )
     ctx.task_cfg = replace(
-        ctx.task_cfg,
-        place_position=apple_place,
-        place_object_entity_path="",
-        run_place_before_return=True,
+        tc,
+        place=replace(
+            tc.place,
+            place_position=apple_place,
+            place_object_entity_path="",
+            run_place_before_return=True,
+        ),
     )
     ctx.gripper_for_return_home = ctx.gripper_closed
     print(f"[TaskQ] drawer pull ref (apple place hint) -> place_position={apple_place}")
@@ -172,10 +176,13 @@ def skill_drawer_pull_open(
 
 
 def skill_drawer_close_push(
-    ctx: SingleArmMotionContext, _params: Mapping[str, Any]
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
-    dcfg = _require_drawer_cfg(ctx)
+    dcfg = _require_drawer_geometry(ctx)
     drw = _require_drawer_phase(ctx)
+    tc = ctx.task_cfg
+    if not isinstance(tc, QueueSingleArmSlice):
+        raise TypeError(f"drawer close_push expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
 
     path_drawer = dcfg.source_object_path_drawer
     place_pose_ref = drw.place_pose_ref
@@ -209,8 +216,8 @@ def skill_drawer_close_push(
 
     sequence = build_single_arm_close_drawer_sequence(
         target_pose=source_target_pose_d,
-        home_pose=ctx.source_home_pose,
-        task_cfg=dcfg,
+        pick=tc.pick,
+        drawer=dcfg,
         arm_side=ctx.arm_side,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
@@ -234,7 +241,6 @@ def skill_drawer_close_push(
     handler.send_target_stamped("base_link", pose_from_tuple(place_pose_ref, grasp_ori))
     time.sleep(3)
 
-    # Close leg finished here (matches legacy ``run_drawer_demo`` ordering).
     return [], ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=ctx.frame_id,
@@ -243,15 +249,18 @@ def skill_drawer_close_push(
 
 
 def skill_drawer_retreat_to_home(
-    ctx: SingleArmMotionContext, _params: Mapping[str, Any]
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
-    dcfg = _require_drawer_cfg(ctx)
+    _require_drawer_geometry(ctx)
     drw = _require_drawer_phase(ctx)
+    tc = ctx.task_cfg
+    if not isinstance(tc, QueueSingleArmSlice):
+        raise TypeError(f"drawer retreat_to_home expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
 
     sequence = build_single_arm_back_home_sequence(
         place_position=drw.place_pose_ref,
         home_pose=ctx.source_home_pose,
-        task_cfg=dcfg,
+        place=tc.place,
         arm_side=ctx.arm_side,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
@@ -270,10 +279,10 @@ def skill_drawer_retreat_to_home(
     )
 
 
-def register_drawer_queue_skills() -> None:
+def register_drawer_skills() -> None:
     register_skill("single_arm.drawer.pull_open", skill_drawer_pull_open)
     register_skill("single_arm.drawer.close_push", skill_drawer_close_push)
     register_skill("single_arm.drawer.retreat_to_home", skill_drawer_retreat_to_home)
 
 
-register_drawer_queue_skills()
+register_drawer_skills()

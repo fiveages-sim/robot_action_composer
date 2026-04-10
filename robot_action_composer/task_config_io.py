@@ -1,43 +1,32 @@
-"""Load IsaacSim per-robot task configs from ``.py`` or ``.yaml`` / ``.yml``."""
+"""Load IsaacSim per-robot task configs from ``.yaml`` / ``.yml`` only."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 from typing import Any, Mapping
 
+_FORBIDDEN_ROOT_KEYS: frozenset[str] = frozenset({"pick", "place", "handover", "carry", "drawer"})
+# Consumed separately by merge_scene_skill_overlays_into_flat / merge_task_queue_skill_params, not part of flat preset keys.
+_STRIPPED_ROOT_KEYS: frozenset[str] = frozenset({"skill_params"})
 
-def flatten_pick_place_task_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge optional nested ``pick`` / ``place`` dicts into flat override kwargs.
 
-    Order: top-level (excluding ``pick``/``place``/``skill_params``) < ``pick`` < ``place``.
-    Used by motion flows, recording CLI, and IsaacSim ``inference.py`` (same rules as task YAML).
+def flatten_queue_task_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten ``base_task_overrides`` or a scene-preset root to top-level scalars only.
+
+    Nested task sections are **not** supported — use ``skill_defaults`` / ``skill_params``
+    (e.g. ``single_arm.pick``, ``dual_arm.handover``, ``dual_arm.carry``).
     """
     if not isinstance(raw, Mapping):
-        raise TypeError(f"pick_place overrides must be a mapping, got {type(raw).__name__}")
-    merged: dict[str, Any] = {k: v for k, v in raw.items() if k not in ("pick", "place", "skill_params")}
-    pick = raw.get("pick")
-    place = raw.get("place")
-    if pick is not None:
-        if not isinstance(pick, Mapping):
-            raise TypeError(f'"pick" must be a mapping, got {type(pick).__name__}')
-        merged.update(dict(pick))
-    if place is not None:
-        if not isinstance(place, Mapping):
-            raise TypeError(f'"place" must be a mapping, got {type(place).__name__}')
-        merged.update(dict(place))
-    return merged
-
-
-def _load_module(module_name: str, file_path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Failed to load module spec: {file_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+        raise TypeError(f"task overrides must be a mapping, got {type(raw).__name__}")
+    ctx = "base_task_overrides or scene preset"
+    for key in _FORBIDDEN_ROOT_KEYS:
+        if key in raw:
+            raise ValueError(
+                f'{ctx}: root key "{key}" is not allowed. '
+                "Use skill_defaults / skill_params (see motion CLI merge order)."
+            )
+    skip = _FORBIDDEN_ROOT_KEYS | _STRIPPED_ROOT_KEYS
+    return {k: v for k, v in raw.items() if k not in skip}
 
 
 def _normalize_numeric_lists(obj: Any) -> Any:
@@ -72,13 +61,12 @@ def load_task_dict_from_yaml(path: Path) -> dict[str, Any]:
 
 
 def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> dict[str, dict[str, Any]]:
-    """Return ``task_key -> TASK_CONFIG`` for one robot's ``task_configs`` directory.
+    """Return ``task_key -> task config dict`` for one robot's ``task_configs`` directory.
 
-    For each basename (stem), **either** a ``.py`` **or** a ``.yaml``/``.yml`` may exist — not both.
+    Each task is defined by ``<stem>.yaml`` or ``<stem>.yml`` (one file per stem). Python
+    task modules (``*.py``) are not loaded.
     """
     stems: set[str] = set()
-    for p in task_cfg_dir.glob("*.py"):
-        stems.add(p.stem)
     for p in task_cfg_dir.glob("*.yaml"):
         stems.add(p.stem)
     for p in task_cfg_dir.glob("*.yml"):
@@ -86,38 +74,34 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> dict[st
 
     tasks: dict[str, dict[str, Any]] = {}
     for stem in sorted(stems):
-        py_path = task_cfg_dir / f"{stem}.py"
         yaml_path = task_cfg_dir / f"{stem}.yaml"
         yml_path = task_cfg_dir / f"{stem}.yml"
-        has_py = py_path.is_file()
-        has_yaml = yaml_path.is_file() or yml_path.is_file()
-        if has_py and has_yaml:
+        if yaml_path.is_file() and yml_path.is_file():
             raise ValueError(
-                f"Robot {robot_dir_name!r}: task {stem!r} has both "
-                f"{py_path.name} and a .yaml/.yml — keep only one."
+                f"Robot {robot_dir_name!r}: task {stem!r} has both {yaml_path.name} and {yml_path.name} "
+                f"— keep only one."
             )
-        if has_yaml:
-            path = yaml_path if yaml_path.is_file() else yml_path
-            raw = load_task_dict_from_yaml(path)
-        elif has_py:
-            task_mod = _load_module(f"{robot_dir_name}_{stem}_task_cfg", py_path)
-            raw = getattr(task_mod, "TASK_CONFIG", None)
-            if raw is None:
-                raw = getattr(task_mod, "FLOW_CONFIG", None)
-        else:
+        path = yaml_path if yaml_path.is_file() else yml_path
+        if not path.is_file():
             continue
+        raw = load_task_dict_from_yaml(path)
 
         if not isinstance(raw, dict):
             continue
         task_key = raw.get("task_key")
         if not isinstance(task_key, str):
             raise ValueError(f"Task config {stem!r} must define string task_key: {task_cfg_dir}")
+        tq = raw.get("task_queue")
+        if not isinstance(tq, list) or len(tq) == 0:
+            raise ValueError(
+                f"Robot {robot_dir_name!r} task {task_key!r}: requires a non-empty list 'task_queue'."
+            )
         tasks[task_key] = dict(raw)
     return tasks
 
 
 __all__ = [
     "discover_task_configs",
-    "flatten_pick_place_task_overrides",
+    "flatten_queue_task_overrides",
     "load_task_dict_from_yaml",
 ]

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import fields
 import importlib.util
 import sys
 from pathlib import Path
@@ -69,113 +69,31 @@ def _select_option(*, title: str, options: list[str], default_value: str) -> str
     return default_value
 
 
-def _apply_preset(base_cfg: Any, preset: dict[str, object]) -> Any:
-    valid_fields = {f.name for f in fields(type(base_cfg))}
-    unknown_keys = [k for k in preset if k not in valid_fields]
-    if unknown_keys:
-        raise ValueError(f"Unknown preset keys for {type(base_cfg).__name__}: {unknown_keys}")
-    return replace(base_cfg, **preset)
+def _merged_queue_allowed_keys() -> frozenset[str]:
+    from robot_action_composer.motion_generation.tasks.bimanual_carry import BimanualCarryTaskConfig  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.task_runtime.config import QUEUE_SINGLE_ARM_FLAT_KEYS  # pyright: ignore[reportMissingImports]
 
-
-def _merge_skill_params(
-    blocks: list[Any],
-    skill_defaults: dict[str, Any],
-    scene_skill_params: dict[str, Any],
-) -> list[Any]:
-    """三层合并 task_queue block 的最终 params。
-
-    合并优先级（后者覆盖前者）：
-      1. ``skill_defaults[param_key]``   — YAML 顶层定义的 skill 基准参数
-      2. ``block.params``                — task_queue 中内联的特例覆盖
-      3. ``scene_skill_params[param_key]`` — 当前 scene preset 的 skill_params 覆盖
-
-    ``param_key`` 取 block 的 ``id`` 字段（若存在），否则回退到 ``skill`` 名。
-    这样同一 skill 在队列中出现多次时可通过不同 ``id`` 绑定不同参数集，例如：
-
-        task_queue:
-          - skill: robot.navigate_to_object
-            id: nav_to_pick
-          - skill: robot.navigate_to_object
-            id: nav_to_place
-
-        skill_defaults:
-          nav_to_pick:  {approach_offset_x: -0.5, yaw: 0.0}
-          nav_to_place: {approach_offset_x:  0.3, yaw: 1.5708}
-
-    Args:
-        blocks: task_queue 原始 block 列表（dict 或 BlockSpec）。
-        skill_defaults: YAML 顶层 ``skill_defaults`` 字典。
-        scene_skill_params: 当前选中 scene preset 中的 ``skill_params`` 字典。
-
-    Returns:
-        新的 block 列表；params 未发生变化的 block 原样返回，不额外复制。
-    """
-    from dataclasses import replace as _dc_replace
-    from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec  # pyright: ignore[reportMissingImports]
-
-    def _merge_one_block(block: Any) -> Any:
-        """单个 block 合并（dict / BlockSpec / ParallelSpec）。"""
-        if isinstance(block, dict):
-            if "parallel" in block:
-                # parallel dict：递归合并每个子 block
-                merged_subs = [_merge_one_block(s) for s in block["parallel"]]
-                return {**block, "parallel": merged_subs}
-            skill = block.get("skill", "")
-            param_key: str = block.get("id") or skill
-            base_p: dict[str, Any] = dict(skill_defaults.get(param_key) or {})
-            inline_p: dict[str, Any] = dict(block.get("params") or {})
-            scene_p: dict[str, Any] = dict(scene_skill_params.get(param_key) or {})
-            merged_p = {**base_p, **inline_p, **scene_p}
-            if merged_p:
-                merged = dict(block)
-                merged["params"] = merged_p
-                return merged
-            return block
-        elif isinstance(block, ParallelSpec):
-            merged_skills = tuple(_merge_one_block(s) for s in block.skills)
-            if merged_skills != block.skills:
-                return ParallelSpec(skills=merged_skills)  # type: ignore[arg-type]
-            return block
-        elif isinstance(block, BlockSpec):
-            param_key = block.param_key
-            base_p = dict(skill_defaults.get(param_key) or {})
-            inline_p = dict(block.params)
-            scene_p = dict(scene_skill_params.get(param_key) or {})
-            merged_p = {**base_p, **inline_p, **scene_p}
-            if merged_p != dict(block.params):
-                return _dc_replace(block, params=merged_p)
-            return block
-        return block
-
-    if not skill_defaults and not scene_skill_params:
-        return blocks
-    return [_merge_one_block(b) for b in blocks]
-
-
+    names: set[str] = set(QUEUE_SINGLE_ARM_FLAT_KEYS)
+    for cls in (BimanualCarryTaskConfig, HandoverSyncConfig, DrawerGeometryConfig):
+        names |= {f.name for f in fields(cls)}
+    return frozenset(names)
 
 
 def run_motion_generation(*, isaac_dir: Path) -> None:
-    from robot_action_composer.motion_generation.handover import (  # pyright: ignore[reportMissingImports]
-        flatten_handover_task_overrides,
-        format_handover_task_cfg_summary,
+    from robot_action_composer.task_config_io import flatten_queue_task_overrides
+    from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
+        merge_flat_with_skill_carry,
+        merge_flat_with_skill_drawer,
+        merge_flat_with_skill_handover,
+        merge_flat_with_skill_pick_place,
+        merge_scene_skill_overlays_into_flat,
+        merge_task_queue_skill_params,
     )
-    from robot_action_composer.task_config_io import flatten_pick_place_task_overrides
-    from robot_action_composer.motion_generation.pick_place import (  # pyright: ignore[reportMissingImports]
-        PickPlaceFlowTaskConfig,
-        format_pick_place_cfg_summary,
-        run_pick_place_demo,
-    )
-    from robot_action_composer.motion_generation.drawer import (  # pyright: ignore[reportMissingImports]
-        DrawerPickPlaceTaskConfig,
-        flatten_drawer_pick_place_task_overrides,
-        format_drawer_task_cfg_summary,
-        run_drawer_demo,
-    )
-    from robot_action_composer.motion_generation.handover import HandoverTaskConfig  # pyright: ignore[reportMissingImports]
-    from robot_action_composer.motion_generation.bimanual_carry import (  # pyright: ignore[reportMissingImports]
-        BimanualCarryTaskConfig,
-        flatten_bimanual_carry_task_overrides,
-        format_bimanual_carry_task_cfg_summary,
+    from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
+        build_merged_queue_from_flat,
+        format_merged_queue_summary,
     )
     from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
         prompt_positive_int,
@@ -216,7 +134,6 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
         min_value=1,
     )
 
-    # 多段运行时每段之间需要重置仿真/随机化物体；仅单段时可选择不重置。
     if num_runs > 1:
         reset_env = True
         print(
@@ -232,175 +149,64 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
 
     use_stamped = task_entry.get("use_stamped", True)
 
-    if task_entry["kind"] == "pick_place":
-        base_task_cfg = PickPlaceFlowTaskConfig(
-            **flatten_pick_place_task_overrides(task_entry["base_task_overrides"])
+    allowed = _merged_queue_allowed_keys()
+    base_flat = merge_flat_with_skill_pick_place(
+        flatten_queue_task_overrides(task_entry["base_task_overrides"]),
+        task_entry.get("skill_defaults"),
+    )
+    base_flat = merge_flat_with_skill_handover(base_flat, task_entry.get("skill_defaults"))
+    base_flat = merge_flat_with_skill_carry(base_flat, task_entry.get("skill_defaults"))
+    base_flat = merge_flat_with_skill_drawer(base_flat, task_entry.get("skill_defaults"))
+    scene_sd = scene_presets.get(scene, {})
+    scene_flat = merge_scene_skill_overlays_into_flat(
+        flatten_queue_task_overrides(scene_sd),
+        scene_sd,
+    )
+    unknown_scene = [k for k in scene_flat if k not in allowed]
+    if unknown_scene:
+        raise ValueError(f"Unknown scene preset keys for queue task: {unknown_scene}")
+    merged_flat = {**base_flat, **scene_flat}
+    unknown_merged = [k for k in merged_flat if k not in allowed]
+    if unknown_merged:
+        raise ValueError(f"Unknown task/scene keys for queue task: {unknown_merged}")
+
+    runtime = build_merged_queue_from_flat(merged_flat)
+    print(format_merged_queue_summary(scene, runtime))
+
+    task_queue = task_entry.get("task_queue")
+    if not task_queue:
+        raise ValueError(f"Motion generation: task {task_key!r} must define a non-empty 'task_queue'.")
+
+    import robot_action_composer.task_runtime.skills  # noqa: F401 - register built-in skills
+
+    from robot_action_composer.task_runtime.runner import run_task_queue  # pyright: ignore[reportMissingImports]
+
+    skill_defaults = task_entry.get("skill_defaults") or {}
+    scene_skill_params = scene_presets.get(scene, {}).get("skill_params") or {}
+    merged_queue = merge_task_queue_skill_params(list(task_queue), skill_defaults, scene_skill_params)
+
+    skip_movej = {
+        "dual_arm.movej_return_initial",
+        "joint.movej_return_initial",
+        "single_arm.movej_return_initial",
+    }
+
+    for run_idx in range(num_runs):
+        print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} (task queue)\n{'=' * 70}")
+        queue_for_run = list(merged_queue)
+        if num_runs == 1:
+            queue_for_run = [
+                blk
+                for blk in queue_for_run
+                if str(blk.get("skill", "")).strip() not in skip_movej
+            ]
+            if len(queue_for_run) != len(merged_queue):
+                print("[info] Single run: skipping final movej_return_initial block(s) by default.")
+        run_task_queue(
+            robot_cfg=robot_entry["robot_cfg"],
+            runtime=runtime,
+            robot_id=task_entry["robot_id"],
+            blocks=queue_for_run,
+            reset_env=reset_env,
+            use_stamped=use_stamped,
         )
-        task_cfg = _apply_preset(
-            base_task_cfg,
-            flatten_pick_place_task_overrides(scene_presets.get(scene, {})),
-        )
-        print(format_pick_place_cfg_summary(scene, task_cfg))
-        task_queue = task_entry.get("task_queue")
-        if task_queue:
-            import robot_action_composer.task_runtime.skills  # noqa: F401 - register built-in skills
-
-            from robot_action_composer.task_runtime.runner import run_single_arm_task_queue  # pyright: ignore[reportMissingImports]
-
-            skill_defaults = task_entry.get("skill_defaults") or {}
-            scene_skill_params = scene_presets.get(scene, {}).get("skill_params") or {}
-            merged_queue = _merge_skill_params(list(task_queue), skill_defaults, scene_skill_params)
-            for run_idx in range(num_runs):
-                print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} (task queue)\n{'=' * 70}")
-                run_single_arm_task_queue(
-                    robot_cfg=robot_entry["robot_cfg"],
-                    task_cfg=task_cfg,
-                    robot_id=task_entry["robot_id"],
-                    blocks=merged_queue,
-                    reset_env=reset_env,
-                    use_stamped=use_stamped,
-                )
-            return
-        for run_idx in range(num_runs):
-            print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs}\n{'=' * 70}")
-            run_pick_place_demo(
-                robot_cfg=robot_entry["robot_cfg"],
-                task_cfg=task_cfg,
-                robot_id=task_entry["robot_id"],
-                reset_env=reset_env,
-                use_stamped=use_stamped,
-            )
-        return
-
-    if task_entry["kind"] == "drawer":
-        base_task_cfg = DrawerPickPlaceTaskConfig(
-            **flatten_drawer_pick_place_task_overrides(task_entry["base_task_overrides"])
-        )
-        task_cfg = _apply_preset(
-            base_task_cfg,
-            flatten_drawer_pick_place_task_overrides(scene_presets.get(scene, {})),
-        )
-        print(format_drawer_task_cfg_summary(scene, task_cfg))
-        task_queue = task_entry.get("task_queue")
-        if task_queue:
-            import robot_action_composer.task_runtime.skills  # noqa: F401 - register skills
-
-            from robot_action_composer.task_runtime.runner import run_drawer_pick_place_task_queue  # pyright: ignore[reportMissingImports]
-
-            skill_defaults = task_entry.get("skill_defaults") or {}
-            scene_skill_params = scene_presets.get(scene, {}).get("skill_params") or {}
-            merged_queue = _merge_skill_params(list(task_queue), skill_defaults, scene_skill_params)
-            for run_idx in range(num_runs):
-                print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} (drawer task queue)\n{'=' * 70}")
-                run_drawer_pick_place_task_queue(
-                    robot_cfg=robot_entry["robot_cfg"],
-                    task_cfg=task_cfg,
-                    robot_id=task_entry["robot_id"],
-                    blocks=merged_queue,
-                    reset_env=reset_env,
-                    use_stamped=use_stamped,
-                )
-            return
-        for run_idx in range(num_runs):
-            print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs}\n{'=' * 70}")
-            run_drawer_demo(
-                robot_cfg=robot_entry["robot_cfg"],
-                task_cfg=task_cfg,
-                robot_id=task_entry["robot_id"],
-                reset_env=reset_env,
-                use_stamped=use_stamped,
-            )
-        return
-
-    if task_entry["kind"] == "handover":
-        base_task_cfg = HandoverTaskConfig(
-            **flatten_handover_task_overrides(task_entry["base_task_overrides"])
-        )
-        task_cfg = _apply_preset(
-            base_task_cfg,
-            flatten_handover_task_overrides(scene_presets.get(scene, {})),
-        )
-        print(format_handover_task_cfg_summary(scene, task_cfg))
-        task_queue = task_entry.get("task_queue")
-        if task_queue:
-            import robot_action_composer.task_runtime.skills  # noqa: F401 - register skills
-
-            from robot_action_composer.task_runtime.runner import run_handover_task_queue  # pyright: ignore[reportMissingImports]
-
-            skill_defaults = task_entry.get("skill_defaults") or {}
-            scene_skill_params = scene_presets.get(scene, {}).get("skill_params") or {}
-            queue_for_run = _merge_skill_params(list(task_queue), skill_defaults, scene_skill_params)
-            if num_runs == 1:
-                queue_for_run = [
-                    blk
-                    for blk in queue_for_run
-                    if str(blk.get("skill", "")).strip() != "handover.movej_return_initial"
-                ]
-                if len(queue_for_run) != len(task_queue):
-                    print("[info] Single run: skip 'handover.movej_return_initial' by default.")
-
-            for run_idx in range(num_runs):
-                print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} (handover task queue)\n{'=' * 70}")
-                run_handover_task_queue(
-                    robot_cfg=robot_entry["robot_cfg"],
-                    task_cfg=task_cfg,
-                    robot_id=task_entry["robot_id"],
-                    blocks=queue_for_run,
-                    reset_env=reset_env,
-                    use_stamped=use_stamped,
-                )
-            return
-        raise ValueError(
-            "handover now requires task_queue in task config; "
-            "legacy run_handover_demo path is disabled."
-        )
-
-    if task_entry["kind"] == "bimanual_carry":
-        base_task_cfg = BimanualCarryTaskConfig(
-            **flatten_bimanual_carry_task_overrides(task_entry["base_task_overrides"])
-        )
-        task_cfg = _apply_preset(
-            base_task_cfg,
-            flatten_bimanual_carry_task_overrides(scene_presets.get(scene, {})),
-        )
-        print(format_bimanual_carry_task_cfg_summary(scene, task_cfg))
-        task_queue = task_entry.get("task_queue")
-        if task_queue:
-            import robot_action_composer.task_runtime.skills  # noqa: F401 - register skills
-
-            from robot_action_composer.task_runtime.runner import run_bimanual_task_queue  # pyright: ignore[reportMissingImports]
-
-            skill_defaults = task_entry.get("skill_defaults") or {}
-            scene_skill_params = scene_presets.get(scene, {}).get("skill_params") or {}
-            queue_for_run = _merge_skill_params(list(task_queue), skill_defaults, scene_skill_params)
-            if num_runs == 1:
-                def _is_movej_block(block: object) -> bool:
-                    if isinstance(block, dict):
-                        return str(block.get("skill", "")).strip() == "bimanual.movej_return_initial"
-                    return getattr(block, "skill", "") == "bimanual.movej_return_initial"
-
-                queue_for_run = [
-                    blk
-                    for blk in queue_for_run
-                    if not _is_movej_block(blk)
-                ]
-                if len(queue_for_run) != len(task_queue):
-                    print("[info] Single run: skip 'bimanual.movej_return_initial' by default.")
-
-            for run_idx in range(num_runs):
-                print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} (bimanual task queue)\n{'=' * 70}")
-                run_bimanual_task_queue(
-                    robot_cfg=robot_entry["robot_cfg"],
-                    task_cfg=task_cfg,
-                    robot_id=task_entry["robot_id"],
-                    blocks=queue_for_run,
-                    reset_env=reset_env,
-                    use_stamped=use_stamped,
-                )
-            return
-        raise ValueError(
-            "bimanual_carry now requires task_queue in task config; "
-            "legacy run_bimanual_carry_demo has been removed."
-        )
-
-    raise ValueError(f"Unsupported task kind: {task_entry['kind']}")

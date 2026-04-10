@@ -1,5 +1,8 @@
 """Cartesian stage sequences and execution on :class:`ROS2RobotInterface`.
 
+本模块位于 :mod:`robot_action_composer.motion_generation.sequence`；同级的
+:mod:`robot_action_composer.motion_generation.tasks` 中的模块在其上组合具体任务序列。
+
 Pose-native builders for common motion sequences (pick, place, handover, carry)
 and a configurable executor for unstamped / stamped / dual-arm stamped targets.
 """
@@ -68,17 +71,25 @@ class ArmTarget:
     gripper: float
 
 
-ArmStage = tuple[str, ArmTarget]
-"""(stage_name, arm_target) — arm-agnostic; left/right assigned later."""
+@dataclass(frozen=True)
+class ArmStage:
+    """单臂侧一段（尚未绑定 left/right）：名称 + 目标 + 是否在发送后等待夹爪稳定。"""
+
+    name: str
+    target: ArmTarget
+    wait_gripper_settle: bool = False
 
 
 @dataclass
 class StageTarget:
     """A single execution stage with optional left/right arm targets."""
+
     name: str
     left: ArmTarget | None = None
     right: ArmTarget | None = None
     frame_id: str | None = None
+    #: 为 True 时，在发臂目标与夹爪指令后额外 ``sleep(gripper_action_wait)``（替代按名字子串猜测）。
+    wait_gripper_settle: bool = False
 
     def to_action_dict(
         self,
@@ -226,23 +237,24 @@ def build_single_arm_pick_sequence(
     )
 
     return [
-        (
+        ArmStage(
             _stage_name(stage_prefix, 1, PICK_STAGE_SUFFIXES[0]),
             ArmTarget(pose=approach_pose, gripper=gripper_open),
         ),
-        (
+        ArmStage(
             _stage_name(stage_prefix, 2, PICK_STAGE_SUFFIXES[1]),
             ArmTarget(pose=close_in_pose, gripper=gripper_open),
         ),
-        (
+        ArmStage(
             _stage_name(stage_prefix, 3, PICK_STAGE_SUFFIXES[2]),
             ArmTarget(pose=close_in_pose, gripper=gripper_closed),
+            wait_gripper_settle=True,
         ),
-        (
+        ArmStage(
             _stage_name(stage_prefix, 4, PICK_STAGE_SUFFIXES[3]),
             ArmTarget(pose=lift_pose, gripper=gripper_closed),
         ),
-        (
+        ArmStage(
             _stage_name(stage_prefix, 5, PICK_STAGE_SUFFIXES[4]),
             ArmTarget(pose=retreat_pose, gripper=gripper_closed),
         ),
@@ -310,7 +322,7 @@ def build_single_arm_place_sequence(
 
     if need_approach:
         stages.append(
-            (
+            ArmStage(
                 _stage_name(stage_prefix, idx, "Approach"),
                 ArmTarget(pose=approach_pose, gripper=gripper_closed),
             ),
@@ -318,21 +330,22 @@ def build_single_arm_place_sequence(
         idx += 1
 
     stages.append(
-        (
+        ArmStage(
             _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[0]),
             ArmTarget(pose=final_pose, gripper=gripper_closed),
         ),
     )
     idx += 1
     stages.append(
-        (
+        ArmStage(
             _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[1]),
             ArmTarget(pose=final_pose, gripper=gripper_open),
+            wait_gripper_settle=True,
         ),
     )
     idx += 1
     stages.append(
-        (
+        ArmStage(
             _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[2]),
             ArmTarget(pose=retract_pose, gripper=gripper_open),
         ),
@@ -346,7 +359,7 @@ def build_single_arm_return_home_sequence(
     gripper: float,
     stage_name: str = "Return-1-ReturnHome",
 ) -> list[ArmStage]:
-    return [(stage_name, ArmTarget(pose=home_pose, gripper=gripper))]
+    return [ArmStage(stage_name, ArmTarget(pose=home_pose, gripper=gripper))]
 
 
 # ---------------------------------------------------------------------------
@@ -359,11 +372,23 @@ def assign_to_arm(
 ) -> list[StageTarget]:
     """Assign an arm-agnostic sequence to a specific arm side."""
     result: list[StageTarget] = []
-    for name, target in sequence:
+    for spec in sequence:
         if side == ArmSide.LEFT:
-            result.append(StageTarget(name=name, left=target))
+            result.append(
+                StageTarget(
+                    name=spec.name,
+                    left=spec.target,
+                    wait_gripper_settle=spec.wait_gripper_settle,
+                ),
+            )
         else:
-            result.append(StageTarget(name=name, right=target))
+            result.append(
+                StageTarget(
+                    name=spec.name,
+                    right=spec.target,
+                    wait_gripper_settle=spec.wait_gripper_settle,
+                ),
+            )
     return result
 
 
@@ -378,11 +403,18 @@ def compose_bimanual_synchronized_sequence(
             "for synchronized composition"
         )
     merged: list[StageTarget] = []
-    for idx, ((left_name, left_target), (right_name, right_target)) in enumerate(
-        zip(left_sequence, right_sequence), start=1,
-    ):
-        stage_label = f"{idx:02d}-{left_name}|{right_name}"
-        merged.append(StageTarget(name=stage_label, left=left_target, right=right_target))
+    for idx, (left_spec, right_spec) in enumerate(zip(left_sequence, right_sequence), start=1):
+        stage_label = f"{idx:02d}-{left_spec.name}|{right_spec.name}"
+        merged.append(
+            StageTarget(
+                name=stage_label,
+                left=left_spec.target,
+                right=right_spec.target,
+                wait_gripper_settle=(
+                    left_spec.wait_gripper_settle or right_spec.wait_gripper_settle
+                ),
+            ),
+        )
     return merged
 
 
@@ -401,16 +433,45 @@ def build_handover_sequence(
     source_closed = ArmTarget(pose=source_handover_pose, gripper=gripper_closed)
     source_open = ArmTarget(pose=source_handover_pose, gripper=gripper_open)
 
-    def _target(idx: int, suffix: str, src: ArmTarget, rcv: ArmTarget) -> StageTarget:
+    def _target(
+        idx: int,
+        suffix: str,
+        src: ArmTarget,
+        rcv: ArmTarget,
+        *,
+        wait_gripper_settle: bool = False,
+    ) -> StageTarget:
         name = _stage_name(stage_prefix, idx, suffix)
         if source_arm == ArmSide.LEFT:
-            return StageTarget(name=name, left=src, right=rcv)
-        return StageTarget(name=name, left=rcv, right=src)
+            return StageTarget(
+                name=name,
+                left=src,
+                right=rcv,
+                wait_gripper_settle=wait_gripper_settle,
+            )
+        return StageTarget(
+            name=name,
+            left=rcv,
+            right=src,
+            wait_gripper_settle=wait_gripper_settle,
+        )
 
     return [
         _target(1, HANDOVER_STAGE_SUFFIXES[0], source_closed, receiver_open),
-        _target(2, HANDOVER_STAGE_SUFFIXES[1], source_closed, receiver_closed),
-        _target(3, HANDOVER_STAGE_SUFFIXES[2], source_open, receiver_closed),
+        _target(
+            2,
+            HANDOVER_STAGE_SUFFIXES[1],
+            source_closed,
+            receiver_closed,
+            wait_gripper_settle=True,
+        ),
+        _target(
+            3,
+            HANDOVER_STAGE_SUFFIXES[2],
+            source_open,
+            receiver_closed,
+            wait_gripper_settle=True,
+        ),
     ]
 
 
@@ -503,6 +564,7 @@ def build_bimanual_carry_sequence(
             name=_stage_name(stage_prefix, 4, CARRY_STAGE_SUFFIXES[3]),
             left=ArmTarget(pose=closein_l, gripper=gripper_closed),
             right=ArmTarget(pose=closein_r, gripper=gripper_closed),
+            wait_gripper_settle=True,
         ),
         StageTarget(
             name=_stage_name(stage_prefix, 5, CARRY_STAGE_SUFFIXES[4]),
@@ -590,6 +652,10 @@ def execute_stage_sequence(
     Which arms are waited on is determined automatically from which
     :class:`ArmTarget` slots are populated in each stage — no need for
     ``wait_both_arms`` / ``single_arm_part`` parameters.
+
+    After each stage, if :attr:`StageTarget.wait_gripper_settle` is True, calls
+    ``sleep_fn(gripper_action_wait)`` so the gripper can finish closing/opening
+    (set by built-in pick/place/handover/carry builders; custom stages may set it explicitly).
     """
     for stage in sequence:
         logger.info("[Stage] %s", stage.name)
@@ -629,7 +695,7 @@ def execute_stage_sequence(
                 ),
             )
 
-        if "Grasp" in stage.name or "Release" in stage.name:
+        if stage.wait_gripper_settle:
             sleep_fn(gripper_action_wait)
 
         not_arrived = {

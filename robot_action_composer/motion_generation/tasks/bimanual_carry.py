@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Default IsaacSim bimanual carry demo flow."""
+"""Bimanual carry task config and Cartesian sequence for task-queue execution."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 from geometry_msgs.msg import Pose
 
-from robot_action_composer.cartesian_stages import (  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     StageTarget,
     build_bimanual_carry_sequence,
 )
 
-from robot_action_composer.demo_preset_utils import resolve_dataclass_cfg_from_presets
+# ``build_bimanual_carry_sequence`` 阶段顺序：Approach, Forward, CloseIn | Grasp | Lift, Retreat
+CARRY_APPROACH_STAGE_COUNT = 3
+CARRY_GRASP_STAGE_COUNT = 1
+CARRY_LIFT_RETREAT_STAGE_COUNT = 2
+CARRY_TOTAL_STAGES = CARRY_APPROACH_STAGE_COUNT + CARRY_GRASP_STAGE_COUNT + CARRY_LIFT_RETREAT_STAGE_COUNT
 
 
 @dataclass(frozen=True)
@@ -30,38 +34,6 @@ class BimanualCarryTaskConfig:
     object_xyz_random_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
-def flatten_bimanual_carry_task_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge optional ``carry`` block into flat ``BimanualCarryTaskConfig`` kwargs.
-
-    Top-level keys (except ``carry``) apply first; ``carry`` mapping overrides/extends them.
-    """
-    if not isinstance(raw, Mapping):
-        raise TypeError(f"carry overrides must be a mapping, got {type(raw).__name__}")
-    merged: dict[str, Any] = {k: v for k, v in raw.items() if k not in ("carry", "skill_params")}
-    carry = raw.get("carry")
-    if carry is not None:
-        if not isinstance(carry, Mapping):
-            raise TypeError(f'"carry" must be a mapping, got {type(carry).__name__}')
-        merged.update(dict(carry))
-    return merged
-
-
-def resolve_bimanual_carry_task_cfg_from_presets(
-    *,
-    base_task_cfg: BimanualCarryTaskConfig,
-    scene_presets: dict[str, dict[str, object]],
-    cli_description: str,
-    default_scene: str = "default",
-) -> tuple[str, BimanualCarryTaskConfig]:
-    scene, task_cfg = resolve_dataclass_cfg_from_presets(
-        base_cfg=base_task_cfg,
-        scene_presets=scene_presets,
-        cli_description=cli_description,
-        default_scene=default_scene,
-    )
-    return scene, task_cfg
-
-
 def format_bimanual_carry_task_cfg_summary(
     scene: str, task_cfg: BimanualCarryTaskConfig,
 ) -> str:
@@ -71,6 +43,15 @@ def format_bimanual_carry_task_cfg_summary(
         f"approach_offset={task_cfg.approach_offset}, "
         f"lift_offset={task_cfg.lift_offset}, retreat_offset={task_cfg.retreat_offset}"
     )
+
+
+def slice_carry_stages_for_queue(full: list[StageTarget]) -> tuple[list[StageTarget], list[StageTarget], list[StageTarget]]:
+    """将完整 6 段搬运序列切成队列用的三段（与 :data:`CARRY_TOTAL_STAGES` 一致）。"""
+    if len(full) != CARRY_TOTAL_STAGES:
+        raise ValueError(f"expected {CARRY_TOTAL_STAGES} carry stages, got {len(full)}")
+    i = CARRY_APPROACH_STAGE_COUNT
+    j = i + CARRY_GRASP_STAGE_COUNT
+    return full[0:i], full[i:j], full[j:]
 
 
 def build_bimanual_carry_record_sequence(

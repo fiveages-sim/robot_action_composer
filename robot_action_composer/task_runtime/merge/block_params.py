@@ -1,0 +1,166 @@
+"""将 ``skill_defaults`` 与场景 ``skill_params`` 合并进 ``task_queue`` 各块的 ``params``。"""
+
+from __future__ import annotations
+
+from dataclasses import replace as _dc_replace
+from typing import Any
+
+from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec
+
+_DRAWER_SKILL_PREFIX = "single_arm.drawer."
+
+
+def _inherits_dual_arm_carry_block(param_key: str) -> bool:
+    """``dual_arm.carry`` / ``carry_pregrasp`` / ``carry_approach`` / … 共用 ``dual_arm.carry`` YAML 默认。"""
+    return param_key == "dual_arm.carry" or param_key.startswith("dual_arm.carry_")
+
+
+def _skill_defaults_for_param_key(param_key: str, skill_defaults: dict[str, Any]) -> dict[str, Any]:
+    if param_key.startswith(_DRAWER_SKILL_PREFIX):
+        return {
+            **dict(skill_defaults.get("single_arm.drawer") or {}),
+            **dict(skill_defaults.get(param_key) or {}),
+        }
+    if _inherits_dual_arm_carry_block(param_key):
+        return {
+            **dict(skill_defaults.get("dual_arm.carry") or {}),
+            **dict(skill_defaults.get(param_key) or {}),
+        }
+    return dict(skill_defaults.get(param_key) or {})
+
+
+def _skill_defaults_for_block(skill: str, param_key: str, skill_defaults: dict[str, Any]) -> dict[str, Any]:
+    """带 ``id`` 的 ``single_arm.pick`` / ``place`` / ``pregrasp`` 先铺对应 ``single_arm.*`` 再叠 ``skill_defaults[id]``。"""
+    if skill == "dual_arm.handover_sync":
+        merged = dict(skill_defaults.get("dual_arm.handover") or {})
+        if param_key != "dual_arm.handover_sync":
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.carry" or skill.startswith("dual_arm.carry_"):
+        merged = dict(skill_defaults.get("dual_arm.carry") or {})
+        if param_key != skill:
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "single_arm.pick":
+        merged = dict(skill_defaults.get("single_arm.pick") or {})
+        if param_key != "single_arm.pick":
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "single_arm.place":
+        merged = dict(skill_defaults.get("single_arm.place") or {})
+        if param_key != "single_arm.place":
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "single_arm.pregrasp":
+        pick_sd = dict(skill_defaults.get("single_arm.pick") or {})
+        merged: dict[str, Any] = {}
+        arm_v = pick_sd.get("arm")
+        if isinstance(arm_v, str) and arm_v.strip():
+            merged["arm"] = arm_v.strip()
+        merged.update(dict(skill_defaults.get("single_arm.pregrasp") or {}))
+        if param_key != "single_arm.pregrasp":
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    return _skill_defaults_for_param_key(param_key, skill_defaults)
+
+
+def _scene_params_for_param_key(param_key: str, scene_skill_params: dict[str, Any]) -> dict[str, Any]:
+    if param_key.startswith(_DRAWER_SKILL_PREFIX):
+        return {
+            **dict(scene_skill_params.get("single_arm.drawer") or {}),
+            **dict(scene_skill_params.get(param_key) or {}),
+        }
+    if _inherits_dual_arm_carry_block(param_key):
+        return {
+            **dict(scene_skill_params.get("dual_arm.carry") or {}),
+            **dict(scene_skill_params.get(param_key) or {}),
+        }
+    return dict(scene_skill_params.get(param_key) or {})
+
+
+def _scene_params_for_block(skill: str, param_key: str, scene_skill_params: dict[str, Any]) -> dict[str, Any]:
+    if skill == "dual_arm.handover_sync":
+        merged = dict(scene_skill_params.get("dual_arm.handover") or {})
+        if param_key != "dual_arm.handover_sync":
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.carry" or skill.startswith("dual_arm.carry_"):
+        merged = dict(scene_skill_params.get("dual_arm.carry") or {})
+        if param_key != skill:
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "single_arm.pick":
+        merged = dict(scene_skill_params.get("single_arm.pick") or {})
+        if param_key != "single_arm.pick":
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "single_arm.place":
+        merged = dict(scene_skill_params.get("single_arm.place") or {})
+        if param_key != "single_arm.place":
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "single_arm.pregrasp":
+        pick_sp = dict(scene_skill_params.get("single_arm.pick") or {})
+        merged = {}
+        arm_v = pick_sp.get("arm")
+        if isinstance(arm_v, str) and arm_v.strip():
+            merged["arm"] = arm_v.strip()
+        merged.update(dict(scene_skill_params.get("single_arm.pregrasp") or {}))
+        if param_key != "single_arm.pregrasp":
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    return _scene_params_for_param_key(param_key, scene_skill_params)
+
+
+def merge_task_queue_skill_params(
+    blocks: list[Any],
+    skill_defaults: dict[str, Any],
+    scene_skill_params: dict[str, Any],
+) -> list[Any]:
+    """三层合并 task_queue block 的最终 params（与 motion CLI 逻辑一致）。
+
+    合并优先级（后者覆盖前者）：
+      1. ``skill_defaults``（``dual_arm.handover_sync`` 先铺 ``dual_arm.handover``；``dual_arm.carry`` /
+         及 ``dual_arm.carry_*`` 先铺 ``dual_arm.carry``；``single_arm.pick`` / ``place`` / ``pregrasp`` 带 ``id``
+         时先铺对应 ``single_arm.*``；drawer 规则不变）
+      2. ``block.params``
+      3. ``scene_skill_params``（与 1 对称）
+
+    ``param_key`` 为 block 的 ``id``（若存在），否则为 ``skill`` 名。
+    """
+    if not skill_defaults and not scene_skill_params:
+        return blocks
+
+    def _merge_one_block(block: Any) -> Any:
+        if isinstance(block, dict):
+            if "parallel" in block:
+                merged_subs = [_merge_one_block(s) for s in block["parallel"]]
+                return {**block, "parallel": merged_subs}
+            skill = block.get("skill", "")
+            param_key: str = block.get("id") or skill
+            base_p = _skill_defaults_for_block(skill, param_key, skill_defaults)
+            inline_p: dict[str, Any] = dict(block.get("params") or {})
+            scene_p = _scene_params_for_block(skill, param_key, scene_skill_params)
+            merged_p = {**base_p, **inline_p, **scene_p}
+            if merged_p:
+                merged = dict(block)
+                merged["params"] = merged_p
+                return merged
+            return block
+        if isinstance(block, ParallelSpec):
+            merged_skills = tuple(_merge_one_block(s) for s in block.skills)
+            if merged_skills != block.skills:
+                return ParallelSpec(skills=merged_skills)  # type: ignore[arg-type]
+            return block
+        if isinstance(block, BlockSpec):
+            param_key = block.param_key
+            base_p = _skill_defaults_for_block(block.skill, param_key, skill_defaults)
+            inline_p = dict(block.params)
+            scene_p = _scene_params_for_block(block.skill, param_key, scene_skill_params)
+            merged_p = {**base_p, **inline_p, **scene_p}
+            if merged_p != dict(block.params):
+                return _dc_replace(block, params=merged_p)
+            return block
+        return block
+
+    return [_merge_one_block(b) for b in blocks]

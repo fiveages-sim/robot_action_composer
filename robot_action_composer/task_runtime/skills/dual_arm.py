@@ -1,0 +1,217 @@
+"""Dual-arm queue skills (``dual_arm.*``): carry + handover sync + movej home."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
+    ArmTarget,
+    SendMode,
+    StageTarget,
+)
+
+from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
+
+from robot_action_composer.motion_generation.tasks.bimanual_carry import (  # pyright: ignore[reportMissingImports]
+    BimanualCarryTaskConfig,
+    build_bimanual_carry_record_sequence,
+    slice_carry_stages_for_queue,
+)
+from robot_action_composer.motion_generation.tasks.handover import build_handover_sync_sequence  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.tasks.movej_return import movej_return_to_initial_state  # pyright: ignore[reportMissingImports]
+
+from robot_action_composer.task_runtime.context import QueueRuntimeContext
+from robot_action_composer.task_runtime.registry import register_skill
+from robot_action_composer.task_runtime.types import ExecutionMeta
+
+
+def _dual_mode(ctx: QueueRuntimeContext) -> SendMode:
+    return SendMode.DUAL_ARM_STAMPED if ctx.use_stamped else SendMode.UNSTAMPED
+
+
+def _require_carry(ctx: QueueRuntimeContext) -> BimanualCarryTaskConfig:
+    c = ctx.carry_task_cfg
+    if c is None:
+        raise TypeError("dual_arm.carry* skills require carry_task_cfg (bimanual / carry fields in YAML)")
+    return c
+
+
+def _carry_full_stages(ctx: QueueRuntimeContext, cfg: BimanualCarryTaskConfig, object_center: Any) -> list[StageTarget]:
+    return build_bimanual_carry_record_sequence(
+        carry_task_cfg=cfg,
+        object_center=object_center,
+        gripper_open=ctx.gripper_open,
+        gripper_closed=ctx.gripper_closed,
+    )
+
+
+def _require_handover_sync(ctx: QueueRuntimeContext):
+    h = ctx.handover_sync
+    if h is None:
+        raise TypeError(
+            "dual_arm.handover_sync requires handover_sync (merged from skill_defaults.dual_arm.handover; "
+            "need handover_position + orientations). Pick side arm comes from common.arm / single_arm.pick."
+        )
+    return h
+
+
+def skill_carry_pregrasp(
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    if ctx.left_home_pose is None or ctx.right_home_pose is None:
+        raise RuntimeError("carry pregrasp requires left_home_pose and right_home_pose on ctx")
+    stages = [
+        StageTarget(
+            name="TaskQ-Bimanual-pregrasp",
+            left=ArmTarget(pose=ctx.left_home_pose, gripper=ctx.gripper_open),
+            right=ArmTarget(pose=ctx.right_home_pose, gripper=ctx.gripper_open),
+        )
+    ]
+    return stages, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.ee_frame_id,
+        warn_prefix="TaskQ dual_arm carry pregrasp timeout",
+    )
+
+
+def skill_carry_approach(
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运：Approach → Forward → CloseIn（夹爪张开）。写入 ``ctx.carry_object_center`` 供后续段复用。"""
+    cfg = _require_carry(ctx)
+    object_center = get_object_pose_from_service(
+        ctx.base_world_pos,
+        ctx.base_world_quat,
+        cfg.source_object_entity_path,
+        include_orientation=False,
+    )
+    ctx.carry_object_center = object_center
+    full = _carry_full_stages(ctx, cfg, object_center)
+    approach, _g, _lr = slice_carry_stages_for_queue(full)
+    return approach, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm carry approach timeout",
+    )
+
+
+def skill_carry_grasp(
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运：Grasp（闭合）。须先于本块执行 ``dual_arm.carry_approach`` 以填充 ``ctx.carry_object_center``。"""
+    cfg = _require_carry(ctx)
+    oc = ctx.carry_object_center
+    if oc is None:
+        oc = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            cfg.source_object_entity_path,
+            include_orientation=False,
+        )
+        ctx.carry_object_center = oc
+    full = _carry_full_stages(ctx, cfg, oc)
+    _a, grasp, _lr = slice_carry_stages_for_queue(full)
+    return grasp, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm carry grasp timeout",
+    )
+
+
+def skill_carry_lift_retreat(
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运：Lift → Retreat。"""
+    cfg = _require_carry(ctx)
+    oc = ctx.carry_object_center
+    if oc is None:
+        oc = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            cfg.source_object_entity_path,
+            include_orientation=False,
+        )
+        ctx.carry_object_center = oc
+    full = _carry_full_stages(ctx, cfg, oc)
+    _a, _g, lift_retreat = slice_carry_stages_for_queue(full)
+    return lift_retreat, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm carry lift/retreat timeout",
+    )
+
+
+def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运：一次执行全部 6 段（兼容旧队列；新任务推荐 ``carry_approach`` / ``grasp`` / ``lift_retreat``）。"""
+    cfg = _require_carry(ctx)
+    object_center = get_object_pose_from_service(
+        ctx.base_world_pos,
+        ctx.base_world_quat,
+        cfg.source_object_entity_path,
+        include_orientation=False,
+    )
+    ctx.carry_object_center = object_center
+    stages = _carry_full_stages(ctx, cfg, object_center)
+    return stages, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm carry timeout",
+    )
+
+
+def skill_handover_sync(
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂同步交接（``build_handover_sequence``）；抓取 / 放置由 ``single_arm.pick`` / ``place`` 承担。"""
+    hcfg = _require_handover_sync(ctx)
+    arm = ctx.task_cfg.common.arm.strip().lower()
+    if arm not in ("left", "right"):
+        raise ValueError(f"common.arm must be 'left' or 'right' for handover pick side, got {arm!r}")
+    source_is_right = arm == "right"
+    stages = build_handover_sync_sequence(
+        sync_cfg=hcfg,
+        source_is_right=source_is_right,
+        gripper_open=ctx.gripper_open,
+        gripper_closed=ctx.gripper_closed,
+        stage_prefix="Handover",
+    )
+    return stages, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        left_arrival_guard_stage="Handover-1-SyncMove" if source_is_right else None,
+        warn_prefix="TaskQ dual_arm handover sync timeout",
+    )
+
+
+def skill_movej_return_initial(
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    moved = movej_return_to_initial_state(
+        interface=ctx.interface,
+        left_initial_positions=ctx.left_initial_joint_positions,
+        right_initial_positions=ctx.right_initial_joint_positions,
+        arrival_timeout=ctx.robot_cfg.arrival_timeout,
+        arrival_poll=ctx.robot_cfg.arrival_poll,
+        sim_time=ctx.sim_time,
+    )
+    if not moved:
+        print("[WARN] MoveJ return-to-initial skipped: no valid cached joints or motion failed.")
+    return [], ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm movej return",
+    )
+
+
+def register_dual_arm_skills() -> None:
+    register_skill("dual_arm.carry_pregrasp", skill_carry_pregrasp)
+    register_skill("dual_arm.carry_approach", skill_carry_approach)
+    register_skill("dual_arm.carry_grasp", skill_carry_grasp)
+    register_skill("dual_arm.carry_lift_retreat", skill_carry_lift_retreat)
+    register_skill("dual_arm.carry", skill_carry)
+    register_skill("dual_arm.handover_sync", skill_handover_sync)
+    register_skill("dual_arm.movej_return_initial", skill_movej_return_initial)
+
+
+register_dual_arm_skills()
