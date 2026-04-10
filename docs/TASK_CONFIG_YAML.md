@@ -35,6 +35,7 @@
   2. **`dual_arm.return_home`**：双臂同时回到连接时缓存的 Cartesian home（需任务带 **handover** 或 **carry**，Runner 才会拉齐左右 `*_home_pose`）。
   3. **`joint.movej_return_initial`**（或 **`single_arm.movej_return_initial`**，同一实现）：关节空间回到连接时缓存的初始角，**含双臂与躯干**（若接口曾读到 body 关节缓存）。
 - **`dual_arm.movej_return_initial`** 与上者同属 MoveJ 回初始，现已同样传入躯干缓存；交接 YAML 中更推荐使用 **`joint.movej_return_initial`**，语义上强调「全身关节」。
+- **后退再回原点**：**`nav.navigate_backup`**（`distance_m`，沿 base +X 反向平移）→ **`parallel`**：`nav.send_nav_goal`（如 `x/y/yaw=0`）与 **`joint.movej_to_config`**（仅躯干时可设 **`skip_fsm_hold: true`**，避免并行时先发 `HOLD` 打断 Nav2）→ **`nav.wait_nav_arrived`**。参见 `FiveAges_W2/navigate_and_carry.yaml`。
 
 其他常用技能见 **`docs/ARCHITECTURE.md`** 第 4.2 节技能列表。
 
@@ -67,4 +68,4 @@ pip install pyyaml
 - `examples/IsaacSim/robots/Agibot_G1/task_configs/pick_place.yaml`、`handover.yaml`
 - `examples/IsaacSim/robots/Realman_RM75/task_configs/pick_place.yaml`
 - `examples/IsaacSim/robots/Marvin_M6CCS/task_configs/handover.yaml`
-- `examples/IsaacSim/robots/FiveAges_W2/task_configs/bimanual_carry.yaml`
+- `examples/IsaacSim/robots/FiveAges_W2/task_configs/bimanual_carry.yaml`、`navigate_and_carry.yaml`
