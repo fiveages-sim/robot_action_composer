@@ -15,6 +15,29 @@
 
 **不再支持** Python 任务模块（`TASK_CONFIG` / `FLOW_CONFIG` 的 `.py` 文件）。
 
+### `arm` 与 pick / place（避免全局扁平表互相覆盖）
+
+构造 **`MergedQueueConfig`** 时会调用 **`merge_flat_with_skill_pick_place`**，把 ``skill_defaults.single_arm.pick`` 与 ``single_arm.place`` 依次叠到**同一张**扁平 preset 上。若二者**都**含有 **`arm`**（典型如 **handover**：抓臂与放臂不同），则 **place 的 `arm` 不会写入这张全局 flat**，以免后写覆盖 **`QueueSliceCommon.arm`** 导致 Runner 初始上下文、handover 同步段等误判工作臂。
+
+**place 的 `arm`** 仍随完整的 ``skill_defaults['single_arm.place']`` 经 **`merge_task_queue_skill_params`** 注入到 **`single_arm.place` 队列块** 的 `params`，执行时由 **`overlay_queue_single_arm_from_params`** 仅作用于该步。
+
+若 **pick 未提供 `arm`**、仅 **place** 提供，则 place 的 `arm` 仍会进入全局 flat（常见单臂 pick+place 同一臂）。
+
+---
+
+## `task_queue` 与技能名
+
+队列由 **`task_queue`** 列出若干**块**；每块至少含 **`skill:`**（注册名），可选 **`id:`**（用于 `skill_defaults` / `scene_presets.skill_params` 里按块覆写参数）、可选 **`params:`**（该块专用映射）。
+
+- **并行块**：一项为 **`parallel:`**，值为子块列表（子块不可再嵌套 `parallel`）。见 **`types.ParallelSpec`** 注释中的 YAML 示例。
+- **交接（handover）典型顺序**（参见各机器人 `handover.yaml`）：
+  1. `single_arm.pregrasp` → `single_arm.pick` → `dual_arm.handover_sync` → `single_arm.place`
+  2. **`dual_arm.return_home`**：双臂同时回到连接时缓存的 Cartesian home（需任务带 **handover** 或 **carry**，Runner 才会拉齐左右 `*_home_pose`）。
+  3. **`joint.movej_return_initial`**（或 **`single_arm.movej_return_initial`**，同一实现）：关节空间回到连接时缓存的初始角，**含双臂与躯干**（若接口曾读到 body 关节缓存）。
+- **`dual_arm.movej_return_initial`** 与上者同属 MoveJ 回初始，现已同样传入躯干缓存；交接 YAML 中更推荐使用 **`joint.movej_return_initial`**，语义上强调「全身关节」。
+
+其他常用技能见 **`docs/ARCHITECTURE.md`** 第 4.2 节技能列表。
+
 ---
 
 ## 依赖

@@ -18,10 +18,18 @@ def merge_flat_with_skill_pick_place(
     base_flat: Mapping[str, Any],
     skill_defaults: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Overlay ``skill_defaults['single_arm.pick']`` then ``['single_arm.place']`` on flat task kwargs."""
+    """Overlay ``skill_defaults['single_arm.pick']`` then ``['single_arm.place']`` on flat task kwargs.
+
+    当 **pick 与 place 同时提供 ``arm``** 时，不把 place 的 ``arm`` 写入本合并结果（避免盖掉
+    ``QueueSliceCommon.arm``，例如交接：抓右臂 / 放左臂）。place 的 ``arm`` 仍由
+    :func:`merge_task_queue_skill_params` 在 **``single_arm.place`` 块** 上从
+    ``skill_defaults['single_arm.place']`` 注入，不依赖全局扁平表。
+    """
     sd = dict(skill_defaults or {})
     pick_sd = dict(sd.get("single_arm.pick") or {})
     place_sd = dict(sd.get("single_arm.place") or {})
+    if "arm" in pick_sd and "arm" in place_sd:
+        place_sd = {k: v for k, v in place_sd.items() if k != "arm"}
     return {**dict(base_flat), **pick_sd, **place_sd}
 
 

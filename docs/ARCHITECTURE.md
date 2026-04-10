@@ -104,7 +104,7 @@ flowchart TB
 - **`registry.py`**：`register_skill(name, fn)` / `get_skill(name)`。  
 - **`task_runtime/skills/`**（import 时副作用注册）：
   - **`single_arm`**：`pregrasp`、`pick`、`place`、`return_home`、`movej_return_initial` 等。
-  - **`dual_arm`**：`carry_pregrasp`、`carry` / `carry_approach` / `carry_grasp` / `carry_lift_retreat`、`handover_sync`、`movej_return_initial`。
+  - **`dual_arm`**：`carry_pregrasp`、`carry` / `carry_approach` / `carry_grasp` / `carry_lift_retreat`、`handover_sync`、`return_home`（双臂 Cartesian 回 home）、`movej_return_initial`（与 `joint.movej_return_initial` 相同，含躯干缓存时一并下发）。
   - **`drawer`**：`single_arm.drawer.*` 系列。
   - **`navigation`**：Nav2 相关封装（与 `isaac_sim` 取位姿配合）。
 

@@ -11,10 +11,7 @@ from typing import Any, Sequence
 
 from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMissingImports]
 
-from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
-    ArmSide,
-    execute_stage_sequence,
-)
+from robot_action_composer.motion_generation.sequence.cartesian_stages import execute_stage_sequence  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
     SimTimeHelper,
@@ -162,12 +159,10 @@ def build_queue_runtime_context(
     initial_arm = queue_task.common.arm.strip().lower()
     if initial_arm not in {"left", "right"}:
         raise ValueError("arm must be 'left' or 'right'")
-    source_is_right = initial_arm == "right"
-    arm_side = ArmSide.RIGHT if source_is_right else ArmSide.LEFT
-    source_ee_prefix = "right_ee" if source_is_right else "left_ee"
-    source_handler = interface.right_arm_handler if source_is_right else interface.left_arm_handler
+    pick_is_right = initial_arm == "right"
+    source_ee_prefix = "right_ee" if pick_is_right else "left_ee"
+    source_handler = interface.right_arm_handler if pick_is_right else interface.left_arm_handler
     source_home_pose = arm_handler_pose_or_raise(source_handler, label=source_ee_prefix)
-    ee_frame_id = (source_handler.frame_id if source_handler else None) or frame_id
 
     left_handler = interface.left_arm_handler
     right_handler = interface.right_arm_handler
@@ -179,10 +174,6 @@ def build_queue_runtime_context(
         left_home_pose = _optional_arm_home_pose(left_handler, label="left_ee")
         right_home_pose = _optional_arm_home_pose(right_handler, label="right_ee")
 
-    receiver_home_pose: Any | None = None
-    if runtime.handover is not None:
-        receiver_home_pose = left_home_pose if source_is_right else right_home_pose
-
     return QueueRuntimeContext(
         interface=interface,
         robot_cfg=robot_cfg,
@@ -192,20 +183,15 @@ def build_queue_runtime_context(
         gripper_closed=gripper_closed,
         use_stamped=use_stamped,
         frame_id=frame_id,
-        ee_frame_id=ee_frame_id,
-        arm_side=arm_side,
-        source_is_right=source_is_right,
         source_home_pose=source_home_pose,
         base_world_pos=base_world_pos,
         base_world_quat=base_world_quat,
         gripper_for_return_home=gripper_closed,
-        source_ee_prefix=source_ee_prefix,
         left_initial_joint_positions=left_initial_joint_positions,
         right_initial_joint_positions=right_initial_joint_positions,
         body_initial_joint_positions=body_initial_joint_positions,
         left_home_pose=left_home_pose,
         right_home_pose=right_home_pose,
-        receiver_home_pose=receiver_home_pose,
         carry_task_cfg=runtime.carry,
         handover_sync=runtime.handover,
         drawer_geometry=runtime.drawer,

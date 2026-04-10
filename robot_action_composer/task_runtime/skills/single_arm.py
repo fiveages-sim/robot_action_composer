@@ -31,7 +31,7 @@ from robot_action_composer.motion_generation.tasks.pick_place import (  # pyrigh
 )
 from robot_action_composer.motion_generation.tasks.movej_return import movej_return_to_initial_state  # pyright: ignore[reportMissingImports]
 
-from robot_action_composer.task_runtime.context import QueueRuntimeContext
+from robot_action_composer.task_runtime.context import QueueRuntimeContext, queue_primary_ee_frame_id
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.config.single_arm import (
     QueueSingleArmSlice,
@@ -70,7 +70,7 @@ def skill_pregrasp(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple
     stages = assign_to_arm([ArmStage("TaskQ-pregrasp", pregrasp_target)], arm_side)
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
-        frame_id=ctx.ee_frame_id,
+        frame_id=queue_primary_ee_frame_id(ctx),
         warn_prefix="TaskQ pregrasp timeout",
     )
 
@@ -220,9 +220,10 @@ def skill_return_home(
     )
     stages = assign_to_arm(arm_seq, arm_side)
     if ctx.use_stamped:
+        ee_fid = queue_primary_ee_frame_id(ctx)
         for st in stages:
             if "ReturnHome" in st.name:
-                st.frame_id = ctx.ee_frame_id
+                st.frame_id = ee_fid
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=ctx.frame_id,

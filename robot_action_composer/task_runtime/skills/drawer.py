@@ -19,6 +19,7 @@ from lerobot_robot_ros2.utils.pose_utils import (  # pyright: ignore[reportMissi
 )
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
+    ArmSide,
     SendMode,
     StageTarget,
     execute_stage_sequence,
@@ -34,7 +35,12 @@ from robot_action_composer.motion_generation.tasks.drawer import (  # pyright: i
     build_single_arm_pull_drawer_sequence,
 )
 from robot_action_composer.task_runtime.config.single_arm import QueueSingleArmSlice  # pyright: ignore[reportMissingImports]
-from robot_action_composer.task_runtime.context import DrawerPhaseState, QueueRuntimeContext
+from robot_action_composer.task_runtime.context import (
+    DrawerPhaseState,
+    QueueRuntimeContext,
+    queue_pick_arm_is_right,
+    queue_primary_ee_frame_id,
+)
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.types import ExecutionMeta
 
@@ -63,10 +69,16 @@ def _rotate_vector_by_quat(
     return (rotated[0], rotated[1], rotated[2])
 
 
+def _pick_arm_side(ctx: QueueRuntimeContext) -> ArmSide:
+    return ArmSide.RIGHT if queue_pick_arm_is_right(ctx) else ArmSide.LEFT
+
+
 def _primary_arm_handler(ctx: QueueRuntimeContext) -> Any:
-    if ctx.source_is_right:
-        return ctx.interface.right_arm_handler
-    return ctx.interface.left_arm_handler
+    return (
+        ctx.interface.right_arm_handler
+        if queue_pick_arm_is_right(ctx)
+        else ctx.interface.left_arm_handler
+    )
 
 
 def _require_drawer_phase(ctx: QueueRuntimeContext) -> DrawerPhaseState:
@@ -144,7 +156,7 @@ def skill_drawer_pull_open(
         target_pose=source_target_pose_d,
         pick=tc.pick,
         drawer=dcfg,
-        arm_side=ctx.arm_side,
+        arm_side=_pick_arm_side(ctx),
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
         grasp_orientation=grasp_ori_drawer,
@@ -218,7 +230,7 @@ def skill_drawer_close_push(
         target_pose=source_target_pose_d,
         pick=tc.pick,
         drawer=dcfg,
-        arm_side=ctx.arm_side,
+        arm_side=_pick_arm_side(ctx),
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
         grasp_orientation=grasp_ori,
@@ -261,7 +273,7 @@ def skill_drawer_retreat_to_home(
         place_position=drw.place_pose_ref,
         home_pose=ctx.source_home_pose,
         place=tc.place,
-        arm_side=ctx.arm_side,
+        arm_side=_pick_arm_side(ctx),
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
         grasp_orientation=drw.grasp_orientation_xyzw,
@@ -269,7 +281,7 @@ def skill_drawer_retreat_to_home(
     if ctx.use_stamped:
         for st in sequence:
             if "ReturnHome" in st.name:
-                st.frame_id = ctx.ee_frame_id
+                st.frame_id = queue_primary_ee_frame_id(ctx)
 
     ctx.gripper_for_return_home = ctx.gripper_open
     return sequence, ExecutionMeta(

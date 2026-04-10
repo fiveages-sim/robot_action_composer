@@ -35,21 +35,16 @@ class QueueRuntimeContext:
     gripper_closed: float
     use_stamped: bool
     frame_id: str
-    ee_frame_id: str
-    arm_side: Any  # ArmSide
-    source_is_right: bool
     source_home_pose: Any
     base_world_pos: Any
     base_world_quat: Any
     gripper_for_return_home: float = 0.0
-    source_ee_prefix: str = "left_ee"
     drawer: DrawerPhaseState | None = None
     left_initial_joint_positions: list[float] | None = None
     right_initial_joint_positions: list[float] | None = None
     body_initial_joint_positions: list[float] | None = None
     left_home_pose: Any | None = None
     right_home_pose: Any | None = None
-    receiver_home_pose: Any | None = None
     carry_task_cfg: Any | None = None
     carry_object_center: Any | None = None  # dual_arm.carry_approach 写入；后续搬运段复用
     handover_sync: HandoverSyncConfig | None = None
@@ -58,3 +53,22 @@ class QueueRuntimeContext:
     def __post_init__(self) -> None:
         if self.gripper_for_return_home == 0.0:
             self.gripper_for_return_home = float(self.gripper_closed)
+
+
+def queue_pick_arm_is_right(ctx: QueueRuntimeContext) -> bool:
+    """当前 ``task_cfg.common.arm`` 是否为右侧（抓取侧 / 主序列侧）。"""
+    a = ctx.task_cfg.common.arm.strip().lower()
+    if a not in {"left", "right"}:
+        raise ValueError(f"arm must be 'left' or 'right', got {ctx.task_cfg.common.arm!r}")
+    return a == "right"
+
+
+def queue_primary_ee_frame_id(ctx: QueueRuntimeContext) -> str:
+    """抓取侧末端链路的 ``frame_id``（无 handler 时退回 ``ctx.frame_id``）。"""
+    h = (
+        ctx.interface.right_arm_handler
+        if queue_pick_arm_is_right(ctx)
+        else ctx.interface.left_arm_handler
+    )
+    fid = h.frame_id if h else None
+    return fid or ctx.frame_id
