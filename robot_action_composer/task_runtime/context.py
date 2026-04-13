@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
@@ -25,34 +25,43 @@ class DrawerPhaseState:
 
 @dataclass
 class QueueRuntimeContext:
-    """一次 ``run_task_queue`` 的会话：接口快照 + :class:`QueueSingleArmSlice` + 可选子任务配置。"""
+    """一次 ``run_task_queue`` 的会话：接口快照 + :class:`QueueSingleArmSlice` + 可选子任务配置。
+
+    **scratch**：跨 skill 的通用键值暂存区（任务 YAML 可用 ``session.scratch_put``、``robot.cache_ee_pose`` 等写入；
+    自定义 skill 内用 :meth:`scratch_get` / :meth:`scratch_put` 或直接使用 ``ctx.scratch``）。
+    笛卡尔「回程」位姿由 ``robot.cache_ee_pose`` + ``goto_cache_pose`` 显式缓存，不再在 Runner 连接时写入 home。
+    """
 
     interface: Any  # ROS2RobotInterface
     robot_cfg: Any
     sim_time: Any
     task_cfg: Any  # QueueSingleArmSlice
+    base_link_entity_path: str  # 已解析的 Isaac base prim（任务可覆盖 robot_cfg）
     gripper_open: float
     gripper_closed: float
     use_stamped: bool
     frame_id: str
-    source_home_pose: Any
     base_world_pos: Any
     base_world_quat: Any
     gripper_for_return_home: float = 0.0
     drawer: DrawerPhaseState | None = None
-    left_initial_joint_positions: list[float] | None = None
-    right_initial_joint_positions: list[float] | None = None
-    body_initial_joint_positions: list[float] | None = None
-    left_home_pose: Any | None = None
-    right_home_pose: Any | None = None
     carry_task_cfg: Any | None = None
     carry_object_center: Any | None = None  # dual_arm.carry_approach 写入；后续搬运段复用
     handover_sync: HandoverSyncConfig | None = None
     drawer_geometry: DrawerGeometryConfig | None = None
+    scratch: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.gripper_for_return_home == 0.0:
             self.gripper_for_return_home = float(self.gripper_closed)
+
+    def scratch_put(self, key: str, value: Any) -> None:
+        """写入暂存区（与 ``session.scratch_put`` skill 一致）。"""
+        self.scratch[str(key)] = value
+
+    def scratch_get(self, key: str, default: Any = None) -> Any:
+        """读取暂存区；缺省键返回 ``default``。"""
+        return self.scratch.get(str(key), default)
 
 
 def queue_pick_arm_is_right(ctx: QueueRuntimeContext) -> bool:

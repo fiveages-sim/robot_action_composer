@@ -21,15 +21,7 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     set_prim_orientation_local,
 )
 
-from robot_action_composer.ros_interface_utils import (  # pyright: ignore[reportMissingImports]
-    arm_handler_pose_or_raise,
-    build_ros2_interface_from_robot_cfg,
-)
-
-from robot_action_composer.motion_generation.tasks.movej_return import (  # pyright: ignore[reportMissingImports]
-    capture_initial_arm_joint_positions,
-    capture_initial_body_joint_positions,
-)
+from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.drawer import euler_to_quaternion  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
 from robot_action_composer.task_runtime.merge.flat_presets import reset_fields_from_first_pick_block
@@ -119,15 +111,22 @@ def _make_interface(robot_cfg: Any) -> Any:
     return build_ros2_interface_from_robot_cfg(robot_cfg)
 
 
-def _optional_arm_home_pose(handler: Any, *, label: str) -> Any | None:
-    """单臂台架机器人可能只有一侧 :attr:`interface.*_arm_handler`；无 handler 或尚无位姿时返回 ``None``。"""
-    if handler is None:
-        return None
-    pose = handler.get_pose()
-    if pose is None:
-        print(f"[TaskQ] WARN: no EE pose yet for {label} (optional arm); leaving home_pose=None")
-        return None
-    return pose
+def effective_base_link_entity_path(*, robot_cfg: Any, runtime: MergedQueueConfig) -> str:
+    """任务 :class:`MergedQueueConfig` 中的 ``base_link_entity_path`` 优先于 ``robot_cfg``。"""
+    override = runtime.base_link_entity_path
+    if isinstance(override, str):
+        s = override.strip()
+        if s:
+            return s
+    path = getattr(robot_cfg, "base_link_entity_path", None)
+    if isinstance(path, str):
+        ps = path.strip()
+        if ps:
+            return ps
+    raise ValueError(
+        "Isaac base prim path is required: set robot_cfg.base_link_entity_path "
+        "or task base_task_overrides.base_link_entity_path"
+    )
 
 
 def _resolve_gripper_open_close(mode: str) -> tuple[float, float]:
@@ -146,52 +145,31 @@ def build_queue_runtime_context(
     sim_time: Any,
     runtime: MergedQueueConfig,
     use_stamped: bool,
-    left_initial_joint_positions: list[float] | None,
-    right_initial_joint_positions: list[float] | None,
-    body_initial_joint_positions: list[float] | None,
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
     queue_task = runtime.single_arm
     gripper_open, gripper_closed = _resolve_gripper_open_close(robot_cfg.gripper_control_mode)
-    frame_id = robot_cfg.base_link_entity_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
-    base_world_pos, base_world_quat = get_entity_pose_world_service(robot_cfg.base_link_entity_path)
+    base_path = effective_base_link_entity_path(robot_cfg=robot_cfg, runtime=runtime)
+    frame_id = base_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
+    base_world_pos, base_world_quat = get_entity_pose_world_service(base_path)
 
     initial_arm = queue_task.common.arm.strip().lower()
     if initial_arm not in {"left", "right"}:
         raise ValueError("arm must be 'left' or 'right'")
-    pick_is_right = initial_arm == "right"
-    source_ee_prefix = "right_ee" if pick_is_right else "left_ee"
-    source_handler = interface.right_arm_handler if pick_is_right else interface.left_arm_handler
-    source_home_pose = arm_handler_pose_or_raise(source_handler, label=source_ee_prefix)
-
-    left_handler = interface.left_arm_handler
-    right_handler = interface.right_arm_handler
-    need_dual_arm_homes = runtime.carry is not None or runtime.handover is not None
-    if need_dual_arm_homes:
-        left_home_pose = arm_handler_pose_or_raise(left_handler, label="left_ee")
-        right_home_pose = arm_handler_pose_or_raise(right_handler, label="right_ee")
-    else:
-        left_home_pose = _optional_arm_home_pose(left_handler, label="left_ee")
-        right_home_pose = _optional_arm_home_pose(right_handler, label="right_ee")
 
     return QueueRuntimeContext(
         interface=interface,
         robot_cfg=robot_cfg,
         sim_time=sim_time,
         task_cfg=queue_task,
+        base_link_entity_path=base_path,
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
         use_stamped=use_stamped,
         frame_id=frame_id,
-        source_home_pose=source_home_pose,
         base_world_pos=base_world_pos,
         base_world_quat=base_world_quat,
         gripper_for_return_home=gripper_closed,
-        left_initial_joint_positions=left_initial_joint_positions,
-        right_initial_joint_positions=right_initial_joint_positions,
-        body_initial_joint_positions=body_initial_joint_positions,
-        left_home_pose=left_home_pose,
-        right_home_pose=right_home_pose,
         carry_task_cfg=runtime.carry,
         handover_sync=runtime.handover,
         drawer_geometry=runtime.drawer,
@@ -301,9 +279,6 @@ def run_task_queue(
         interface.connect()
         robot_connected = True
         print("[OK] Robot connected (unified task queue)")
-        left_initial_joint_positions, right_initial_joint_positions = capture_initial_arm_joint_positions(interface)
-        body_initial_joint_positions = capture_initial_body_joint_positions(interface)
-
         interface.send_fsm_command(FSM_HOLD)
         sim_time.sleep(robot_cfg.fsm_switch_delay)
         interface.send_fsm_command(FSM_OCS2)
@@ -317,9 +292,6 @@ def run_task_queue(
             sim_time=sim_time,
             runtime=runtime,
             use_stamped=use_stamped,
-            left_initial_joint_positions=left_initial_joint_positions,
-            right_initial_joint_positions=right_initial_joint_positions,
-            body_initial_joint_positions=body_initial_joint_positions,
         )
 
         for idx, spec in enumerate(specs):

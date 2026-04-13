@@ -1,8 +1,7 @@
-"""Generic single-arm queue skills (pregrasp / pick / place / Cartesian home / MoveJ home).
+"""Generic single-arm queue skills (pregrasp / pick / place / Cartesian cache goto).
 
 单臂段使用 :class:`~robot_action_composer.task_runtime.config.single_arm.QueueSingleArmSlice`（由扁平 preset 解析）。
-
-``joint.movej_return_initial`` / ``single_arm.movej_return_initial`` 使用 Runner 缓存的初始关节角。
+笛卡尔回程用 ``robot.cache_ee_pose`` + ``single_arm.goto_cache_pose``。
 """
 
 from __future__ import annotations
@@ -10,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
+
+from geometry_msgs.msg import Pose
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     ArmSide,
@@ -29,7 +30,7 @@ from robot_action_composer.motion_generation.tasks.pick_place import (  # pyrigh
     _apply_target_pose_offset,
     resolve_place_skill_from_entity,
 )
-from robot_action_composer.motion_generation.tasks.movej_return import movej_return_to_initial_state  # pyright: ignore[reportMissingImports]
+from robot_action_composer.ros_interface_utils import arm_handler_pose_or_raise  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext, queue_primary_ee_frame_id
 from robot_action_composer.task_runtime.registry import register_skill
@@ -41,31 +42,51 @@ from robot_action_composer.task_runtime.config.single_arm import (
 from robot_action_composer.task_runtime.types import ExecutionMeta
 
 
-def _arm_execution_fields(
-    qt: QueueSingleArmSlice,
-    ctx: QueueRuntimeContext,
-) -> tuple[ArmSide, bool, str, Any]:
-    """按 ``qt.common.arm`` 选择工作臂、EE 前缀与 home（双臂任务用 left/right_home_pose）。"""
+def _arm_side_and_ee_prefix(qt: QueueSingleArmSlice) -> tuple[ArmSide, bool, str]:
+    """按 ``qt.common.arm`` 选择工作臂与 EE 前缀。"""
     arm = qt.common.arm.strip().lower()
     if arm not in ("left", "right"):
         raise ValueError(f"arm must be 'left' or 'right', got {qt.common.arm!r}")
     source_is_right = arm == "right"
     arm_side = ArmSide.RIGHT if source_is_right else ArmSide.LEFT
     ee_prefix = "right_ee" if source_is_right else "left_ee"
-    if ctx.left_home_pose is not None and ctx.right_home_pose is not None:
-        home = ctx.right_home_pose if source_is_right else ctx.left_home_pose
-    else:
-        home = ctx.source_home_pose
-    return arm_side, source_is_right, ee_prefix, home
+    return arm_side, source_is_right, ee_prefix
 
 
 def _stamped_mode(ctx: QueueRuntimeContext) -> SendMode:
     return SendMode.STAMPED if ctx.use_stamped else SendMode.UNSTAMPED
 
 
+def _is_bimanual_ee_cache(raw: Mapping[str, Any]) -> bool:
+    """双臂缓存：``robot.cache_ee_pose`` + ``which: both`` 写入的 ``{left, right}``（无顶层 ``pose``）。"""
+    return "left" in raw and "right" in raw and "pose" not in raw
+
+
+def _scratch_pose_entry_to_geometry_pose(entry: Mapping[str, Any]) -> Pose:
+    """解析 :func:`robot.cache_ee_pose` 写入的 ``{"pose": {...}, "gripper": ...}``。"""
+    pose_d = entry.get("pose")
+    if not isinstance(pose_d, Mapping):
+        raise ValueError("cached entry missing 'pose' object (use robot.cache_ee_pose)")
+    pos = pose_d.get("position")
+    ori = pose_d.get("orientation")
+    if not isinstance(pos, Mapping) or not isinstance(ori, Mapping):
+        raise ValueError("scratch pose expects position and orientation mappings")
+    pose = Pose()
+    pose.position.x = float(pos["x"])
+    pose.position.y = float(pos["y"])
+    pose.position.z = float(pos["z"])
+    pose.orientation.x = float(ori["x"])
+    pose.orientation.y = float(ori["y"])
+    pose.orientation.z = float(ori["z"])
+    pose.orientation.w = float(ori["w"])
+    return pose
+
+
 def skill_pregrasp(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
     qt = overlay_queue_single_arm_from_params(ctx.task_cfg, params)
-    arm_side, _sir, _pfx, home = _arm_execution_fields(qt, ctx)
+    arm_side, source_is_right, ee_prefix = _arm_side_and_ee_prefix(qt)
+    handler = ctx.interface.right_arm_handler if source_is_right else ctx.interface.left_arm_handler
+    home = arm_handler_pose_or_raise(handler, label=ee_prefix)
     pregrasp_target = ArmTarget(pose=home, gripper=ctx.gripper_open)
     stages = assign_to_arm([ArmStage("TaskQ-pregrasp", pregrasp_target)], arm_side)
     return stages, ExecutionMeta(
@@ -79,7 +100,7 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     if not isinstance(ctx.task_cfg, QueueSingleArmSlice):
         raise TypeError(f"single_arm.pick expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}")
     qt = overlay_queue_single_arm_from_params(ctx.task_cfg, params)
-    arm_side, _source_is_right, _ee_prefix, _home = _arm_execution_fields(qt, ctx)
+    arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
     pk = qt.pick
     path = pk.source_object_entity_path
     target_pose_offset = pk.target_pose_offset
@@ -128,7 +149,7 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
     if not isinstance(ctx.task_cfg, QueueSingleArmSlice):
         raise TypeError(f"single_arm.place expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}")
     qt = overlay_queue_single_arm_from_params(ctx.task_cfg, params)
-    arm_side, source_is_right, ee_prefix, _home = _arm_execution_fields(qt, ctx)
+    arm_side, source_is_right, ee_prefix = _arm_side_and_ee_prefix(qt)
     pl = qt.place
     if not pl.run_place_before_return:
         ctx.task_cfg = replace(ctx.task_cfg, place=pl)
@@ -185,49 +206,75 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
     )
 
 
-def skill_movej_return_initial(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """关节空间回到 Runner 连接时缓存的初始关节角（手臂 + 躯干）。"""
-    rcfg = ctx.robot_cfg
-    moved = movej_return_to_initial_state(
-        interface=ctx.interface,
-        left_initial_positions=ctx.left_initial_joint_positions,
-        right_initial_positions=ctx.right_initial_joint_positions,
-        body_initial_positions=ctx.body_initial_joint_positions,
-        arrival_timeout=rcfg.arrival_timeout,
-        arrival_poll=rcfg.arrival_poll,
-        sim_time=ctx.sim_time,
-    )
-    if not moved:
-        print("[WARN] MoveJ return-to-initial skipped: no valid cached joints or motion failed.")
-    return [], ExecutionMeta(
-        send_mode=_stamped_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ movej return",
-    )
-
-
-def skill_return_home(
+def skill_goto_cache_pose(
     ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
+    """笛卡尔运动到 ``ctx.scratch[key]`` 中的缓存末端位姿（由 ``robot.cache_ee_pose`` 写入）。
+
+    若缓存为双臂结构（``which: both``），须指定 ``side: left|right`` 或依赖 ``task_cfg.common.arm`` 选侧。
+    双臂同步回程请用 ``dual_arm.goto_cache_pose``。
+    """
+    key = str(params.get("key", "saved_ee_pose")).strip() or "saved_ee_pose"
+    raw = ctx.scratch_get(key)
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            f"single_arm.goto_cache_pose: cache[{key!r}] missing or not a mapping; "
+            "run robot.cache_ee_pose with the same key earlier in the queue"
+        )
     qt = overlay_queue_single_arm_from_params(ctx.task_cfg, params)
-    arm_side, _sir, _pfx, home = _arm_execution_fields(qt, ctx)
+    arm_side: ArmSide
+    stamped_ee_side: str | None = None  # 双臂缓存时按侧取该臂 EE frame_id
+    if _is_bimanual_ee_cache(raw):
+        side = params.get("side")
+        if side is None or str(side).strip() == "":
+            side = qt.common.arm
+        side = str(side).strip().lower()
+        if side not in ("left", "right"):
+            raise ValueError(
+                "single_arm.goto_cache_pose: bimanual cache requires params.side left|right "
+                "or task_cfg.common.arm"
+            )
+        sub = raw.get(side)
+        if not isinstance(sub, Mapping):
+            raise ValueError(
+                f"single_arm.goto_cache_pose: bimanual cache[{key!r}][{side!r}] missing or invalid"
+            )
+        entry = sub
+        arm_side = ArmSide.RIGHT if side == "right" else ArmSide.LEFT
+        stamped_ee_side = side
+    else:
+        entry = raw
+        arm_side, _sir, _pfx = _arm_side_and_ee_prefix(qt)
+
+    home_pose = _scratch_pose_entry_to_geometry_pose(entry)
+    gripper_override = params.get("gripper")
+    if gripper_override is not None:
+        grip_v = float(gripper_override)
+    else:
+        grip_v = float(entry.get("gripper", ctx.gripper_for_return_home))
+    stage_name = str(params.get("stage_name", "TaskQ-GotoCachePose"))
     arm_seq = build_single_arm_return_home_sequence(
-        home_pose=home,
-        gripper=ctx.gripper_for_return_home,
-        stage_name="TaskQ-ReturnHomeHold",
+        home_pose=home_pose,
+        gripper=grip_v,
+        stage_name=stage_name,
     )
     stages = assign_to_arm(arm_seq, arm_side)
     if ctx.use_stamped:
-        ee_fid = queue_primary_ee_frame_id(ctx)
+        if stamped_ee_side is not None:
+            h = (
+                ctx.interface.right_arm_handler
+                if stamped_ee_side == "right"
+                else ctx.interface.left_arm_handler
+            )
+            ee_fid = (h.frame_id if h else None) or ctx.frame_id
+        else:
+            ee_fid = queue_primary_ee_frame_id(ctx)
         for st in stages:
-            if "ReturnHome" in st.name:
-                st.frame_id = ee_fid
+            st.frame_id = ee_fid
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=ctx.frame_id,
-        warn_prefix="TaskQ return home timeout",
+        warn_prefix="TaskQ goto cache pose timeout",
     )
 
 
@@ -235,9 +282,7 @@ def register_single_arm_skills() -> None:
     register_skill("single_arm.pregrasp", skill_pregrasp)
     register_skill("single_arm.pick", skill_pick)
     register_skill("single_arm.place", skill_place)
-    register_skill("single_arm.return_home", skill_return_home)
-    register_skill("single_arm.movej_return_initial", skill_movej_return_initial)
-    register_skill("joint.movej_return_initial", skill_movej_return_initial)
+    register_skill("single_arm.goto_cache_pose", skill_goto_cache_pose)
 
 
 register_single_arm_skills()

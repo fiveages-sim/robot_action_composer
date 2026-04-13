@@ -65,18 +65,39 @@ class MergedQueueConfig:
     carry: BimanualCarryTaskConfig | None = None
     handover: HandoverSyncConfig | None = None
     drawer: DrawerGeometryConfig | None = None
+    # 可选：任务 YAML（如 base_task_overrides / 场景扁平字段）覆盖 robot_config 的 Isaac base prim 路径
+    base_link_entity_path: str | None = None
+
+
+def _optional_base_link_entity_path(merged_flat: Mapping[str, Any]) -> str | None:
+    raw = merged_flat.get("base_link_entity_path")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    return s or None
 
 
 def build_merged_queue_from_flat(merged_flat: Mapping[str, Any]) -> MergedQueueConfig:
+    base_path = _optional_base_link_entity_path(merged_flat)
     single = QueueSingleArmSlice.from_flat(merged_flat)
     handover = _try_handover(merged_flat)
     carry = _try_carry(merged_flat)
     drawer = _try_drawer(merged_flat)
-    return MergedQueueConfig(single_arm=single, carry=carry, handover=handover, drawer=drawer)
+    return MergedQueueConfig(
+        single_arm=single,
+        carry=carry,
+        handover=handover,
+        drawer=drawer,
+        base_link_entity_path=base_path,
+    )
 
 
 def format_merged_queue_summary(scene: str, cfg: MergedQueueConfig) -> str:
     parts = [format_queue_single_arm_summary(scene, cfg.single_arm)]
+    if cfg.base_link_entity_path:
+        parts.append(f"base_link_entity_path={cfg.base_link_entity_path}")
     if cfg.drawer is not None:
         from robot_action_composer.motion_generation.tasks.drawer import format_drawer_task_cfg_summary  # pyright: ignore[reportMissingImports]
 

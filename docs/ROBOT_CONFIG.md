@@ -44,7 +44,7 @@
 **`task_runtime.runner.run_task_queue`** 与 **`build_queue_runtime_context`** 等路径会直接读取（属性访问）的常见字段包括：
 
 - **`gripper_control_mode`**：例如 `target_command`，用于解析开合夹爪数值。
-- **`base_link_entity_path`**：Isaac 中 base link 的 prim 路径；用于 stamped 帧名截取与实体位姿服务。
+- **`base_link_entity_path`**：Isaac 中 base link 的 prim 路径；用于 stamped 帧名截取与实体位姿服务。任务 YAML 可在 **`base_task_overrides`** 或场景根下提供同名键**覆盖**本字段（合并进 **`MergedQueueConfig.base_link_entity_path`**）；统一推理入口亦会在选用任务后把该覆盖应用到 `ROBOT_CFG`。
 - **`fsm_switch_delay`**、**`post_reset_wait`**：FSM 切换与 reset 后等待。
 - **`arrival_timeout`**、**`arrival_poll`**、**`gripper_action_wait`**：阶段到达与夹爪节拍。
 

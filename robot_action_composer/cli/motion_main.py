@@ -76,6 +76,7 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
     from robot_action_composer.task_runtime.config import QUEUE_SINGLE_ARM_FLAT_KEYS  # pyright: ignore[reportMissingImports]
 
     names: set[str] = set(QUEUE_SINGLE_ARM_FLAT_KEYS)
+    names.add("base_link_entity_path")
     for cls in (BimanualCarryTaskConfig, HandoverSyncConfig, DrawerGeometryConfig):
         names |= {f.name for f in fields(cls)}
     return frozenset(names)
@@ -185,28 +186,13 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
     scene_skill_params = scene_presets.get(scene, {}).get("skill_params") or {}
     merged_queue = merge_task_queue_skill_params(list(task_queue), skill_defaults, scene_skill_params)
 
-    skip_movej = {
-        "dual_arm.movej_return_initial",
-        "joint.movej_return_initial",
-        "single_arm.movej_return_initial",
-    }
-
     for run_idx in range(num_runs):
         print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} (task queue)\n{'=' * 70}")
-        queue_for_run = list(merged_queue)
-        if num_runs == 1:
-            queue_for_run = [
-                blk
-                for blk in queue_for_run
-                if str(blk.get("skill", "")).strip() not in skip_movej
-            ]
-            if len(queue_for_run) != len(merged_queue):
-                print("[info] Single run: skipping final movej_return_initial block(s) by default.")
         run_task_queue(
             robot_cfg=robot_entry["robot_cfg"],
             runtime=runtime,
             robot_id=task_entry["robot_id"],
-            blocks=queue_for_run,
+            blocks=merged_queue,
             reset_env=reset_env,
             use_stamped=use_stamped,
         )

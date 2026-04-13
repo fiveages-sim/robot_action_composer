@@ -18,13 +18,10 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
     StageTarget,
     assign_to_arm,
     build_single_arm_pick_sequence,
-    build_single_arm_place_sequence,
-    build_single_arm_return_home_sequence,
 )
 from robot_action_composer.task_runtime.config.single_arm import (  # pyright: ignore[reportMissingImports]
     QueueSingleArmSlice,
     QueueSlicePick,
-    QueueSlicePlace,
 )
 
 
@@ -56,6 +53,8 @@ class DrawerGeometryConfig:
     drawer_scale: float = 1.0
     object_xyz_random_offset_drawer: tuple[float, float, float] = (0.0, 0.0, 0.0)
     grasp_clearance_drawer: float = 0.01
+    #: 拉开抽屉时沿 grasp 方向末段行程（米），语义同 pick 的 ``retreat_direction_extra``；在 ``skill_defaults.single_arm.drawer`` 中配置。
+    pull_distance: float = 0.18
 
 
 def format_drawer_task_cfg_summary(scene: str, drawer: DrawerGeometryConfig, single: QueueSingleArmSlice) -> str:
@@ -63,7 +62,7 @@ def format_drawer_task_cfg_summary(scene: str, drawer: DrawerGeometryConfig, sin
     return (
         f"[Drawer] scene={scene} object={p.source_object_entity_path} "
         f"drawer_prim={drawer.source_object_path_drawer} | "
-        f"arm={c.arm}, grasp_dir={p.grasp_direction}"
+        f"arm={c.arm}, grasp_dir={p.grasp_direction}, pull_distance={drawer.pull_distance}"
     )
 
 
@@ -85,6 +84,7 @@ def build_single_arm_pull_drawer_sequence(
     gripper_closed: float,
     grasp_orientation: tuple[float, float, float, float],
     grasp_direction_vector: tuple[float, float, float],
+    pull_distance: float,
 ) -> list[StageTarget]:
     arm_seq: list[ArmStage] = list(
         build_single_arm_pick_sequence(
@@ -94,7 +94,7 @@ def build_single_arm_pull_drawer_sequence(
             grasp_orientation=grasp_orientation,
             grasp_direction_vector=grasp_direction_vector,
             grasp_offset=pick.grasp_offset,
-            retreat_direction_extra=pick.retreat_direction_extra,
+            retreat_direction_extra=pull_distance,
             retreat_offset=pick.retreat_offset,
             gripper_open=gripper_open,
             gripper_closed=gripper_closed,
@@ -128,42 +128,6 @@ def build_single_arm_close_drawer_sequence(
             gripper_open=gripper_open,
             gripper_closed=gripper_closed,
             stage_prefix="PickPlaceFlow",
-        )
-    )
-    return assign_to_arm(arm_seq, arm_side)
-
-
-def build_single_arm_back_home_sequence(
-    *,
-    place_position: Any,
-    home_pose: Any,
-    place: QueueSlicePlace,
-    arm_side: ArmSide,
-    gripper_open: float,
-    gripper_closed: float,
-    grasp_orientation: tuple[float, float, float, float],
-) -> list[StageTarget]:
-    arm_seq: list[ArmStage] = list(
-        build_single_arm_place_sequence(
-            place_position=place_position,
-            place_orientation=grasp_orientation,
-            place_direction=place.place_direction,
-            place_direction_vector=place.place_direction_vector,
-            place_approach_clearance=place.place_approach_clearance,
-            place_insert_clearance=place.place_insert_clearance,
-            post_release_retract_offset=(0, 0, 0),
-            gripper_open=gripper_open,
-            gripper_closed=gripper_closed,
-            stage_prefix="PickPlaceFlow",
-            start_index=5,
-        )
-    )
-    return_stage_name = "PickPlaceFlow-5-ReturnHomeHold"
-    arm_seq.extend(
-        build_single_arm_return_home_sequence(
-            home_pose=home_pose,
-            gripper=gripper_open,
-            stage_name=return_stage_name,
         )
     )
     return assign_to_arm(arm_seq, arm_side)

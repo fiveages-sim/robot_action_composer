@@ -35,7 +35,6 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from ros2_robot_interface import FSM_HOLD, FSM_MOVEJ, FSM_OCS2  # pyright: ignore[reportMissingImports]
 from ros2_robot_interface.utils.quat_pose import quat_multiply, quat_conjugate  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
@@ -55,9 +54,7 @@ def _refresh_base_pose(ctx: _NavContext) -> None:
     更新 ctx.base_world_pos / ctx.base_world_quat，
     后续 pick/place skill 的相对位置计算将使用新坐标。
     """
-    base_world_pos, base_world_quat = get_entity_pose_world_service(
-        ctx.robot_cfg.base_link_entity_path
-    )
+    base_world_pos, base_world_quat = get_entity_pose_world_service(ctx.base_link_entity_path)
     ctx.base_world_pos = base_world_pos
     ctx.base_world_quat = base_world_quat
 
@@ -265,9 +262,9 @@ def skill_navigate_backup(
     timeout = float(params.get("timeout", 60.0))
     poll_period = float(params.get("poll_period", 0.1))
 
-    base_path = getattr(ctx.robot_cfg, "base_link_entity_path", None) or ""
+    base_path = getattr(ctx, "base_link_entity_path", None) or ""
     if not base_path:
-        raise ValueError("nav.navigate_backup requires ctx.robot_cfg.base_link_entity_path")
+        raise ValueError("nav.navigate_backup requires a resolved base_link_entity_path on context")
 
     (bx, by, _bz), quat = get_entity_pose_world_service(base_path)
     fx, fy, _fz = _quat_rotate_vector_xyzw(quat, (1.0, 0.0, 0.0))
@@ -307,173 +304,12 @@ def skill_navigate_backup(
     return [], _default_meta(ctx)
 
 
-def skill_movej_to_config(
-    ctx: _NavContext, params: Mapping[str, Any]
-) -> tuple[list[Any], ExecutionMeta]:
-    """全身/单臂关节空间运动到指定配置（body / 左臂 / 右臂 均可选）。
-
-    执行顺序：FSM HOLD → 发送关节目标 → 等待到位 → 可选恢复 OCS2。
-    三组关节均为可选：只填右臂时仅驱动右臂，body 和左臂维持当前位置。
-
-    params:
-        body_positions (list[float], 可选): 躯干/腰部关节目标，典型 4 个。
-            可**单独**填写（无手臂目标）：**WBC**（``ocs2_wbc_controller`` 统一 topic）下用当前双臂位置
-            + 目标躯干走 ``send_dual_arm_joint_positions``；否则先 ``FSM_MOVEJ`` 再 ``send_body_joint_positions``。
-        left_arm_positions (list[float], 可选): 左臂关节目标，典型 7 个。
-        right_arm_positions (list[float], 可选): 右臂关节目标，典型 7 个。
-        arrival_timeout (float): 手臂到位等待超时（秒），默认 30.0。
-        joint_tolerance (float): 到位判定阈值（rad），默认 0.05。
-        resume_ocs2 (bool): 到位后切回 OCS2，供后续笛卡尔 skill 使用，默认 False。
-            当本步骤是关节运动序列中最后一步、之后紧接 pick/place 等笛卡尔 skill 时设为 True。
-        skip_fsm_hold (bool): 为 True 时不发送初始 ``FSM_HOLD``。
-            用于与 ``nav.send_nav_goal`` 并行下发躯干（避免 Nav2 行驶中被 HOLD 打断）；默认 False。
-    """
-    body_positions   = [float(v) for v in (params.get("body_positions")     or [])]
-    left_positions   = [float(v) for v in (params.get("left_arm_positions")  or [])]
-    right_positions  = [float(v) for v in (params.get("right_arm_positions") or [])]
-    arrival_timeout  = float(params.get("arrival_timeout", 30.0))
-    joint_tolerance  = float(params.get("joint_tolerance", 0.05))
-    resume_ocs2      = bool(params.get("resume_ocs2", False))
-    skip_fsm_hold    = bool(params.get("skip_fsm_hold", False))
-
-    interface  = ctx.interface
-    sim_time   = getattr(ctx, "sim_time", None)
-    sleep_fn   = sim_time.sleep       if sim_time else None
-    time_now_fn= sim_time.now_seconds if sim_time else None
-
-    # ── 1. 切 HOLD（可与导航并行时跳过，见 skip_fsm_hold）──────────────────────
-    if not skip_fsm_hold:
-        try:
-            interface.send_fsm_command(FSM_HOLD)
-            if sleep_fn:
-                sleep_fn(0.1)
-        except Exception as exc:
-            print(f"[MoveJ] WARN: FSM HOLD failed: {exc}")
-
-    # ── 2. 发送手臂关节 ───────────────────────────────────────────────────────
-    # send_dual_arm_joint_positions 内部会切到 MOVEJ(4)；
-    # 对 WBC 控制器同时将 body_positions 打包进同一条消息；
-    # 对 split-body 控制器忽略 body_positions（将在步骤 3 单独发送）。
-    moved = False
-    if left_positions and right_positions:
-        try:
-            interface.send_dual_arm_joint_positions(
-                left_positions,
-                right_positions,
-                body_positions=body_positions or None,
-            )
-            print(f"[MoveJ] Dual-arm → L:{left_positions}  R:{right_positions}")
-            moved = True
-        except Exception as exc:
-            print(f"[MoveJ] WARN: dual-arm failed, fallback: {exc}")
-
-    if not moved and left_positions and interface.left_arm_handler is not None:
-        interface.left_arm_handler.send_joint_positions(left_positions)
-        moved = True
-    if not moved and right_positions and interface.right_arm_handler is not None:
-        interface.right_arm_handler.send_joint_positions(right_positions)
-        moved = True
-
-    # ── 2b. 仅躯干、无手臂目标（例如先腰身后手臂的分段队列）────────────────────
-    # WBC 全身 topic：躯干必须打进 ``send_dual_arm_joint_positions(..., body_positions=)``；
-    # 单独 ``send_body_joint_positions`` 在 MOVEJ 前或未接 split-body 时可能无效。
-    # 非 WBC：先 FSM_MOVEJ 再发躯干独立话题（与步骤 3 的 split-body 约定一致）。
-    if not moved and body_positions:
-        body_sent = False
-        try:
-            ut = getattr(getattr(interface, "config", None), "unified_arm_joint_controller_topic", None) or ""
-            is_wbc = "ocs2_wbc_controller" in ut
-            categorized = interface.get_joint_state(categorized=True) or {}
-            lp = categorized.get("left_arm", {}).get("positions")
-            rp = categorized.get("right_arm", {}).get("positions")
-            if is_wbc and lp and rp and len(lp) >= 7 and len(rp) >= 7:
-                left_hold = [float(x) for x in lp[:7]]
-                right_hold = [float(x) for x in rp[:7]]
-                interface.send_dual_arm_joint_positions(
-                    left_hold,
-                    right_hold,
-                    body_positions=body_positions,
-                )
-                print(f"[MoveJ] Body via WBC unified (hold arms) → body={body_positions}")
-                body_sent = True
-        except Exception as exc:
-            print(f"[MoveJ] WARN: WBC body-via-dual failed: {exc}")
-
-        if not body_sent:
-            try:
-                interface.send_fsm_command(FSM_MOVEJ)
-                if sleep_fn:
-                    sleep_fn(0.1)
-            except Exception as exc:
-                print(f"[MoveJ] WARN: FSM MOVEJ before split-body failed: {exc}")
-            try:
-                interface.send_body_joint_positions(body_positions)
-                print(f"[MoveJ] Body split-topic → {body_positions}")
-                body_sent = True
-            except Exception as exc:
-                print(f"[MoveJ] WARN: send_body_joint_positions failed: {exc}")
-
-        if body_sent:
-            moved = True
-
-    # ── 3. 发送躯干关节（FSM 此时已在 MOVEJ=4，body controller 可接受指令）────
-    # split-body 模式：body controller 独立订阅，需在 MOVEJ 状态下单独发送。
-    # WBC 模式：body 已随手臂消息一起发出，此处 publisher 为 None，调用静默跳过。
-    # 跳过「仅躯干」步：已在 2b 发过，避免重复下发。
-    if body_positions and moved and (left_positions or right_positions):
-        try:
-            interface.send_body_joint_positions(body_positions)
-            print(f"[MoveJ] Body → {body_positions}")
-        except Exception as exc:
-            print(f"[MoveJ] WARN: send body joints failed: {exc}")
-
-    # ── 4. 等待全部关节到位（手臂 + 躯干）──────────────────────────────────────
-    if moved and (left_positions or right_positions or body_positions):
-        result = interface.wait_until_joint_arrive(
-            left_target_positions=left_positions or None,
-            right_target_positions=right_positions or None,
-            body_target_positions=body_positions or None,
-            timeout=arrival_timeout,
-            poll_period=0.05,
-            joint_tolerance=joint_tolerance,
-            time_now_fn=time_now_fn,
-            sleep_fn=sleep_fn,
-        )
-        if result.get("arrived"):
-            print("[MoveJ] Arrived at target config.")
-        else:
-            l_err = result.get("left_error_max_abs")
-            r_err = result.get("right_error_max_abs")
-            b_err = result.get("body_error_max_abs")
-            print(f"[MoveJ] WARN: timeout. L_err={l_err}  R_err={r_err}  Body_err={b_err}")
-
-    # ── 5. 可选：切回 OCS2 供后续笛卡尔 skill（pick/place）使用 ─────────────────
-    # ros2_robot_interface 的笛卡尔接口不会自动切 FSM，必须手动切到 OCS2(3)。
-    # 必须先过 HOLD 再切 OCS2（与 Runner 启动时序一致：HOLD→delay→OCS2→delay），
-    # 否则 OCS2 控制器从 MOVEJ 直接切入时不接管。
-    if resume_ocs2:
-        delay = getattr(getattr(ctx, "robot_cfg", None), "fsm_switch_delay", 0.5)
-        try:
-            interface.send_fsm_command(FSM_HOLD)
-            if sleep_fn:
-                sleep_fn(delay)
-            interface.send_fsm_command(FSM_OCS2)
-            if sleep_fn:
-                sleep_fn(delay)
-            print("[MoveJ] OCS2 resumed (HOLD→OCS2) — ready for Cartesian control.")
-        except Exception as exc:
-            print(f"[MoveJ] WARN: FSM OCS2 resume failed: {exc}")
-
-    return [], _default_meta(ctx)
-
-
 def _register_navigation_skills() -> None:
     register_skill("nav.send_nav_goal", skill_send_nav_goal)
     register_skill("nav.wait_nav_arrived", skill_wait_nav_arrived)
     register_skill("nav.navigate_to_pose", skill_navigate_to_pose)
     register_skill("nav.navigate_to_object", skill_navigate_to_object)
     register_skill("nav.navigate_backup", skill_navigate_backup)
-    register_skill("joint.movej_to_config", skill_movej_to_config)
 
 
 _register_navigation_skills()

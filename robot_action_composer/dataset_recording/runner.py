@@ -216,7 +216,6 @@ def run_recording(
     merged_task_queue: list[Any] | None = None,
 ) -> None:
     resolved_task_name = str(task_name if task_name else getattr(record_cfg, "task_name", "queue_task"))
-    frame_id = robot_cfg.base_link_entity_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
     robot = ROS2Robot(_build_robot_config(robot_cfg=robot_cfg, record_cfg=record_cfg))
     depth_required = bool(enable_keypoint_pcd)
     default_cam_name = next(iter(robot_cfg.cameras.keys()), "")
@@ -360,9 +359,6 @@ def run_recording(
                 sim_time=sim_time,
                 runtime=task_runtime,
                 use_stamped=use_stamped,
-                left_initial_joint_positions=left_initial_joint_positions,
-                right_initial_joint_positions=right_initial_joint_positions,
-                body_initial_joint_positions=body_initial_joint_positions,
             )
             recorder = DatasetRecorder(
                 robot=robot,

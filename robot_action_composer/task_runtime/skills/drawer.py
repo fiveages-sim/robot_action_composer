@@ -1,6 +1,8 @@
 """抽屉相关 ``single_arm.drawer.*`` 技能（拉手 / 关抽屉 / 撤退）。
 
 ``pull_open`` 计算把手参考系、执行拉开序列，并改写 ``ctx.task_cfg.place`` 的苹果中间放置提示。
+拉开末段距离由 :class:`~robot_action_composer.motion_generation.tasks.drawer.DrawerGeometryConfig`
+的 ``pull_distance``（``skill_defaults.single_arm.drawer``）决定；块级 ``params.pull_distance`` 可单次覆盖。
 阶段状态在 ``ctx.drawer``（:class:`DrawerPhaseState`）；几何配置在 ``ctx.drawer_geometry``。
 """
 
@@ -30,11 +32,13 @@ from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyri
 from robot_action_composer.motion_generation.tasks.drawer import (  # pyright: ignore[reportMissingImports]
     DrawerGeometryConfig,
     _apply_target_pose_offset,
-    build_single_arm_back_home_sequence,
     build_single_arm_close_drawer_sequence,
     build_single_arm_pull_drawer_sequence,
 )
-from robot_action_composer.task_runtime.config.single_arm import QueueSingleArmSlice  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.config.single_arm import (  # pyright: ignore[reportMissingImports]
+    QueueSingleArmSlice,
+    overlay_queue_single_arm_from_params,
+)
 from robot_action_composer.task_runtime.context import (
     DrawerPhaseState,
     QueueRuntimeContext,
@@ -89,7 +93,7 @@ def _require_drawer_phase(ctx: QueueRuntimeContext) -> DrawerPhaseState:
 
 
 def skill_drawer_pull_open(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     dcfg = _require_drawer_geometry(ctx)
     path_drawer = dcfg.source_object_path_drawer
@@ -149,18 +153,23 @@ def skill_drawer_pull_open(
     tc = ctx.task_cfg
     if not isinstance(tc, QueueSingleArmSlice):
         raise TypeError(f"drawer pull_open expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
+    # 块级 params（如 retreat_direction_extra）只作用于本次拉抽屉，不写回 ctx.task_cfg，避免影响后续 pick
+    tc_pull = overlay_queue_single_arm_from_params(tc, params)
+
+    pull_dist = float(params.get("pull_distance", dcfg.pull_distance))
 
     gripper_open = ctx.gripper_open
     gripper_closed = ctx.gripper_closed
     sequence = build_single_arm_pull_drawer_sequence(
         target_pose=source_target_pose_d,
-        pick=tc.pick,
+        pick=tc_pull.pick,
         drawer=dcfg,
         arm_side=_pick_arm_side(ctx),
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
         grasp_orientation=grasp_ori_drawer,
         grasp_direction_vector=dir_drawer,
+        pull_distance=pull_dist,
     )
 
     apple_place = (
@@ -260,41 +269,9 @@ def skill_drawer_close_push(
     )
 
 
-def skill_drawer_retreat_to_home(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    _require_drawer_geometry(ctx)
-    drw = _require_drawer_phase(ctx)
-    tc = ctx.task_cfg
-    if not isinstance(tc, QueueSingleArmSlice):
-        raise TypeError(f"drawer retreat_to_home expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
-
-    sequence = build_single_arm_back_home_sequence(
-        place_position=drw.place_pose_ref,
-        home_pose=ctx.source_home_pose,
-        place=tc.place,
-        arm_side=_pick_arm_side(ctx),
-        gripper_open=ctx.gripper_open,
-        gripper_closed=ctx.gripper_closed,
-        grasp_orientation=drw.grasp_orientation_xyzw,
-    )
-    if ctx.use_stamped:
-        for st in sequence:
-            if "ReturnHome" in st.name:
-                st.frame_id = queue_primary_ee_frame_id(ctx)
-
-    ctx.gripper_for_return_home = ctx.gripper_open
-    return sequence, ExecutionMeta(
-        send_mode=_stamped_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ drawer retreat timeout",
-    )
-
-
 def register_drawer_skills() -> None:
     register_skill("single_arm.drawer.pull_open", skill_drawer_pull_open)
     register_skill("single_arm.drawer.close_push", skill_drawer_close_push)
-    register_skill("single_arm.drawer.retreat_to_home", skill_drawer_retreat_to_home)
 
 
 register_drawer_skills()

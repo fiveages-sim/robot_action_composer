@@ -15,6 +15,7 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
     from robot_action_composer.task_runtime.config import QUEUE_SINGLE_ARM_FLAT_KEYS  # pyright: ignore[reportMissingImports]
 
     names: set[str] = set(QUEUE_SINGLE_ARM_FLAT_KEYS)
+    names.add("base_link_entity_path")
     for cls in (BimanualCarryTaskConfig, HandoverSyncConfig, DrawerGeometryConfig):
         names |= {f.name for f in fields(cls)}
     return frozenset(names)
@@ -41,6 +42,8 @@ def _apply_task_preset_runtime(base: Any, scene_flat: dict[str, object]) -> Any:
     if base.drawer is not None:
         for f in fields(DrawerGeometryConfig):
             merged[f.name] = getattr(base.drawer, f.name)
+    if base.base_link_entity_path is not None:
+        merged["base_link_entity_path"] = base.base_link_entity_path
     merged.update(scene_flat)
     return build_merged_queue_from_flat(merged)
 

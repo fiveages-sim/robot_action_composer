@@ -1,4 +1,4 @@
-"""Dual-arm queue skills (``dual_arm.*``): carry + handover sync + movej home."""
+"""Dual-arm queue skills (``dual_arm.*``): carry + handover sync + cache goto."""
 
 from __future__ import annotations
 
@@ -19,10 +19,13 @@ from robot_action_composer.motion_generation.tasks.bimanual_carry import (  # py
     slice_carry_stages_for_queue,
 )
 from robot_action_composer.motion_generation.tasks.handover import build_handover_sync_sequence  # pyright: ignore[reportMissingImports]
-from robot_action_composer.motion_generation.tasks.movej_return import movej_return_to_initial_state  # pyright: ignore[reportMissingImports]
 
-from robot_action_composer.task_runtime.context import QueueRuntimeContext, queue_primary_ee_frame_id
+from robot_action_composer.task_runtime.context import QueueRuntimeContext
 from robot_action_composer.task_runtime.registry import register_skill
+from robot_action_composer.task_runtime.skills.single_arm import (
+    _is_bimanual_ee_cache,
+    _scratch_pose_entry_to_geometry_pose,
+)
 from robot_action_composer.task_runtime.types import ExecutionMeta
 
 
@@ -54,25 +57,6 @@ def _require_handover_sync(ctx: QueueRuntimeContext):
             "need handover_position + orientations). Pick side arm comes from common.arm / single_arm.pick."
         )
     return h
-
-
-def skill_carry_pregrasp(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    if ctx.left_home_pose is None or ctx.right_home_pose is None:
-        raise RuntimeError("carry pregrasp requires left_home_pose and right_home_pose on ctx")
-    stages = [
-        StageTarget(
-            name="TaskQ-Bimanual-pregrasp",
-            left=ArmTarget(pose=ctx.left_home_pose, gripper=ctx.gripper_open),
-            right=ArmTarget(pose=ctx.right_home_pose, gripper=ctx.gripper_open),
-        )
-    ]
-    return stages, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=queue_primary_ee_frame_id(ctx),
-        warn_prefix="TaskQ dual_arm carry pregrasp timeout",
-    )
 
 
 def skill_carry_approach(
@@ -160,26 +144,48 @@ def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[l
     )
 
 
-def skill_return_home(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+def skill_goto_cache_pose(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂同时回到连接时缓存的 Cartesian home（与 ``carry_pregrasp`` 同构，不依赖 carry 配置）。"""
-    if ctx.left_home_pose is None or ctx.right_home_pose is None:
-        raise RuntimeError(
-            "dual_arm.return_home requires left_home_pose and right_home_pose "
-            "(handover / carry 任务在 Runner 中会拉取双臂 home)"
+    """双臂同步笛卡尔运动到 ``robot.cache_ee_pose``（``which: both``）写入的左右缓存位姿。"""
+    key = str(params.get("key", "saved_ee_pose")).strip() or "saved_ee_pose"
+    raw = ctx.scratch_get(key)
+    if not isinstance(raw, Mapping) or not _is_bimanual_ee_cache(raw):
+        raise ValueError(
+            f"dual_arm.goto_cache_pose: cache[{key!r}] must be bimanual "
+            "(use robot.cache_ee_pose with which: both)"
         )
+    left_sub = raw.get("left")
+    right_sub = raw.get("right")
+    if not isinstance(left_sub, Mapping) or not isinstance(right_sub, Mapping):
+        raise ValueError(
+            f"dual_arm.goto_cache_pose: cache[{key!r}] needs valid left and right entries"
+        )
+
+    def _grip(sub: Mapping[str, Any], side_key: str) -> float:
+        sk = f"{side_key}_gripper"
+        if params.get(sk) is not None:
+            return float(params[sk])
+        if params.get("gripper") is not None:
+            return float(params["gripper"])
+        return float(sub.get("gripper", ctx.gripper_for_return_home))
+
+    left_pose = _scratch_pose_entry_to_geometry_pose(left_sub)
+    right_pose = _scratch_pose_entry_to_geometry_pose(right_sub)
+    gl = _grip(left_sub, "left")
+    gr = _grip(right_sub, "right")
+
     stages = [
         StageTarget(
-            name="TaskQ-DualReturnHome",
-            left=ArmTarget(pose=ctx.left_home_pose, gripper=ctx.gripper_for_return_home),
-            right=ArmTarget(pose=ctx.right_home_pose, gripper=ctx.gripper_for_return_home),
+            name=str(params.get("stage_name", "TaskQ-DualGotoCachePose")),
+            left=ArmTarget(pose=left_pose, gripper=gl),
+            right=ArmTarget(pose=right_pose, gripper=gr),
         )
     ]
     return stages, ExecutionMeta(
         send_mode=_dual_mode(ctx),
         frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm return home timeout",
+        warn_prefix="TaskQ dual_arm goto cache pose timeout",
     )
 
 
@@ -207,36 +213,13 @@ def skill_handover_sync(
     )
 
 
-def skill_movej_return_initial(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    moved = movej_return_to_initial_state(
-        interface=ctx.interface,
-        left_initial_positions=ctx.left_initial_joint_positions,
-        right_initial_positions=ctx.right_initial_joint_positions,
-        body_initial_positions=ctx.body_initial_joint_positions,
-        arrival_timeout=ctx.robot_cfg.arrival_timeout,
-        arrival_poll=ctx.robot_cfg.arrival_poll,
-        sim_time=ctx.sim_time,
-    )
-    if not moved:
-        print("[WARN] MoveJ return-to-initial skipped: no valid cached joints or motion failed.")
-    return [], ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm movej return",
-    )
-
-
 def register_dual_arm_skills() -> None:
-    register_skill("dual_arm.carry_pregrasp", skill_carry_pregrasp)
     register_skill("dual_arm.carry_approach", skill_carry_approach)
     register_skill("dual_arm.carry_grasp", skill_carry_grasp)
     register_skill("dual_arm.carry_lift_retreat", skill_carry_lift_retreat)
     register_skill("dual_arm.carry", skill_carry)
     register_skill("dual_arm.handover_sync", skill_handover_sync)
-    register_skill("dual_arm.return_home", skill_return_home)
-    register_skill("dual_arm.movej_return_initial", skill_movej_return_initial)
+    register_skill("dual_arm.goto_cache_pose", skill_goto_cache_pose)
 
 
 register_dual_arm_skills()
