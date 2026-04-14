@@ -48,12 +48,13 @@ def load_motion_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
         robot_label = getattr(robot_mod, "ROBOT_LABEL", robot_dir.name)
         robot_cfg = getattr(robot_mod, "ROBOT_CFG")
 
-        tasks = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
+        discovery = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
 
         entries[robot_key] = {
             "label": robot_label,
             "robot_cfg": robot_cfg,
-            "tasks": tasks,
+            "tasks": discovery.tasks,
+            "task_groups": discovery.task_groups,
         }
     return entries
 
@@ -101,5 +102,6 @@ def load_robot_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
             "label": robot_label,
             "robot_cfg": robot_cfg,
             "record": record_entry,
+            "task_groups": motion_entry.get("task_groups", {}),
         }
     return entries

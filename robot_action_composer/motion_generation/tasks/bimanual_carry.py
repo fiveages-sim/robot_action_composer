@@ -22,15 +22,21 @@ CARRY_TOTAL_STAGES = CARRY_APPROACH_STAGE_COUNT + CARRY_GRASP_STAGE_COUNT + CARR
 
 @dataclass(frozen=True)
 class BimanualCarryTaskConfig:
+    """双臂对称搬运几何（扁平 YAML / ``dual_arm.carry`` 合并到 ``MergedQueueConfig.carry``）。"""
+
     source_object_entity_path: str
-    lateral_offset: float
-    approach_offset: tuple[float, float, float]
-    left_orientation: tuple[float, float, float, float]
-    right_orientation: tuple[float, float, float, float]
-    lift_offset: tuple[float, float, float]
-    retreat_offset: tuple[float, float, float]
-    lateral_clearance: float = 0.0
-    grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # 相对物体中心：左右手在横向（典型为 Y）上的半间距分量，与 carry_grasp_xyz[1] 相加得抓取半宽
+    carry_half_span_y: float
+    # 预闭合前：相对抓取点的后退/侧移/抬升（Approach→Forward 段）
+    carry_pregrasp_xyz: tuple[float, float, float]
+    carry_left_orientation: tuple[float, float, float, float]
+    carry_right_orientation: tuple[float, float, float, float]
+    carry_lift_xyz: tuple[float, float, float]
+    carry_retreat_xyz: tuple[float, float, float]
+    # 仅 Approach/Forward：在半间距上再张开的余量（米）
+    carry_approach_clearance_y: float = 0.0
+    # 物体中心到名义抓取点的平移（物体坐标系）
+    carry_grasp_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     object_xyz_random_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
@@ -39,9 +45,9 @@ def format_bimanual_carry_task_cfg_summary(
 ) -> str:
     return (
         f"[Scene] {scene} -> {task_cfg.source_object_entity_path}, "
-        f"lateral_offset={task_cfg.lateral_offset}, "
-        f"approach_offset={task_cfg.approach_offset}, "
-        f"lift_offset={task_cfg.lift_offset}, retreat_offset={task_cfg.retreat_offset}"
+        f"carry_half_span_y={task_cfg.carry_half_span_y}, "
+        f"carry_pregrasp_xyz={task_cfg.carry_pregrasp_xyz}, "
+        f"carry_lift_xyz={task_cfg.carry_lift_xyz}, carry_retreat_xyz={task_cfg.carry_retreat_xyz}"
     )
 
 
@@ -64,14 +70,14 @@ def build_bimanual_carry_record_sequence(
     """Build the full bimanual carry sequence as StageTarget list."""
     return build_bimanual_carry_sequence(
         object_center=object_center,
-        lateral_offset=carry_task_cfg.lateral_offset,
-        approach_offset=carry_task_cfg.approach_offset,
-        lateral_clearance=carry_task_cfg.lateral_clearance,
-        grasp_offset=carry_task_cfg.grasp_offset,
-        left_orientation=carry_task_cfg.left_orientation,
-        right_orientation=carry_task_cfg.right_orientation,
-        lift_offset=carry_task_cfg.lift_offset,
-        retreat_offset=carry_task_cfg.retreat_offset,
+        carry_half_span_y=carry_task_cfg.carry_half_span_y,
+        carry_pregrasp_xyz=carry_task_cfg.carry_pregrasp_xyz,
+        carry_approach_clearance_y=carry_task_cfg.carry_approach_clearance_y,
+        carry_grasp_xyz=carry_task_cfg.carry_grasp_xyz,
+        carry_left_orientation=carry_task_cfg.carry_left_orientation,
+        carry_right_orientation=carry_task_cfg.carry_right_orientation,
+        carry_lift_xyz=carry_task_cfg.carry_lift_xyz,
+        carry_retreat_xyz=carry_task_cfg.carry_retreat_xyz,
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
     )

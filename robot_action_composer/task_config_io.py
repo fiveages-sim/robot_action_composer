@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -60,47 +62,97 @@ def load_task_dict_from_yaml(path: Path) -> dict[str, Any]:
     return _normalize_numeric_lists(data)  # type: ignore[return-value]
 
 
-def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> dict[str, dict[str, Any]]:
-    """Return ``task_key -> task config dict`` for one robot's ``task_configs`` directory.
+def _should_skip_task_cfg_path(path: Path, *, root: Path) -> bool:
+    """Skip hidden path segments and ``__pycache__`` under ``task_configs``."""
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return True
+    return any(part == "__pycache__" or part.startswith(".") for part in rel.parts)
 
-    Each task is defined by ``<stem>.yaml`` or ``<stem>.yml`` (one file per stem). Python
-    task modules (``*.py``) are not loaded.
+
+def _task_group_id(yaml_path: Path, task_cfg_dir: Path) -> str:
+    """First-level folder under ``task_configs``; direct children use ``\"\"`` (root group)."""
+    rel = yaml_path.relative_to(task_cfg_dir)
+    if len(rel.parts) <= 1:
+        return ""
+    return rel.parts[0]
+
+
+@dataclass(frozen=True)
+class TaskConfigDiscovery:
+    """YAML task registry plus one-level folder grouping for interactive menus."""
+
+    tasks: dict[str, dict[str, Any]]
+    """Flat ``task_key -> config`` (unique keys across the tree)."""
+
+    task_groups: dict[str, list[str]]
+    """Group id (``\"\"`` = files directly under ``task_configs/``) -> task_key list."""
+
+
+def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskConfigDiscovery:
+    """Load all task YAML under ``task_cfg_dir`` and assign each task to a first-level group.
+
+    Recursively loads ``*.yaml`` / ``*.yml``. Files directly in ``task_cfg_dir`` belong to
+    group ``\"\"``; ``task_cfg_dir / <folder> / ...`` uses group id ``<folder>`` (deeper
+    paths still count under that folder). In each directory, a basename may use either
+    ``.yaml`` or ``.yml``, not both. Python task modules (``*.py``) are not loaded.
+    Paths under hidden segments or ``__pycache__`` are ignored.
     """
-    stems: set[str] = set()
-    for p in task_cfg_dir.glob("*.yaml"):
-        stems.add(p.stem)
-    for p in task_cfg_dir.glob("*.yml"):
-        stems.add(p.stem)
+    stems_by_parent: dict[Path, set[str]] = {}
+    for pattern in ("*.yaml", "*.yml"):
+        for p in task_cfg_dir.rglob(pattern):
+            if not p.is_file() or _should_skip_task_cfg_path(p, root=task_cfg_dir):
+                continue
+            if not p.stem:
+                continue
+            stems_by_parent.setdefault(p.parent, set()).add(p.stem)
 
     tasks: dict[str, dict[str, Any]] = {}
-    for stem in sorted(stems):
-        yaml_path = task_cfg_dir / f"{stem}.yaml"
-        yml_path = task_cfg_dir / f"{stem}.yml"
-        if yaml_path.is_file() and yml_path.is_file():
-            raise ValueError(
-                f"Robot {robot_dir_name!r}: task {stem!r} has both {yaml_path.name} and {yml_path.name} "
-                f"— keep only one."
-            )
-        path = yaml_path if yaml_path.is_file() else yml_path
-        if not path.is_file():
-            continue
-        raw = load_task_dict_from_yaml(path)
+    task_key_paths: dict[str, Path] = {}
+    group_keys: dict[str, list[str]] = defaultdict(list)
+    for parent in sorted(stems_by_parent.keys(), key=lambda d: str(d.relative_to(task_cfg_dir))):
+        for stem in sorted(stems_by_parent[parent]):
+            yaml_path = parent / f"{stem}.yaml"
+            yml_path = parent / f"{stem}.yml"
+            if yaml_path.is_file() and yml_path.is_file():
+                raise ValueError(
+                    f"Robot {robot_dir_name!r}: task {stem!r} in {parent} has both "
+                    f"{yaml_path.name} and {yml_path.name} — keep only one."
+                )
+            path = yaml_path if yaml_path.is_file() else yml_path
+            if not path.is_file():
+                continue
+            raw = load_task_dict_from_yaml(path)
 
-        if not isinstance(raw, dict):
-            continue
-        task_key = raw.get("task_key")
-        if not isinstance(task_key, str):
-            raise ValueError(f"Task config {stem!r} must define string task_key: {task_cfg_dir}")
-        tq = raw.get("task_queue")
-        if not isinstance(tq, list) or len(tq) == 0:
-            raise ValueError(
-                f"Robot {robot_dir_name!r} task {task_key!r}: requires a non-empty list 'task_queue'."
-            )
-        tasks[task_key] = dict(raw)
-    return tasks
+            if not isinstance(raw, dict):
+                continue
+            task_key = raw.get("task_key")
+            if not isinstance(task_key, str):
+                raise ValueError(
+                    f"Task config {path.relative_to(task_cfg_dir)!s} must define string task_key: {task_cfg_dir}"
+                )
+            tq = raw.get("task_queue")
+            if not isinstance(tq, list) or len(tq) == 0:
+                raise ValueError(
+                    f"Robot {robot_dir_name!r} task {task_key!r}: requires a non-empty list 'task_queue'."
+                )
+            if task_key in tasks:
+                prev = task_key_paths[task_key]
+                raise ValueError(
+                    f"Robot {robot_dir_name!r}: duplicate task_key {task_key!r} in "
+                    f"{path} and {prev}"
+                )
+            task_key_paths[task_key] = path
+            tasks[task_key] = dict(raw)
+            group_keys[_task_group_id(path, task_cfg_dir)].append(task_key)
+
+    task_groups = {gid: sorted(keys) for gid, keys in sorted(group_keys.items(), key=lambda x: (x[0] != "", x[0]))}
+    return TaskConfigDiscovery(tasks=tasks, task_groups=task_groups)
 
 
 __all__ = [
+    "TaskConfigDiscovery",
     "discover_task_configs",
     "flatten_queue_task_overrides",
     "load_task_dict_from_yaml",

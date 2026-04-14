@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from dataclasses import fields
 import importlib.util
+import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 
 def _load_module(module_name: str, file_path: Path) -> Any:
@@ -39,13 +40,14 @@ def _discover_task_registry(isaac_dir: Path) -> dict[str, dict[str, Any]]:
         robot_label = getattr(robot_mod, "ROBOT_LABEL", robot_dir.name)
         robot_cfg = getattr(robot_mod, "ROBOT_CFG")
 
-        tasks = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
+        discovery = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
 
-        if tasks:
+        if discovery.tasks:
             registry[robot_key] = {
                 "label": robot_label,
                 "robot_cfg": robot_cfg,
-                "tasks": tasks,
+                "tasks": discovery.tasks,
+                "task_groups": discovery.task_groups,
             }
 
     return registry
@@ -67,6 +69,95 @@ def _select_option(*, title: str, options: list[str], default_value: str) -> str
         return raw
     print(f"[info] Invalid option '{raw}', using default '{default_value}'.")
     return default_value
+
+
+class _MotionLastDict(TypedDict, total=False):
+    isaac_dir: str
+    robot_key: str
+    task_key: str
+    scene: str
+    num_runs: int
+    reset_env: bool
+
+
+def _motion_last_file() -> Path:
+    return Path.home() / ".cache" / "robot_action_composer" / "motion_last.json"
+
+
+def _load_motion_last() -> _MotionLastDict | None:
+    path = _motion_last_file()
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw  # type: ignore[return-value]
+
+
+def _save_motion_last(
+    *,
+    isaac_dir: Path,
+    robot_key: str,
+    task_key: str,
+    scene: str,
+    num_runs: int,
+    reset_env: bool,
+) -> None:
+    path = _motion_last_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: _MotionLastDict = {
+            "isaac_dir": str(isaac_dir.resolve()),
+            "robot_key": robot_key,
+            "task_key": task_key,
+            "scene": scene,
+            "num_runs": int(num_runs),
+            "reset_env": bool(reset_env),
+        }
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _motion_last_applies(
+    last: _MotionLastDict,
+    *,
+    isaac_dir: Path,
+    registry: dict[str, dict[str, Any]],
+) -> bool:
+    if str(isaac_dir.resolve()) != last.get("isaac_dir"):
+        return False
+    rk = last.get("robot_key")
+    tk = last.get("task_key")
+    sc = last.get("scene")
+    if not isinstance(rk, str) or not isinstance(tk, str) or not isinstance(sc, str):
+        return False
+    robot_entry = registry.get(rk)
+    if not robot_entry:
+        return False
+    tasks_map = robot_entry.get("tasks") or {}
+    if tk not in tasks_map:
+        return False
+    scene_presets = tasks_map[tk].get("scene_presets") or {}
+    if sc not in scene_presets:
+        return False
+    n = last.get("num_runs", 1)
+    if not isinstance(n, int) or n < 1:
+        return False
+    return True
+
+
+def _format_motion_last_line(last: _MotionLastDict) -> str:
+    rk = last.get("robot_key", "?")
+    tk = last.get("task_key", "?")
+    sc = last.get("scene", "?")
+    n = last.get("num_runs", 1)
+    re_ = last.get("reset_env", True)
+    reset_s = "yes" if re_ else "no"
+    return f"robot={rk}  task={tk}  scene={sc}  runs={n}  reset_env={reset_s}"
 
 
 def _merged_queue_allowed_keys() -> frozenset[str]:
@@ -98,7 +189,7 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
     )
     from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
         prompt_positive_int,
-        select_option as select_labeled_option,
+        select_task_with_optional_group,
     )
 
     registry = _discover_task_registry(isaac_dir)
@@ -107,47 +198,82 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
 
     print("IsaacSim Run Motion Generation")
     print("=" * 70)
-    robot_keys = list(registry.keys())
-    robot_key = _select_option(title="Select robot", options=robot_keys, default_value="dobot_cr5")
-    robot_entry = registry[robot_key]
 
-    tasks_map = robot_entry["tasks"]
-    task_options = {
-        key: {"label": str(meta.get("label", key))}
-        for key, meta in tasks_map.items()
-    }
-    default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
-    task_key = select_labeled_option(
-        title="Select task",
-        options=task_options,
-        default_key=default_task_key,
+    last = _load_motion_last()
+    use_last = False
+    if last and _motion_last_applies(last, isaac_dir=isaac_dir, registry=registry):
+        line = _format_motion_last_line(last)
+        print("\nHow to run?")
+        print(f"  1. Last selection — {line}")
+        print("  2. Interactive (choose robot / task / scene / …)")
+        raw_mode = input("Select [1/2] (Enter = 1): ").strip().lower()
+        if raw_mode in ("", "1"):
+            use_last = True
+
+    if use_last and last:
+        robot_key = str(last["robot_key"])
+        task_key = str(last["task_key"])
+        scene = str(last["scene"])
+        num_runs = int(last.get("num_runs", 1))
+        reset_env = bool(last.get("reset_env", True))
+        robot_entry = registry[robot_key]
+        task_entry = robot_entry["tasks"][task_key]
+        print(f"\n[info] Using last selection: {_format_motion_last_line(last)}")
+    else:
+        robot_keys = list(registry.keys())
+        default_robot = "dobot_cr5" if "dobot_cr5" in registry else robot_keys[0]
+        robot_key = _select_option(title="Select robot", options=robot_keys, default_value=default_robot)
+        robot_entry = registry[robot_key]
+
+        tasks_map = robot_entry["tasks"]
+        task_options = {
+            key: {"label": str(meta.get("label", key))}
+            for key, meta in tasks_map.items()
+        }
+        default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
+        task_key = select_task_with_optional_group(
+            title_group="Select task folder",
+            title_task="Select task",
+            tasks=task_options,
+            task_groups=robot_entry.get("task_groups", {}),
+            default_task_key=default_task_key,
+        )
+        task_entry = robot_entry["tasks"][task_key]
+
+        scene_presets = task_entry["scene_presets"]
+        scene_names = list(scene_presets.keys())
+        default_scene = task_entry["default_scene"]
+        scene = _select_option(title="Select config", options=scene_names, default_value=default_scene)
+
+        num_runs = prompt_positive_int(
+            "How many motion runs? (Enter = 1): ",
+            default=1,
+            min_value=1,
+        )
+
+        if num_runs > 1:
+            reset_env = True
+            print(
+                "[info] Multiple motion runs: each run will reset the environment "
+                "& randomize the object (same as record episodes)."
+            )
+        else:
+            reset_env = _select_option(
+                title="Reset environment & randomize object?",
+                options=["yes", "no"],
+                default_value="yes",
+            ) == "yes"
+
+    _save_motion_last(
+        isaac_dir=isaac_dir,
+        robot_key=robot_key,
+        task_key=task_key,
+        scene=scene,
+        num_runs=num_runs,
+        reset_env=reset_env,
     )
-    task_entry = robot_entry["tasks"][task_key]
 
     scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
-    scene_names = list(scene_presets.keys())
-    default_scene = task_entry["default_scene"]
-    scene = _select_option(title="Select config", options=scene_names, default_value=default_scene)
-
-    num_runs = prompt_positive_int(
-        "How many motion runs? (Enter = 1): ",
-        default=1,
-        min_value=1,
-    )
-
-    if num_runs > 1:
-        reset_env = True
-        print(
-            "[info] Multiple motion runs: each run will reset the environment "
-            "& randomize the object (same as record episodes)."
-        )
-    else:
-        reset_env = _select_option(
-            title="Reset environment & randomize object?",
-            options=["yes", "no"],
-            default_value="yes",
-        ) == "yes"
-
     use_stamped = task_entry.get("use_stamped", True)
 
     allowed = _merged_queue_allowed_keys()

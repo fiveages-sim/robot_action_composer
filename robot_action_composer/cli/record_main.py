@@ -81,6 +81,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
     from robot_action_composer.dataset_recording.launcher import (
         collect_runtime_options,
         select_option,
+        select_task_with_optional_group,
     )
     from robot_action_composer.discovery.registry_loader import load_robot_entries
     from robot_action_composer.task_config_io import flatten_queue_task_overrides
@@ -117,6 +118,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
             "label": entry["label"],
             "robot_cfg": entry["robot_cfg"],
             "tasks": tasks,
+            "task_groups": entry.get("task_groups", {}),
         }
     if not registry:
         raise RuntimeError("No record-capable robot configs found under examples/IsaacSim/robots")
@@ -130,10 +132,12 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
 
     task_keys = list(robot_entry["tasks"].keys())
     default_task = "pick_place" if "pick_place" in robot_entry["tasks"] else task_keys[0]
-    task_key = select_option(
-        title="Select task",
-        options=robot_entry["tasks"],
-        default_key=default_task,
+    task_key = select_task_with_optional_group(
+        title_group="Select task folder",
+        title_task="Select task",
+        tasks=robot_entry["tasks"],
+        task_groups=robot_entry.get("task_groups", {}),
+        default_task_key=default_task,
     )
     task_entry = robot_entry["tasks"][task_key]
     task_runtime = _build_task_runtime(task_entry["task_cfg"])

@@ -41,10 +41,11 @@ def _try_handover(flat: Mapping[str, Any]) -> HandoverSyncConfig | None:
 
 
 def _try_carry(flat: Mapping[str, Any]) -> BimanualCarryTaskConfig | None:
-    if "lateral_offset" not in flat:
+    kw = kwargs_for_dataclass(BimanualCarryTaskConfig, flat)
+    if "carry_half_span_y" not in kw:
         return None
     try:
-        return _dataclass_from_combined(BimanualCarryTaskConfig, flat)
+        return _dataclass_from_combined(BimanualCarryTaskConfig, kw)
     except TypeError:
         return None
 

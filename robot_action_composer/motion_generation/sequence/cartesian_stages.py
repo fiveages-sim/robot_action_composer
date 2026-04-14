@@ -478,14 +478,14 @@ def build_handover_sequence(
 def build_bimanual_carry_sequence(
     *,
     object_center: Pose,
-    lateral_offset: float,
-    approach_offset: tuple[float, float, float],
-    lateral_clearance: float = 0.0,
-    grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    left_orientation: tuple[float, float, float, float],
-    right_orientation: tuple[float, float, float, float],
-    lift_offset: tuple[float, float, float],
-    retreat_offset: tuple[float, float, float],
+    carry_half_span_y: float,
+    carry_pregrasp_xyz: tuple[float, float, float],
+    carry_approach_clearance_y: float = 0.0,
+    carry_grasp_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    carry_left_orientation: tuple[float, float, float, float],
+    carry_right_orientation: tuple[float, float, float, float],
+    carry_lift_xyz: tuple[float, float, float],
+    carry_retreat_xyz: tuple[float, float, float],
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Carry",
@@ -504,28 +504,28 @@ def build_bimanual_carry_sequence(
     ) -> tuple[Pose, Pose]:
         left = Pose()
         left.position.x, left.position.y, left.position.z = x, cy + y_half, z
-        left.orientation.x, left.orientation.y = left_orientation[0], left_orientation[1]
-        left.orientation.z, left.orientation.w = left_orientation[2], left_orientation[3]
+        left.orientation.x, left.orientation.y = carry_left_orientation[0], carry_left_orientation[1]
+        left.orientation.z, left.orientation.w = carry_left_orientation[2], carry_left_orientation[3]
         right = Pose()
         right.position.x, right.position.y, right.position.z = x, cy - y_half, z
-        right.orientation.x, right.orientation.y = right_orientation[0], right_orientation[1]
-        right.orientation.z, right.orientation.w = right_orientation[2], right_orientation[3]
+        right.orientation.x, right.orientation.y = carry_right_orientation[0], carry_right_orientation[1]
+        right.orientation.z, right.orientation.w = carry_right_orientation[2], carry_right_orientation[3]
         return left, right
 
-    grasp_x = cx + grasp_offset[0]
-    grasp_y_half = lateral_offset + grasp_offset[1]
-    grasp_z = cz + grasp_offset[2]
+    grasp_x = cx + carry_grasp_xyz[0]
+    grasp_y_half = carry_half_span_y + carry_grasp_xyz[1]
+    grasp_z = cz + carry_grasp_xyz[2]
 
     # 1-Approach: far back, arms spread wide
     approach_l, approach_r = _lr_poses(
-        grasp_x + approach_offset[0],
-        grasp_y_half + lateral_clearance + approach_offset[1],
-        grasp_z + approach_offset[2],
+        grasp_x + carry_pregrasp_xyz[0],
+        grasp_y_half + carry_approach_clearance_y + carry_pregrasp_xyz[1],
+        grasp_z + carry_pregrasp_xyz[2],
     )
     # 2-Forward: move to object X, but still spread wide
     forward_l, forward_r = _lr_poses(
         grasp_x,
-        grasp_y_half + lateral_clearance,
+        grasp_y_half + carry_approach_clearance_y,
         grasp_z,
     )
     # 3-CloseIn: narrow to grasp position
@@ -533,15 +533,15 @@ def build_bimanual_carry_sequence(
     # 4-Grasp: same position, close grippers
     # 5-Lift
     lift_l, lift_r = _lr_poses(
-        grasp_x + lift_offset[0],
-        grasp_y_half + lift_offset[1],
-        grasp_z + lift_offset[2],
+        grasp_x + carry_lift_xyz[0],
+        grasp_y_half + carry_lift_xyz[1],
+        grasp_z + carry_lift_xyz[2],
     )
     # 6-Retreat
     retreat_l, retreat_r = _lr_poses(
-        grasp_x + lift_offset[0] + retreat_offset[0],
-        grasp_y_half + lift_offset[1] + retreat_offset[1],
-        grasp_z + lift_offset[2] + retreat_offset[2],
+        grasp_x + carry_lift_xyz[0] + carry_retreat_xyz[0],
+        grasp_y_half + carry_lift_xyz[1] + carry_retreat_xyz[1],
+        grasp_z + carry_lift_xyz[2] + carry_retreat_xyz[2],
     )
 
     return [
@@ -643,6 +643,8 @@ def execute_stage_sequence(
     gripper_action_wait: float,
     left_arrival_guard_stage: str | None = None,
     warn_prefix: str = "Stage timeout",
+    pose_tol_pos: float | None = None,
+    pose_tol_ori: float | None = None,
     on_stage_start: Callable[[str, StageTarget], None] | None = None,
     on_stage_poll: Callable[[str, str, dict[str, Any] | None, float], None] | None = None,
     on_stage_end: Callable[[str, dict[str, Any], dict[str, Any]], None] | None = None,
@@ -656,6 +658,9 @@ def execute_stage_sequence(
     After each stage, if :attr:`StageTarget.wait_gripper_settle` is True, calls
     ``sleep_fn(gripper_action_wait)`` so the gripper can finish closing/opening
     (set by built-in pick/place/handover/carry builders; custom stages may set it explicitly).
+
+    ``pose_tol_pos`` / ``pose_tol_ori``（米 / 无量纲姿态距离，与 ``QueueSliceCommon`` 一致）若给出，
+    则传给 ``ROS2RobotInterface.wait_until_arrive`` 用于左右臂笛卡尔到位判定；否则使用接口默认阈值。
     """
     for stage in sequence:
         logger.info("[Stage] %s", stage.name)
@@ -675,6 +680,8 @@ def execute_stage_sequence(
                 poll_period=arrival_poll,
                 time_now_fn=time_now_fn,
                 sleep_fn=sleep_fn,
+                arm_pose_threshold=pose_tol_pos,
+                arm_orient_threshold=pose_tol_ori,
                 on_poll=(
                     (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "left_arm", _r, _e))
                     if on_stage_poll is not None
@@ -688,6 +695,8 @@ def execute_stage_sequence(
                 poll_period=arrival_poll,
                 time_now_fn=time_now_fn,
                 sleep_fn=sleep_fn,
+                arm_pose_threshold=pose_tol_pos,
+                arm_orient_threshold=pose_tol_ori,
                 on_poll=(
                     (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "right_arm", _r, _e))
                     if on_stage_poll is not None

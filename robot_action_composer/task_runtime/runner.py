@@ -58,6 +58,11 @@ def _execute_block(
         left_arrival_guard_stage=meta.left_arrival_guard_stage,
         warn_prefix=meta.warn_prefix,
     )
+    task_slice = getattr(ctx, "task_cfg", None)
+    common = getattr(task_slice, "common", None) if task_slice is not None else None
+    if common is not None:
+        exec_kw["pose_tol_pos"] = common.pose_tol_pos
+        exec_kw["pose_tol_ori"] = common.pose_tol_ori
     if execute_stage_kwargs:
         exec_kw.update(dict(execute_stage_kwargs))
     execute_stage_sequence(**exec_kw)
