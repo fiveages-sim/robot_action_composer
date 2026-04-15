@@ -25,7 +25,6 @@ class QueueSliceCommon:
 class QueueSlicePick:
     """当前工作臂抓取几何（由 ``common.arm`` 决定左/右）。"""
 
-    object_xyz_random_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     target_pose_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     approach_clearance: float = 0.2
     grasp_clearance: float = 0.01
@@ -75,23 +74,9 @@ class QueueSingleArmSlice:
     def source_object_entity_path(self) -> str:
         return self.pick.source_object_entity_path
 
-    @property
-    def object_xyz_random_offset(self) -> tuple[float, float, float]:
-        return self.pick.object_xyz_random_offset
-
-    def to_flat(self) -> dict[str, Any]:
-        """合并为任务 YAML 使用的扁平 dict。"""
-        d: dict[str, Any] = {}
-        for f in fields(QueueSliceCommon):
-            d[f.name] = getattr(self.common, f.name)
-        for f in fields(QueueSlicePick):
-            d[f.name] = getattr(self.pick, f.name)
-        for f in fields(QueueSlicePlace):
-            d[f.name] = getattr(self.place, f.name)
-        return d
-
     @classmethod
-    def from_flat(cls, flat: Mapping[str, Any]) -> QueueSingleArmSlice:
+    def from_merged_key_dict(cls, flat: Mapping[str, Any]) -> QueueSingleArmSlice:
+        """从与 carry/handover 等混在同一 mapping 的合并键中解析（仅使用单臂相关字段名）。"""
         flat_n = dict(flat)
         common = QueueSliceCommon(**kwargs_for_dataclass(QueueSliceCommon, flat_n))
         pick = QueueSlicePick(**kwargs_for_dataclass(QueueSlicePick, flat_n))
@@ -125,6 +110,20 @@ def format_queue_single_arm_summary(scene: str, task: QueueSingleArmSlice) -> st
             f"place_insert={pl.place_insert_clearance}"
         )
     return ", ".join(parts)
+
+
+def overlay_single_arm_pick_place(
+    queue: QueueSingleArmSlice,
+    pick_sd: Mapping[str, Any],
+    place_sd: Mapping[str, Any],
+) -> QueueSingleArmSlice:
+    """与 ``merge_pick_place_skill_overlay`` 的 arm 规则一致：pick/place 同时指定 arm 时去掉 place 的 arm。"""
+    pick_d = dict(pick_sd)
+    place_d = dict(place_sd)
+    if "arm" in pick_d and "arm" in place_d:
+        place_d = {k: v for k, v in place_d.items() if k != "arm"}
+    q = overlay_queue_single_arm_from_params(queue, pick_d)
+    return overlay_queue_single_arm_from_params(q, place_d)
 
 
 def overlay_queue_single_arm_from_params(

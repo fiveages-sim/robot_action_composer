@@ -17,14 +17,14 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     SimTimeHelper,
     get_entity_pose_world_service,
     randomize_object_xyz_after_reset,
-    reset_simulation_and_randomize_object,
+    reset_simulation_state,
     set_prim_orientation_local,
 )
 
 from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.drawer import euler_to_quaternion  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
-from robot_action_composer.task_runtime.merge.flat_presets import reset_fields_from_first_pick_block
+from robot_action_composer.task_runtime.merge.flat_presets import reset_settle_entity_path_from_queue
 from robot_action_composer.task_runtime.registry import get_skill
 from robot_action_composer.task_runtime.config.merged import MergedQueueConfig
 from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec, QueueBlock, block_spec_from_mapping
@@ -176,6 +176,7 @@ def build_queue_runtime_context(
         base_world_quat=base_world_quat,
         gripper_for_return_home=gripper_closed,
         carry_task_cfg=runtime.carry,
+        place_task_cfg=runtime.place,
         handover_sync=runtime.handover,
         drawer_geometry=runtime.drawer,
     )
@@ -188,9 +189,14 @@ def reset_queue_task_environment(
     robot_cfg: Any,
     sim_time: SimTimeHelper,
 ) -> None:
+    """Isaac：仅 reset/play + settle，**不**在 reset 内随机物体平移。
+
+    需要扰动 prim 时，把 ``env.randomize_object_local_xyz`` 放在 ``task_queue`` **第一个**顺序块
+    （若首块为 ``parallel``，则作为其子步骤之一，在并行开始前单独一步更稳妥）。
+    """
     if runtime.drawer is not None:
         dcfg = runtime.drawer
-        reset_source_path, reset_xyz_offset = reset_fields_from_first_pick_block(specs, runtime.single_arm)
+        reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
         apple_path = reset_source_path
         drawer_prim = dcfg.source_object_path_drawer
         drawer_all = dcfg.source_object_path_drawer_all
@@ -199,9 +205,8 @@ def reset_queue_task_environment(
                 "drawer task queue requires source_object_entity_path (task_cfg or single_arm.pick params), "
                 "source_object_path_drawer, source_object_path_drawer_all"
             )
-        reset_simulation_and_randomize_object(
+        reset_simulation_state(
             apple_path,
-            xyz_offset=reset_xyz_offset,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
@@ -214,9 +219,8 @@ def reset_queue_task_environment(
         sim_time.sleep(1)
         return
     if runtime.carry is not None:
-        reset_simulation_and_randomize_object(
+        reset_simulation_state(
             runtime.carry.source_object_entity_path,
-            xyz_offset=runtime.carry.object_xyz_random_offset,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
@@ -228,22 +232,20 @@ def reset_queue_task_environment(
                 "handover task env reset requires source_object_entity_path on single_arm.pick "
                 "(skill_defaults.single_arm.pick or skill_params for pick block)"
             )
-        reset_simulation_and_randomize_object(
+        reset_simulation_state(
             pk.source_object_entity_path,
-            xyz_offset=pk.object_xyz_random_offset,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
         return
-    reset_source_path, reset_xyz_offset = reset_fields_from_first_pick_block(specs, runtime.single_arm)
+    reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
     if not reset_source_path:
         raise ValueError(
             "source_object_entity_path is required for env reset "
             "(set on task_cfg or under skill_defaults / skill_params for single_arm.pick)"
         )
-    reset_simulation_and_randomize_object(
+    reset_simulation_state(
         reset_source_path,
-        xyz_offset=reset_xyz_offset,
         post_reset_wait=robot_cfg.post_reset_wait,
         sleep_fn=sim_time.sleep,
     )

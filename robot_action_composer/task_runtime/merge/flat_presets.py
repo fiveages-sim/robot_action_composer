@@ -60,6 +60,16 @@ def merge_flat_with_skill_carry(
     return {**dict(base_flat), **carry_sd}
 
 
+def merge_flat_with_skill_place(
+    base_flat: Mapping[str, Any],
+    skill_defaults: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Overlay ``skill_defaults['dual_arm.place']``（如 ``place_object_entity_path``）到扁平 preset。"""
+    sd = dict(skill_defaults or {})
+    place_sd = dict(sd.get("dual_arm.place") or {})
+    return {**dict(base_flat), **place_sd}
+
+
 def skill_carry_defaults_from_scene(scene_preset: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Shape ``scene_preset['skill_params']['dual_arm.carry']`` for :func:`merge_flat_with_skill_carry`."""
     if not scene_preset:
@@ -71,6 +81,19 @@ def skill_carry_defaults_from_scene(scene_preset: Mapping[str, Any] | None) -> d
     if not carry:
         return None
     return {"dual_arm.carry": dict(carry)}
+
+
+def skill_place_defaults_from_scene(scene_preset: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Shape ``scene_preset['skill_params']['dual_arm.place']`` for :func:`merge_flat_with_skill_place`."""
+    if not scene_preset:
+        return None
+    sp = scene_preset.get("skill_params")
+    if not isinstance(sp, Mapping):
+        return None
+    place = sp.get("dual_arm.place")
+    if not place:
+        return None
+    return {"dual_arm.place": dict(place)}
 
 
 def merge_flat_with_skill_handover(
@@ -122,8 +145,13 @@ def skill_drawer_defaults_from_scene(scene_preset: Mapping[str, Any] | None) -> 
 def merge_scene_skill_overlays_into_flat(
     scene_flat: Mapping[str, Any],
     scene_preset: Mapping[str, Any] | None,
+    *,
+    include_place: bool = True,
 ) -> dict[str, Any]:
-    """Apply ``skill_params``：pick/place → handover → carry → drawer（与 motion / record CLI 顺序一致）。"""
+    """Apply ``skill_params``：pick/place → handover → carry → (可选) place → drawer（与 motion / record CLI 顺序一致）。
+
+    ``include_place=False`` 时不叠 ``dual_arm.place``，供构建 **仅搬运** 用扁平表（与放置几何分离）。
+    """
     out = dict(scene_flat)
     sp_overlay = skill_pick_place_defaults_from_scene(scene_preset)
     if sp_overlay:
@@ -134,18 +162,14 @@ def merge_scene_skill_overlays_into_flat(
     carry_overlay = skill_carry_defaults_from_scene(scene_preset)
     if carry_overlay:
         out = merge_flat_with_skill_carry(out, carry_overlay)
+    if include_place:
+        place_overlay = skill_place_defaults_from_scene(scene_preset)
+        if place_overlay:
+            out = merge_flat_with_skill_place(out, place_overlay)
     drawer_overlay = skill_drawer_defaults_from_scene(scene_preset)
     if drawer_overlay:
         out = merge_flat_with_skill_drawer(out, drawer_overlay)
     return out
-
-
-def _normalize_xyz_offset(val: Any, fallback: tuple[float, float, float]) -> tuple[float, float, float]:
-    if val is None:
-        return fallback
-    if isinstance(val, (list, tuple)) and len(val) == 3:
-        return (float(val[0]), float(val[1]), float(val[2]))
-    return fallback
 
 
 def iter_leaf_block_specs(specs: Sequence[Any]) -> Any:
@@ -159,30 +183,29 @@ def iter_leaf_block_specs(specs: Sequence[Any]) -> Any:
             yield s
 
 
-def _pick_reset_defaults(task_cfg: Any) -> tuple[str, tuple[float, float, float]]:
+def _default_pick_source_path(task_cfg: Any) -> str:
     pick = getattr(task_cfg, "pick", None)
-    if pick is not None and hasattr(pick, "source_object_entity_path"):
-        return str(pick.source_object_entity_path), pick.object_xyz_random_offset
-    return str(getattr(task_cfg, "source_object_entity_path", "")), getattr(
-        task_cfg, "object_xyz_random_offset", (0.0, 0.0, 0.0)
-    )
+    if pick is not None:
+        src = getattr(pick, "source_object_entity_path", "") or ""
+        s = str(src).strip()
+        if s:
+            return s
+    top = getattr(task_cfg, "source_object_entity_path", None)
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    return ""
 
 
-def reset_fields_from_first_pick_block(
-    specs: Sequence[Any],
-    task_cfg: Any,
-) -> tuple[str, tuple[float, float, float]]:
-    """``source_object_entity_path`` + ``object_xyz_random_offset`` for env reset (first ``single_arm.pick``)."""
+def reset_settle_entity_path_from_queue(specs: Sequence[Any], task_cfg: Any) -> str:
+    """首个 ``single_arm.pick`` 块若覆写 ``source_object_entity_path`` 则用之，否则用 ``task_cfg.pick`` 默认。"""
     from robot_action_composer.task_runtime.types import BlockSpec
 
-    base_path, base_off = _pick_reset_defaults(task_cfg)
+    base = _default_pick_source_path(task_cfg)
     for s in iter_leaf_block_specs(specs):
         if isinstance(s, BlockSpec) and s.skill == "single_arm.pick":
             p = dict(s.params)
-            src = p.get("source_object_entity_path") or base_path
-            off = _normalize_xyz_offset(
-                p.get("object_xyz_random_offset"),
-                base_off,
-            )
-            return str(src), off
-    return base_path, base_off
+            raw = p.get("source_object_entity_path")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+            break
+    return base

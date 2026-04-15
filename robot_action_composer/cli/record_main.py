@@ -10,64 +10,58 @@ from typing import Any
 
 def _merged_queue_allowed_keys() -> frozenset[str]:
     from robot_action_composer.motion_generation.tasks.bimanual_carry import BimanualCarryTaskConfig  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.motion_generation.tasks.bimanual_place import BimanualPlaceTaskConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.task_runtime.config import QUEUE_SINGLE_ARM_FLAT_KEYS  # pyright: ignore[reportMissingImports]
 
     names: set[str] = set(QUEUE_SINGLE_ARM_FLAT_KEYS)
     names.add("base_link_entity_path")
-    for cls in (BimanualCarryTaskConfig, HandoverSyncConfig, DrawerGeometryConfig):
+    names.add("place_offset")
+    names.update(
+        {
+            "motion_frame_id",
+            "relative_frame_id",
+            "tf_lookup_timeout",
+            "translation_xyz",
+            "spread_half",
+            "spread_y_half",
+            "stage_prefix",
+        }
+    )
+    for cls in (BimanualCarryTaskConfig, BimanualPlaceTaskConfig, HandoverSyncConfig, DrawerGeometryConfig):
         names |= {f.name for f in fields(cls)}
     return frozenset(names)
 
 
-def _apply_task_preset_runtime(base: Any, scene_flat: dict[str, object]) -> Any:
-    from robot_action_composer.motion_generation.tasks.bimanual_carry import BimanualCarryTaskConfig  # pyright: ignore[reportMissingImports]
-    from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
-    from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
+def _apply_task_preset_runtime(base: Any, preset_raw: dict[str, object]) -> Any:
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         MergedQueueConfig,
-        build_merged_queue_from_flat,
+        merge_scene_preset_into_merged_queue,
     )
 
     if not isinstance(base, MergedQueueConfig):
         raise TypeError(f"Expected MergedQueueConfig, got {type(base)}")
-    merged: dict[str, object] = dict(base.single_arm.to_flat())
-    if base.carry is not None:
-        for f in fields(BimanualCarryTaskConfig):
-            merged[f.name] = getattr(base.carry, f.name)
-    if base.handover is not None:
-        for f in fields(HandoverSyncConfig):
-            merged[f.name] = getattr(base.handover, f.name)
-    if base.drawer is not None:
-        for f in fields(DrawerGeometryConfig):
-            merged[f.name] = getattr(base.drawer, f.name)
-    if base.base_link_entity_path is not None:
-        merged["base_link_entity_path"] = base.base_link_entity_path
-    merged.update(scene_flat)
-    return build_merged_queue_from_flat(merged)
+    return merge_scene_preset_into_merged_queue(base, preset_raw)
 
 
 def _build_task_runtime(task_entry_cfg: Any) -> Any:
     from robot_action_composer.task_config_io import flatten_queue_task_overrides
-    from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
-        merge_flat_with_skill_carry,
-        merge_flat_with_skill_drawer,
-        merge_flat_with_skill_handover,
-        merge_flat_with_skill_pick_place,
+    from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
+        build_merged_queue_from_flat,
+        merge_pick_place_skill_overlay,
     )
-    from robot_action_composer.task_runtime.config.merged import build_merged_queue_from_flat  # pyright: ignore[reportMissingImports]
 
     if not (isinstance(task_entry_cfg, dict) and "base_task_overrides" in task_entry_cfg):
         raise TypeError("task YAML must be a dict with base_task_overrides")
-    flat = merge_flat_with_skill_pick_place(
-        flatten_queue_task_overrides(task_entry_cfg["base_task_overrides"]),
-        task_entry_cfg.get("skill_defaults"),
-    )
-    flat = merge_flat_with_skill_handover(flat, task_entry_cfg.get("skill_defaults"))
-    flat = merge_flat_with_skill_carry(flat, task_entry_cfg.get("skill_defaults"))
-    flat = merge_flat_with_skill_drawer(flat, task_entry_cfg.get("skill_defaults"))
-    return build_merged_queue_from_flat(flat)
+    flat = flatten_queue_task_overrides(task_entry_cfg["base_task_overrides"])
+    skill_defaults = dict(task_entry_cfg.get("skill_defaults") or {})
+    flat = merge_pick_place_skill_overlay(flat, skill_defaults)
+    flat = {**flat, **dict(skill_defaults.get("dual_arm.handover") or {})}
+    flat = {**flat, **dict(skill_defaults.get("dual_arm.carry") or {})}
+    flat = {**flat, **dict(skill_defaults.get("single_arm.drawer") or {})}
+    place_flat = dict(skill_defaults.get("dual_arm.place") or {})
+    return build_merged_queue_from_flat(flat, place_flat if place_flat else None)
 
 
 def _pointcloud_supported(robot_cfg: Any) -> bool:
@@ -86,7 +80,6 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
     from robot_action_composer.discovery.registry_loader import load_robot_entries
     from robot_action_composer.task_config_io import flatten_queue_task_overrides
     from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
-        merge_scene_skill_overlays_into_flat,
         merge_task_queue_skill_params,
     )
 
@@ -155,14 +148,10 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
             default_key=default_scene,
         )
         preset_raw: dict[str, object] = dict(scene_presets.get(scene_key, {}))
-        preset_flat = merge_scene_skill_overlays_into_flat(
-            flatten_queue_task_overrides(preset_raw),
-            preset_raw,
-        )
-        unknown = [k for k in preset_flat if k not in allowed]
+        unknown = [k for k in flatten_queue_task_overrides(preset_raw) if k not in allowed]
         if unknown:
             raise ValueError(f"Unknown scene preset keys: {unknown}")
-        task_runtime = _apply_task_preset_runtime(task_runtime, preset_flat)
+        task_runtime = _apply_task_preset_runtime(task_runtime, preset_raw)
     else:
         scene_key = "default"
 

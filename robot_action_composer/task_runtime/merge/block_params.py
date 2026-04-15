@@ -11,8 +11,20 @@ _DRAWER_SKILL_PREFIX = "single_arm.drawer."
 
 
 def _inherits_dual_arm_carry_block(param_key: str) -> bool:
-    """``dual_arm.carry`` / ``carry_pregrasp`` / ``carry_approach`` / … 共用 ``dual_arm.carry`` YAML 默认。"""
+    """``dual_arm.carry*`` 仅铺 ``dual_arm.carry``（与 ``dual_arm.place*`` 独立）。"""
     return param_key == "dual_arm.carry" or param_key.startswith("dual_arm.carry_")
+
+
+def _inherits_dual_arm_place_block(param_key: str) -> bool:
+    """``dual_arm.place*`` 仅铺 ``dual_arm.place``（:class:`~.bimanual_place.BimanualPlaceTaskConfig`）。"""
+    return param_key == "dual_arm.place" or (
+        param_key.startswith("dual_arm.place_") and not param_key.startswith("dual_arm.place_relative")
+    )
+
+
+def _inherits_dual_arm_place_relative_block(param_key: str) -> bool:
+    """``dual_arm.place_relative``：先铺 ``dual_arm.carry`` 再铺 ``dual_arm.place_relative``（相对末端放置参数）。"""
+    return param_key == "dual_arm.place_relative"
 
 
 def _skill_defaults_for_param_key(param_key: str, skill_defaults: dict[str, Any]) -> dict[str, Any]:
@@ -24,6 +36,17 @@ def _skill_defaults_for_param_key(param_key: str, skill_defaults: dict[str, Any]
     if _inherits_dual_arm_carry_block(param_key):
         return {
             **dict(skill_defaults.get("dual_arm.carry") or {}),
+            **dict(skill_defaults.get(param_key) or {}),
+        }
+    if _inherits_dual_arm_place_block(param_key):
+        return {
+            **dict(skill_defaults.get("dual_arm.place") or {}),
+            **dict(skill_defaults.get(param_key) or {}),
+        }
+    if _inherits_dual_arm_place_relative_block(param_key):
+        return {
+            **dict(skill_defaults.get("dual_arm.carry") or {}),
+            **dict(skill_defaults.get("dual_arm.place_relative") or {}),
             **dict(skill_defaults.get(param_key) or {}),
         }
     return dict(skill_defaults.get(param_key) or {})
@@ -38,6 +61,26 @@ def _skill_defaults_for_block(skill: str, param_key: str, skill_defaults: dict[s
         return merged
     if skill == "dual_arm.carry" or skill.startswith("dual_arm.carry_"):
         merged = dict(skill_defaults.get("dual_arm.carry") or {})
+        if param_key != skill:
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.place_relative":
+        merged = {
+            **dict(skill_defaults.get("dual_arm.carry") or {}),
+            **dict(skill_defaults.get("dual_arm.place_relative") or {}),
+        }
+        if param_key != skill:
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.bimanual_align_mid_y":
+        merged = dict(skill_defaults.get("dual_arm.bimanual_align_mid_y") or {})
+        if param_key != skill:
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.place" or (
+        skill.startswith("dual_arm.place_") and not skill.startswith("dual_arm.place_relative")
+    ):
+        merged = dict(skill_defaults.get("dual_arm.place") or {})
         if param_key != skill:
             merged.update(skill_defaults.get(param_key) or {})
         return merged
@@ -75,6 +118,17 @@ def _scene_params_for_param_key(param_key: str, scene_skill_params: dict[str, An
             **dict(scene_skill_params.get("dual_arm.carry") or {}),
             **dict(scene_skill_params.get(param_key) or {}),
         }
+    if _inherits_dual_arm_place_block(param_key):
+        return {
+            **dict(scene_skill_params.get("dual_arm.place") or {}),
+            **dict(scene_skill_params.get(param_key) or {}),
+        }
+    if _inherits_dual_arm_place_relative_block(param_key):
+        return {
+            **dict(scene_skill_params.get("dual_arm.carry") or {}),
+            **dict(scene_skill_params.get("dual_arm.place_relative") or {}),
+            **dict(scene_skill_params.get(param_key) or {}),
+        }
     return dict(scene_skill_params.get(param_key) or {})
 
 
@@ -86,6 +140,26 @@ def _scene_params_for_block(skill: str, param_key: str, scene_skill_params: dict
         return merged
     if skill == "dual_arm.carry" or skill.startswith("dual_arm.carry_"):
         merged = dict(scene_skill_params.get("dual_arm.carry") or {})
+        if param_key != skill:
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.place_relative":
+        merged = {
+            **dict(scene_skill_params.get("dual_arm.carry") or {}),
+            **dict(scene_skill_params.get("dual_arm.place_relative") or {}),
+        }
+        if param_key != skill:
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.bimanual_align_mid_y":
+        merged = dict(scene_skill_params.get("dual_arm.bimanual_align_mid_y") or {})
+        if param_key != skill:
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.place" or (
+        skill.startswith("dual_arm.place_") and not skill.startswith("dual_arm.place_relative")
+    ):
+        merged = dict(scene_skill_params.get("dual_arm.place") or {})
         if param_key != skill:
             merged.update(scene_skill_params.get(param_key) or {})
         return merged
@@ -120,9 +194,12 @@ def merge_task_queue_skill_params(
     """三层合并 task_queue block 的最终 params（与 motion CLI 逻辑一致）。
 
     合并优先级（后者覆盖前者）：
-      1. ``skill_defaults``（``dual_arm.handover_sync`` 先铺 ``dual_arm.handover``；``dual_arm.carry`` /
-         及 ``dual_arm.carry_*`` 先铺 ``dual_arm.carry``；``single_arm.pick`` / ``place`` / ``pregrasp`` 带 ``id``
-         时先铺对应 ``single_arm.*``；drawer 规则不变）
+      1. ``skill_defaults``（``dual_arm.handover_sync`` 先铺 ``dual_arm.handover``；``dual_arm.carry*`` 铺
+         ``dual_arm.carry``；``dual_arm.place*``（不含 ``place_relative``）铺 ``dual_arm.place``；
+         ``dual_arm.place_relative`` 先铺 ``dual_arm.carry`` 再铺 ``dual_arm.place_relative``；
+         ``dual_arm.bimanual_align_mid_y`` 铺 ``dual_arm.bimanual_align_mid_y``（带 ``id`` 时再叠 ``skill_defaults[id]``）；
+         ``env.*`` 仅铺同名 ``skill_defaults`` / 场景键；
+         ``single_arm.pick`` / ``place`` / ``pregrasp`` 带 ``id`` 时先铺对应 ``single_arm.*``；drawer 规则不变）
       2. ``block.params``
       3. ``scene_skill_params``（与 1 对称）
 

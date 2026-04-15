@@ -162,13 +162,26 @@ def _format_motion_last_line(last: _MotionLastDict) -> str:
 
 def _merged_queue_allowed_keys() -> frozenset[str]:
     from robot_action_composer.motion_generation.tasks.bimanual_carry import BimanualCarryTaskConfig  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.motion_generation.tasks.bimanual_place import BimanualPlaceTaskConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.task_runtime.config import QUEUE_SINGLE_ARM_FLAT_KEYS  # pyright: ignore[reportMissingImports]
 
     names: set[str] = set(QUEUE_SINGLE_ARM_FLAT_KEYS)
     names.add("base_link_entity_path")
-    for cls in (BimanualCarryTaskConfig, HandoverSyncConfig, DrawerGeometryConfig):
+    names.add("place_offset")  # 简化 dual_arm.place（YAML-only，非 dataclass 字段）
+    names.update(
+        {
+            "motion_frame_id",
+            "relative_frame_id",
+            "tf_lookup_timeout",
+            "translation_xyz",
+            "spread_half",
+            "spread_y_half",
+            "stage_prefix",
+        }
+    )
+    for cls in (BimanualCarryTaskConfig, BimanualPlaceTaskConfig, HandoverSyncConfig, DrawerGeometryConfig):
         names |= {f.name for f in fields(cls)}
     return frozenset(names)
 
@@ -176,16 +189,12 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
 def run_motion_generation(*, isaac_dir: Path) -> None:
     from robot_action_composer.task_config_io import flatten_queue_task_overrides
     from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
-        merge_flat_with_skill_carry,
-        merge_flat_with_skill_drawer,
-        merge_flat_with_skill_handover,
-        merge_flat_with_skill_pick_place,
-        merge_scene_skill_overlays_into_flat,
         merge_task_queue_skill_params,
     )
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         build_merged_queue_from_flat,
         format_merged_queue_summary,
+        merge_pick_place_skill_overlay,
     )
     from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
         prompt_positive_int,
@@ -277,27 +286,41 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
     use_stamped = task_entry.get("use_stamped", True)
 
     allowed = _merged_queue_allowed_keys()
-    base_flat = merge_flat_with_skill_pick_place(
-        flatten_queue_task_overrides(task_entry["base_task_overrides"]),
-        task_entry.get("skill_defaults"),
-    )
-    base_flat = merge_flat_with_skill_handover(base_flat, task_entry.get("skill_defaults"))
-    base_flat = merge_flat_with_skill_carry(base_flat, task_entry.get("skill_defaults"))
-    base_flat = merge_flat_with_skill_drawer(base_flat, task_entry.get("skill_defaults"))
+    base_flat = flatten_queue_task_overrides(task_entry["base_task_overrides"])
     scene_sd = scene_presets.get(scene, {})
-    scene_flat = merge_scene_skill_overlays_into_flat(
-        flatten_queue_task_overrides(scene_sd),
-        scene_sd,
-    )
+    scene_flat = flatten_queue_task_overrides(scene_sd)
     unknown_scene = [k for k in scene_flat if k not in allowed]
     if unknown_scene:
         raise ValueError(f"Unknown scene preset keys for queue task: {unknown_scene}")
-    merged_flat = {**base_flat, **scene_flat}
+    common_flat = {**base_flat, **scene_flat}
+    skill_defaults = dict(task_entry.get("skill_defaults") or {})
+    scene_skill_params = dict(scene_sd.get("skill_params") or {})
+
+    merged_flat = merge_pick_place_skill_overlay(common_flat, skill_defaults)
+    merged_flat = merge_pick_place_skill_overlay(
+        merged_flat,
+        {
+            "single_arm.pick": dict(scene_skill_params.get("single_arm.pick") or {}),
+            "single_arm.place": dict(scene_skill_params.get("single_arm.place") or {}),
+        },
+    )
+    merged_flat = {**merged_flat, **dict(skill_defaults.get("dual_arm.handover") or {})}
+    merged_flat = {**merged_flat, **dict(scene_skill_params.get("dual_arm.handover") or {})}
+    merged_flat = {**merged_flat, **dict(skill_defaults.get("dual_arm.carry") or {})}
+    merged_flat = {**merged_flat, **dict(scene_skill_params.get("dual_arm.carry") or {})}
+    merged_flat = {**merged_flat, **dict(skill_defaults.get("single_arm.drawer") or {})}
+    merged_flat = {**merged_flat, **dict(scene_skill_params.get("single_arm.drawer") or {})}
+
     unknown_merged = [k for k in merged_flat if k not in allowed]
     if unknown_merged:
         raise ValueError(f"Unknown task/scene keys for queue task: {unknown_merged}")
 
-    runtime = build_merged_queue_from_flat(merged_flat)
+    place_flat = {
+        **dict(skill_defaults.get("dual_arm.place") or {}),
+        **dict(scene_skill_params.get("dual_arm.place") or {}),
+    }
+
+    runtime = build_merged_queue_from_flat(merged_flat, place_flat if place_flat else None)
     print(format_merged_queue_summary(scene, runtime))
 
     task_queue = task_entry.get("task_queue")
@@ -309,7 +332,6 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
     from robot_action_composer.task_runtime.runner import run_task_queue  # pyright: ignore[reportMissingImports]
 
     skill_defaults = task_entry.get("skill_defaults") or {}
-    scene_skill_params = scene_presets.get(scene, {}).get("skill_params") or {}
     merged_queue = merge_task_queue_skill_params(list(task_queue), skill_defaults, scene_skill_params)
 
     for run_idx in range(num_runs):

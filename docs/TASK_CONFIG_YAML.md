@@ -9,7 +9,7 @@
 
 ## 格式
 
-任务发现由 **`robot_action_composer.task_config_io.discover_task_configs`** 完成，**递归**加载 `task_configs/` 及其**子文件夹**内的 **`*.yaml` / `*.yml`**（路径中含 `.` 开头段或 `__pycache__` 的会被忽略），返回 **`TaskConfigDiscovery`**：`tasks` 为全局扁平的 `task_key -> 配置`；**`task_groups`** 按**一级子文件夹**分组（见下节）。可选嵌套 `pick` / `place` 以及 `carry` / `drawer` 等由 **`flatten_queue_task_overrides`** 摊平；**禁止**在 `base_task_overrides` 或场景根下再写嵌套 **`handover:`**（已移除）。**双臂同步交接段**几何在 **`skill_defaults.dual_arm.handover`**（`HandoverSyncConfig`：交接点位置与双臂姿态）；**接收臂放置**用 **`skill_defaults.single_arm.place`**（`place_position` / `place_orientation` 等）。场景覆盖仍用 **`skill_params`** 下对应键。`motion_generation`、`record_datasets`、`inference.py` 在扁平化后按 **pick → handover → carry → drawer** 顺序叠 `skill_defaults`。
+任务发现由 **`robot_action_composer.task_config_io.discover_task_configs`** 完成，**递归**加载 `task_configs/` 及其**子文件夹**内的 **`*.yaml` / `*.yml`**（路径中含 `.` 开头段或 `__pycache__` 的会被忽略），返回 **`TaskConfigDiscovery`**：`tasks` 为全局扁平的 `task_key -> 配置`；**`task_groups`** 按**一级子文件夹**分组（见下节）。可选嵌套 `pick` / `place` 以及 `carry` / `drawer` 等由 **`flatten_queue_task_overrides`** 摊平；**禁止**在 `base_task_overrides` 或场景根下再写嵌套 **`handover:`**（已移除）。**双臂同步交接段**几何在 **`skill_defaults.dual_arm.handover`**（`HandoverSyncConfig`：交接点位置与双臂姿态）；**接收臂放置**用 **`skill_defaults.single_arm.place`**（`place_position` / `place_orientation` 等）。场景覆盖仍用 **`skill_params`** 下对应键。`motion_generation`、`record_datasets`、`inference.py` 在扁平化后按 **pick → handover → carry → place → drawer** 顺序叠 `skill_defaults`。其中 **`dual_arm.carry`** 与 **`dual_arm.place`** 会分别解析为 **`MergedQueueConfig.carry`** 与 **`MergedQueueConfig.place`**（两套扁平表，避免放置几何覆盖搬运几何）。
 
 在每个**目录**内，每个**基名**（如 `pick_place`）对应**一个** YAML 文件（`pick_place.yaml` 或 `pick_place.yml`）。**同一目录下同基名不能同时存在 `.yaml` 与 `.yml`**，否则会 `ValueError`。不同子目录下可以有相同**文件名**（不同基名路径），但各文件内的 **`task_key`** 在整台机器人范围内必须**唯一**，重复时会 `ValueError` 并指出两个文件路径。
 
@@ -35,18 +35,49 @@
 
 ### `dual_arm.carry` 搬运几何（`BimanualCarryTaskConfig`）
 
-写在 **`skill_defaults.dual_arm.carry`** 或 **`scene_presets.*.skill_params.dual_arm.carry`**；经 **`merge_flat_with_skill_carry`** 等叠入扁平 preset，由 **`build_merged_queue_from_flat`** 解析为 **`MergedQueueConfig.carry`**。列表向量在 YAML 中加载后会规范为 **tuple**。
+写在 **`skill_defaults.dual_arm.carry`** 或 **`scene_presets.*.skill_params.dual_arm.carry`**；经 **`merge_flat_with_skill_carry`** 等叠入 **仅搬运用** 扁平 preset，由 **`build_merged_queue_from_flat(merged_flat_carry, merged_flat_place)`** 解析为 **`MergedQueueConfig.carry`**（与 **`place`** 分表，互不覆盖）。列表向量在 YAML 中加载后会规范为 **tuple**。
 
 | 字段 | 含义 |
 |------|------|
 | `source_object_entity_path` | 搬运对象 Prim 路径 |
-| `carry_half_span_y` | 相对物体中心，左右手在横向（典型为物体 **Y**）上的**半间距**基准（米）；与 `carry_grasp_xyz[1]` 相加得到有效半宽 |
+| `carry_half_span_y` | 相对物体中心，左右手在横向（典型为物体 **Y**）上的**半间距**基准（米）；与 `carry_xyz[1]` 相加得到有效半宽 |
 | `carry_approach_clearance_y` | 仅 **Approach / Forward** 段在横向再张开的余量（米） |
-| `carry_pregrasp_xyz` | 预闭合段相对抓取点的偏移（米，三轴） |
-| `carry_grasp_xyz` | 物体中心到名义抓取点的平移（物体系，米） |
+| `carry_prepare_offset` | 预闭合段相对抓取点的偏移（米，三轴） |
+| `carry_xyz` | 物体中心到名义抓取点的平移（物体系，米） |
 | `carry_left_orientation` / `carry_right_orientation` | 左右末端姿态四元数 **x,y,z,w** |
-| `carry_lift_xyz` / `carry_retreat_xyz` | 抬起与后退相对抓取点的平移（米） |
-| `object_xyz_random_offset` | 物体位置随机化（米） |
+| `carry_lift_xyz` / `carry_retreat_xyz` | 抬起与后退相对抓取点的平移（米）；不写或 `null` 可跳过对应段 |
+
+物体位置扰动请用 **`env.randomize_object_local_xyz`**（与 **`dual_arm.carry`** 几何字段无关）。
+
+### `dual_arm.place` 放置（`BimanualPlaceTaskConfig`）
+
+**简化**：若只关心放置目标与相对位移，可只写 `place_object_entity_path` 与 `place_offset`（`[x,y,z]`，物体系米），**不写** `place_half_span_y` 等；姿态、`place_prepare_offset`、`place_lift_xyz` / `place_retreat_xyz` 等与 **`dual_arm.carry` 相同**（故同一任务须配置 carry）。仍可在场景 `skill_params.dual_arm.place` 里覆盖个别字段（如 `place_retreat_xyz`）。
+
+### `dual_arm.place` 完整字段（`BimanualPlaceTaskConfig`）
+
+写在 **`skill_defaults.dual_arm.place`** 或 **`scene_presets.*.skill_params.dual_arm.place`**；与 **`dual_arm.carry`** **独立合并**，解析为 **`MergedQueueConfig.place`**（字段前缀均为 **`place_*`**，与搬运的 **`carry_*`** 分离，可单独调参）。
+
+| 字段 | 含义 |
+|------|------|
+| `place_object_entity_path` | 放置参考（货架/槽位等）Prim 路径 |
+| `place_half_span_y` | 相对放置参考中心，左右手横向半间距基准（米）；与 `place_xyz[1]` 相加 |
+| `place_approach_clearance_y` | 接近 / 张开段横向余量（米） |
+| `place_prepare_offset` | 预接近相对名义点的偏移（米，三轴） |
+| `place_xyz` | 参考中心到名义释放点的平移（物体系，米） |
+| `place_left_orientation` / `place_right_orientation` | 左右末端四元数 **x,y,z,w** |
+| `place_lift_xyz` / `place_retreat_xyz` | 抬升与后撤相对名义点的平移（米）；不写或 `null` 可跳过与 carry 对称的逆段 |
+
+队列技能名：
+
+- **`env.randomize_object_local_xyz`**：对**显式** `object_entity_path` 的 prim 做局部平移均匀随机（`xyz_offset`、`enabled`）；与 `dual_arm.carry` 几何无关。`run_task_queue(reset_env=true)` 时 **Isaac 仅 reset/play + settle，不在 reset 内随机物体**；若需要扰动，请把本技能放在 **`task_queue` 第一个顺序块**（若首块为 `parallel`，建议在其**之前**单独一步，避免与 reset  settle 竞态）。
+- **`dual_arm.place_advance`**：两段笛卡尔（送入：抬升接近位 → 下降至合拢释放位），夹爪**闭合**持箱；写入 **`ctx.place_object_center`**。
+- **`dual_arm.place_release`**：合拢位**张开**夹爪。
+- **`dual_arm.place_spread_retreat`**：两段（**Y 向张开** → 后撤至预接近位），夹爪张开。
+- **`dual_arm.place`**：上述 5 段一次执行（等价于 advance + release + spread_retreat）。
+- **`dual_arm.place_relative`**：不查货架 prim；读**当前**左右末端位姿（系为 ``ctx.frame_id``，一般为 base）→ **同加** `translation_xyz`（持箱）→ 松爪 → 在 **XY 平面**沿「右→左」各外张 `spread_half` → 再同加 `retreat_xyz` 后撤；姿态不变。默认 `spread_half` / `retreat_xyz` 可取 `dual_arm.carry` 的 `carry_approach_clearance_y` / `carry_retreat_xyz`。
+  - **`motion_frame_id`**（或 **`relative_frame_id`**）：可选。若设为随腰/躯干转的 TF 系（与 ``ctx.frame_id`` 不同），则先用 ``ROS2RobotInterface.transform_pose`` 将当前末端位姿变到该系，再算平移与外张，且本块目标以该系发布；这样腰转 90°/180° 时「左右外张」仍相对身体一致，无需手写符号翻转。可选 **`tf_lookup_timeout`**（秒，默认 2.0）。
+
+笛卡尔段与 **`build_bimanual_carry_sequence`** 对称、阶段顺序为其逆（实现名见 **`BIMANUAL_PLACE_SUFFIXES`**）；相对放置见 **`build_bimanual_place_relative_sequence`**（**`PLACE_RELATIVE_SUFFIXES`**）。
 
 ---
 

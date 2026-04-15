@@ -6,6 +6,8 @@ from robot_action_composer.task_runtime.config.merged import (
     MergedQueueConfig,
     build_merged_queue_from_flat,
     format_merged_queue_summary,
+    merge_pick_place_skill_overlay,
+    merge_scene_preset_into_merged_queue,
 )
 from robot_action_composer.task_runtime.config.single_arm import (
     QUEUE_SINGLE_ARM_FLAT_KEYS,
@@ -15,6 +17,7 @@ from robot_action_composer.task_runtime.config.single_arm import (
     QueueSlicePlace,
     format_queue_single_arm_summary,
     overlay_queue_single_arm_from_params,
+    overlay_single_arm_pick_place,
 )
 
 __all__ = [
@@ -26,6 +29,9 @@ __all__ = [
     "QueueSlicePlace",
     "build_merged_queue_from_flat",
     "format_merged_queue_summary",
+    "merge_pick_place_skill_overlay",
+    "merge_scene_preset_into_merged_queue",
     "format_queue_single_arm_summary",
     "overlay_queue_single_arm_from_params",
+    "overlay_single_arm_pick_place",
 ]

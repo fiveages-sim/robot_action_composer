@@ -7,6 +7,7 @@ from typing import Any
 
 from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.tasks.bimanual_place import BimanualPlaceTaskConfig  # pyright: ignore[reportMissingImports]
 
 
 @dataclass
@@ -46,7 +47,9 @@ class QueueRuntimeContext:
     gripper_for_return_home: float = 0.0
     drawer: DrawerPhaseState | None = None
     carry_task_cfg: Any | None = None
+    place_task_cfg: BimanualPlaceTaskConfig | None = None
     carry_object_center: Any | None = None  # dual_arm.carry_approach 写入；后续搬运段复用
+    place_object_center: Any | None = None  # dual_arm.place_advance 写入；后续放置段复用
     handover_sync: HandoverSyncConfig | None = None
     drawer_geometry: DrawerGeometryConfig | None = None
     scratch: dict[str, Any] = field(default_factory=dict)
