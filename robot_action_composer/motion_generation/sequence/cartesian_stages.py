@@ -207,6 +207,7 @@ def build_single_arm_pick_sequence(
     grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     retreat_direction_extra: float = 0.0,
     retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    retreat_xyz: tuple[float, float, float] | None = None,
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Pickup",
@@ -231,10 +232,17 @@ def build_single_arm_pick_sequence(
     lift_pose.position.y = close_in_pose.position.y + retreat_offset[1]
     lift_pose.position.z = close_in_pose.position.z + retreat_offset[2]
     lift_pose.orientation = close_in_pose.orientation
-    retreat_pose = _make_pose_from_target(
-        target_pose, offset=approach_clearance + retreat_direction_extra,
-        direction_vec=direction_vec, orientation=grasp_orientation,
-    )
+    if retreat_xyz is not None:
+        retreat_pose = Pose()
+        retreat_pose.position.x = lift_pose.position.x + retreat_xyz[0]
+        retreat_pose.position.y = lift_pose.position.y + retreat_xyz[1]
+        retreat_pose.position.z = lift_pose.position.z + retreat_xyz[2]
+        retreat_pose.orientation = lift_pose.orientation
+    else:
+        retreat_pose = _make_pose_from_target(
+            target_pose, offset=approach_clearance + retreat_direction_extra,
+            direction_vec=direction_vec, orientation=grasp_orientation,
+        )
 
     return [
         ArmStage(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace as _dc_replace
 from typing import Any
 
@@ -15,6 +16,36 @@ def _inherits_dual_arm_carry_block(param_key: str) -> bool:
     return param_key == "dual_arm.carry" or param_key.startswith("dual_arm.carry_")
 
 
+def _inherits_dual_arm_parallel_pick_block(param_key: str) -> bool:
+    """``dual_arm.parallel_pick`` / ``parallel_pick_*`` 共用 ``dual_arm.parallel_pick`` 默认。"""
+    return param_key == "dual_arm.parallel_pick" or param_key.startswith("dual_arm.parallel_pick_")
+
+
+def _is_parallel_pick_skill(skill: str) -> bool:
+    return skill == "dual_arm.parallel_pick" or skill.startswith("dual_arm.parallel_pick_")
+
+
+def _deep_merge_mapping(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = dict(base)
+    for k, v in overlay.items():
+        prev = out.get(k)
+        if isinstance(prev, Mapping) and isinstance(v, Mapping):
+            out[k] = _deep_merge_mapping(prev, v)
+        else:
+            out[k] = v
+    return out
+
+
+def _merge_parallel_pick_params(
+    base_p: Mapping[str, Any],
+    inline_p: Mapping[str, Any],
+    scene_p: Mapping[str, Any],
+) -> dict[str, Any]:
+    # dual_arm.parallel_pick 的 left_pick/right_pick 需要深合并，避免 scene 仅覆盖路径时丢失其它字段。
+    merged = _deep_merge_mapping(base_p, inline_p)
+    return _deep_merge_mapping(merged, scene_p)
+
+
 def _skill_defaults_for_param_key(param_key: str, skill_defaults: dict[str, Any]) -> dict[str, Any]:
     if param_key.startswith(_DRAWER_SKILL_PREFIX):
         return {
@@ -24,6 +55,11 @@ def _skill_defaults_for_param_key(param_key: str, skill_defaults: dict[str, Any]
     if _inherits_dual_arm_carry_block(param_key):
         return {
             **dict(skill_defaults.get("dual_arm.carry") or {}),
+            **dict(skill_defaults.get(param_key) or {}),
+        }
+    if _inherits_dual_arm_parallel_pick_block(param_key):
+        return {
+            **dict(skill_defaults.get("dual_arm.parallel_pick") or {}),
             **dict(skill_defaults.get(param_key) or {}),
         }
     return dict(skill_defaults.get(param_key) or {})
@@ -38,6 +74,11 @@ def _skill_defaults_for_block(skill: str, param_key: str, skill_defaults: dict[s
         return merged
     if skill == "dual_arm.carry" or skill.startswith("dual_arm.carry_"):
         merged = dict(skill_defaults.get("dual_arm.carry") or {})
+        if param_key != skill:
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.parallel_pick" or skill.startswith("dual_arm.parallel_pick_"):
+        merged = dict(skill_defaults.get("dual_arm.parallel_pick") or {})
         if param_key != skill:
             merged.update(skill_defaults.get(param_key) or {})
         return merged
@@ -75,6 +116,11 @@ def _scene_params_for_param_key(param_key: str, scene_skill_params: dict[str, An
             **dict(scene_skill_params.get("dual_arm.carry") or {}),
             **dict(scene_skill_params.get(param_key) or {}),
         }
+    if _inherits_dual_arm_parallel_pick_block(param_key):
+        return {
+            **dict(scene_skill_params.get("dual_arm.parallel_pick") or {}),
+            **dict(scene_skill_params.get(param_key) or {}),
+        }
     return dict(scene_skill_params.get(param_key) or {})
 
 
@@ -86,6 +132,11 @@ def _scene_params_for_block(skill: str, param_key: str, scene_skill_params: dict
         return merged
     if skill == "dual_arm.carry" or skill.startswith("dual_arm.carry_"):
         merged = dict(scene_skill_params.get("dual_arm.carry") or {})
+        if param_key != skill:
+            merged.update(scene_skill_params.get(param_key) or {})
+        return merged
+    if skill == "dual_arm.parallel_pick" or skill.startswith("dual_arm.parallel_pick_"):
+        merged = dict(scene_skill_params.get("dual_arm.parallel_pick") or {})
         if param_key != skill:
             merged.update(scene_skill_params.get(param_key) or {})
         return merged
@@ -141,7 +192,10 @@ def merge_task_queue_skill_params(
             base_p = _skill_defaults_for_block(skill, param_key, skill_defaults)
             inline_p: dict[str, Any] = dict(block.get("params") or {})
             scene_p = _scene_params_for_block(skill, param_key, scene_skill_params)
-            merged_p = {**base_p, **inline_p, **scene_p}
+            if _is_parallel_pick_skill(skill):
+                merged_p = _merge_parallel_pick_params(base_p, inline_p, scene_p)
+            else:
+                merged_p = {**base_p, **inline_p, **scene_p}
             if merged_p:
                 merged = dict(block)
                 merged["params"] = merged_p
@@ -157,7 +211,10 @@ def merge_task_queue_skill_params(
             base_p = _skill_defaults_for_block(block.skill, param_key, skill_defaults)
             inline_p = dict(block.params)
             scene_p = _scene_params_for_block(block.skill, param_key, scene_skill_params)
-            merged_p = {**base_p, **inline_p, **scene_p}
+            if _is_parallel_pick_skill(block.skill):
+                merged_p = _merge_parallel_pick_params(base_p, inline_p, scene_p)
+            else:
+                merged_p = {**base_p, **inline_p, **scene_p}
             if merged_p != dict(block.params):
                 return _dc_replace(block, params=merged_p)
             return block

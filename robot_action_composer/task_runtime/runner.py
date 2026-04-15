@@ -23,6 +23,10 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
 
 from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.drawer import euler_to_quaternion  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import (  # pyright: ignore[reportMissingImports]
+    BimanualParallelPickTaskConfig,
+    parallel_pick_cfg_from_params,
+)
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
 from robot_action_composer.task_runtime.merge.flat_presets import reset_fields_from_first_pick_block
 from robot_action_composer.task_runtime.registry import get_skill
@@ -143,6 +147,33 @@ def _resolve_gripper_open_close(mode: str) -> tuple[float, float]:
     )
 
 
+def _is_parallel_pick_skill(skill: str) -> bool:
+    return skill == "dual_arm.parallel_pick" or skill.startswith("dual_arm.parallel_pick_")
+
+
+def _extract_parallel_pick_cfg_from_specs(specs: Sequence[QueueBlock]) -> BimanualParallelPickTaskConfig | None:
+    def _try_from_block(block: BlockSpec) -> BimanualParallelPickTaskConfig | None:
+        if not _is_parallel_pick_skill(block.skill):
+            return None
+        try:
+            return parallel_pick_cfg_from_params(block.params)
+        except Exception:
+            return None
+
+    for s in specs:
+        if isinstance(s, ParallelSpec):
+            for sub in s.skills:
+                cfg = _try_from_block(sub)
+                if cfg is not None:
+                    return cfg
+            continue
+        if isinstance(s, BlockSpec):
+            cfg = _try_from_block(s)
+            if cfg is not None:
+                return cfg
+    return None
+
+
 def build_queue_runtime_context(
     *,
     interface: Any,
@@ -231,6 +262,21 @@ def reset_queue_task_environment(
         reset_simulation_and_randomize_object(
             pk.source_object_entity_path,
             xyz_offset=pk.object_xyz_random_offset,
+            post_reset_wait=robot_cfg.post_reset_wait,
+            sleep_fn=sim_time.sleep,
+        )
+        return
+    parallel_pick_cfg = _extract_parallel_pick_cfg_from_specs(specs)
+    if parallel_pick_cfg is not None:
+        reset_simulation_and_randomize_object(
+            parallel_pick_cfg.left_pick.source_object_entity_path,
+            xyz_offset=parallel_pick_cfg.left_pick.object_xyz_random_offset,
+            post_reset_wait=robot_cfg.post_reset_wait,
+            sleep_fn=sim_time.sleep,
+        )
+        reset_simulation_and_randomize_object(
+            parallel_pick_cfg.right_pick.source_object_entity_path,
+            xyz_offset=parallel_pick_cfg.right_pick.object_xyz_random_offset,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
