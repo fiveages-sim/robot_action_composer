@@ -112,6 +112,7 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     grasp_offset = pk.grasp_offset
     retreat_direction_extra = pk.retreat_direction_extra
     retreat_offset = pk.retreat_offset
+    retreat_xyz = pk.retreat_xyz
     if not path:
         raise ValueError("source_object_entity_path is required for skill single_arm.pick")
     target = get_object_pose_from_service(
@@ -131,6 +132,7 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         grasp_offset=grasp_offset,
         retreat_direction_extra=retreat_direction_extra,
         retreat_offset=retreat_offset,
+        retreat_xyz=retreat_xyz,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
         stage_prefix="TaskQ-Pick",

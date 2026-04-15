@@ -50,6 +50,7 @@ class QueueRuntimeContext:
     place_task_cfg: BimanualPlaceTaskConfig | None = None
     carry_object_center: Any | None = None  # dual_arm.carry_approach 写入；后续搬运段复用
     place_object_center: Any | None = None  # dual_arm.place_advance 写入；后续放置段复用
+    parallel_pick_target_poses: dict[str, Any] | None = None
     handover_sync: HandoverSyncConfig | None = None
     drawer_geometry: DrawerGeometryConfig | None = None
     scratch: dict[str, Any] = field(default_factory=dict)
