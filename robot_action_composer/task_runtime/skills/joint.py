@@ -45,6 +45,8 @@ def skill_movej_to_config(
             当本步骤是关节运动序列中最后一步、之后紧接 pick/place 等笛卡尔 skill 时设为 True。
         skip_fsm_hold (bool): 为 True 时不发送初始 ``FSM_HOLD``。
             用于与 ``nav.send_nav_goal`` 并行下发躯干（避免 Nav2 行驶中被 HOLD 打断）；默认 False。
+        body_movej_duration (float, 可选): 执行本块前，动态设置 body joint controller 的 ``movej_duration``。
+            controller 节点由 ``interface.body_joint_controller_node`` 自动提供。
     """
     body_positions = [float(v) for v in (params.get("body_positions") or [])]
     left_positions = [float(v) for v in (params.get("left_arm_positions") or [])]
@@ -53,11 +55,33 @@ def skill_movej_to_config(
     joint_tolerance = float(params.get("joint_tolerance", 0.05))
     resume_ocs2 = bool(params.get("resume_ocs2", False))
     skip_fsm_hold = bool(params.get("skip_fsm_hold", False))
+    body_movej_duration = params.get("body_movej_duration", None)
 
     interface = ctx.interface
     sim_time = getattr(ctx, "sim_time", None)
     sleep_fn = sim_time.sleep if sim_time else None
     time_now_fn = sim_time.now_seconds if sim_time else None
+
+    if body_movej_duration is not None:
+        body_joint_controller_node = str(getattr(interface, "body_joint_controller_node", "")).strip()
+        if not body_joint_controller_node:
+            raise ValueError(
+                "joint.movej_to_config: cannot infer body controller node; "
+                "set body_joint_controller_node or ensure interface.body_joint_controller_node is available"
+            )
+        duration_val = float(body_movej_duration)
+        ok = interface.set_node_parameters(
+            full_node_name=body_joint_controller_node,
+            parameters={"movej_duration": duration_val},
+        )
+        if ok:
+            print(
+                f"[MoveJ] Set {body_joint_controller_node}.movej_duration = {duration_val}"
+            )
+        else:
+            print(
+                f"[MoveJ] WARN: failed to set {body_joint_controller_node}.movej_duration = {duration_val}"
+            )
 
     if not skip_fsm_hold:
         try:

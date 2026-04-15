@@ -142,7 +142,9 @@ def _motion_last_applies(
     if tk not in tasks_map:
         return False
     scene_presets = tasks_map[tk].get("scene_presets") or {}
-    if sc not in scene_presets:
+    if sc != "__all__" and sc not in scene_presets:
+        return False
+    if sc == "__all__" and not scene_presets:
         return False
     n = last.get("num_runs", 1)
     if not isinstance(n, int) or n < 1:
@@ -157,7 +159,68 @@ def _format_motion_last_line(last: _MotionLastDict) -> str:
     n = last.get("num_runs", 1)
     re_ = last.get("reset_env", True)
     reset_s = "yes" if re_ else "no"
-    return f"robot={rk}  task={tk}  scene={sc}  runs={n}  reset_env={reset_s}"
+    scene_s = "ALL_SCENES" if sc == "__all__" else str(sc)
+    return f"robot={rk}  task={tk}  scene={scene_s}  runs={n}  reset_env={reset_s}"
+
+
+def _build_runtime_for_scene(
+    *,
+    task_entry: dict[str, Any],
+    scene: str,
+    allowed: frozenset[str],
+) -> tuple[Any, list[Any]]:
+    from robot_action_composer.task_config_io import flatten_queue_task_overrides
+    from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
+        merge_task_queue_skill_params,
+    )
+    from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
+        build_merged_queue_from_flat,
+        merge_pick_place_skill_overlay,
+    )
+
+    scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
+    scene_sd = scene_presets.get(scene, {})
+
+    base_flat = flatten_queue_task_overrides(task_entry["base_task_overrides"])
+    scene_flat = flatten_queue_task_overrides(scene_sd)
+    unknown_scene = [k for k in scene_flat if k not in allowed]
+    if unknown_scene:
+        raise ValueError(f"Unknown scene preset keys for queue task: {unknown_scene}")
+
+    common_flat = {**base_flat, **scene_flat}
+    skill_defaults = dict(task_entry.get("skill_defaults") or {})
+    scene_skill_params = dict(scene_sd.get("skill_params") or {})
+
+    merged_flat = merge_pick_place_skill_overlay(common_flat, skill_defaults)
+    merged_flat = merge_pick_place_skill_overlay(
+        merged_flat,
+        {
+            "single_arm.pick": dict(scene_skill_params.get("single_arm.pick") or {}),
+            "single_arm.place": dict(scene_skill_params.get("single_arm.place") or {}),
+        },
+    )
+    merged_flat = {**merged_flat, **dict(skill_defaults.get("dual_arm.handover") or {})}
+    merged_flat = {**merged_flat, **dict(scene_skill_params.get("dual_arm.handover") or {})}
+    merged_flat = {**merged_flat, **dict(skill_defaults.get("dual_arm.carry") or {})}
+    merged_flat = {**merged_flat, **dict(scene_skill_params.get("dual_arm.carry") or {})}
+    merged_flat = {**merged_flat, **dict(skill_defaults.get("single_arm.drawer") or {})}
+    merged_flat = {**merged_flat, **dict(scene_skill_params.get("single_arm.drawer") or {})}
+
+    unknown_merged = [k for k in merged_flat if k not in allowed]
+    if unknown_merged:
+        raise ValueError(f"Unknown task/scene keys for queue task: {unknown_merged}")
+
+    place_flat = {
+        **dict(skill_defaults.get("dual_arm.place") or {}),
+        **dict(scene_skill_params.get("dual_arm.place") or {}),
+    }
+    runtime = build_merged_queue_from_flat(merged_flat, place_flat if place_flat else None)
+
+    task_queue = task_entry.get("task_queue")
+    if not task_queue:
+        raise ValueError("Motion generation: task queue is empty.")
+    merged_queue = merge_task_queue_skill_params(list(task_queue), skill_defaults, scene_skill_params)
+    return runtime, merged_queue
 
 
 def _merged_queue_allowed_keys() -> frozenset[str]:
@@ -187,19 +250,15 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
 
 
 def run_motion_generation(*, isaac_dir: Path) -> None:
-    from robot_action_composer.task_config_io import flatten_queue_task_overrides
-    from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
-        merge_task_queue_skill_params,
-    )
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
-        build_merged_queue_from_flat,
         format_merged_queue_summary,
-        merge_pick_place_skill_overlay,
     )
     from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
         prompt_positive_int,
         select_task_with_optional_group,
     )
+    from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.isaac_sim import SimTimeHelper  # pyright: ignore[reportMissingImports]
 
     registry = _discover_task_registry(isaac_dir)
     if not registry:
@@ -252,7 +311,11 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
         scene_presets = task_entry["scene_presets"]
         scene_names = list(scene_presets.keys())
         default_scene = task_entry["default_scene"]
-        scene = _select_option(title="Select config", options=scene_names, default_value=default_scene)
+        scene = _select_option(
+            title="Select config",
+            options=(scene_names + ["__all__"]),
+            default_value=default_scene,
+        )
 
         num_runs = prompt_positive_int(
             "How many motion runs? (Enter = 1): ",
@@ -260,6 +323,7 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
             min_value=1,
         )
 
+        run_all_scenes = scene == "__all__"
         if num_runs > 1:
             reset_env = True
             print(
@@ -272,6 +336,9 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                 options=["yes", "no"],
                 default_value="yes",
             ) == "yes"
+        if run_all_scenes and not reset_env:
+            print("[info] scene=ALL_SCENES forces reset_env=yes (each scene should start from clean env).")
+            reset_env = True
 
     _save_motion_last(
         isaac_dir=isaac_dir,
@@ -284,63 +351,64 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
 
     scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
     use_stamped = task_entry.get("use_stamped", True)
+    scenes_to_run = list(scene_presets.keys()) if scene == "__all__" else [scene]
 
     allowed = _merged_queue_allowed_keys()
-    base_flat = flatten_queue_task_overrides(task_entry["base_task_overrides"])
-    scene_sd = scene_presets.get(scene, {})
-    scene_flat = flatten_queue_task_overrides(scene_sd)
-    unknown_scene = [k for k in scene_flat if k not in allowed]
-    if unknown_scene:
-        raise ValueError(f"Unknown scene preset keys for queue task: {unknown_scene}")
-    common_flat = {**base_flat, **scene_flat}
-    skill_defaults = dict(task_entry.get("skill_defaults") or {})
-    scene_skill_params = dict(scene_sd.get("skill_params") or {})
-
-    merged_flat = merge_pick_place_skill_overlay(common_flat, skill_defaults)
-    merged_flat = merge_pick_place_skill_overlay(
-        merged_flat,
-        {
-            "single_arm.pick": dict(scene_skill_params.get("single_arm.pick") or {}),
-            "single_arm.place": dict(scene_skill_params.get("single_arm.place") or {}),
-        },
-    )
-    merged_flat = {**merged_flat, **dict(skill_defaults.get("dual_arm.handover") or {})}
-    merged_flat = {**merged_flat, **dict(scene_skill_params.get("dual_arm.handover") or {})}
-    merged_flat = {**merged_flat, **dict(skill_defaults.get("dual_arm.carry") or {})}
-    merged_flat = {**merged_flat, **dict(scene_skill_params.get("dual_arm.carry") or {})}
-    merged_flat = {**merged_flat, **dict(skill_defaults.get("single_arm.drawer") or {})}
-    merged_flat = {**merged_flat, **dict(scene_skill_params.get("single_arm.drawer") or {})}
-
-    unknown_merged = [k for k in merged_flat if k not in allowed]
-    if unknown_merged:
-        raise ValueError(f"Unknown task/scene keys for queue task: {unknown_merged}")
-
-    place_flat = {
-        **dict(skill_defaults.get("dual_arm.place") or {}),
-        **dict(scene_skill_params.get("dual_arm.place") or {}),
-    }
-
-    runtime = build_merged_queue_from_flat(merged_flat, place_flat if place_flat else None)
-    print(format_merged_queue_summary(scene, runtime))
-
-    task_queue = task_entry.get("task_queue")
-    if not task_queue:
-        raise ValueError(f"Motion generation: task {task_key!r} must define a non-empty 'task_queue'.")
-
     import robot_action_composer.task_runtime.skills  # noqa: F401 - register built-in skills
 
-    from robot_action_composer.task_runtime.runner import run_task_queue  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.task_runtime.runner import (  # pyright: ignore[reportMissingImports]
+        run_task_queue,
+        run_task_queue_on_connected_interface,
+    )
 
-    skill_defaults = task_entry.get("skill_defaults") or {}
-    merged_queue = merge_task_queue_skill_params(list(task_queue), skill_defaults, scene_skill_params)
-
+    run_all_scenes = len(scenes_to_run) > 1
     for run_idx in range(num_runs):
-        print(f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} (task queue)\n{'=' * 70}")
-        run_task_queue(
-            robot_cfg=robot_entry["robot_cfg"],
-            runtime=runtime,
-            robot_id=task_entry["robot_id"],
-            blocks=merged_queue,
-            reset_env=reset_env,
-            use_stamped=use_stamped,
-        )
+        if run_all_scenes:
+            interface = build_ros2_interface_from_robot_cfg(robot_entry["robot_cfg"])
+            sim_time = SimTimeHelper()
+            connected = False
+            try:
+                interface.connect()
+                connected = True
+                print("[OK] Robot connected (shared session for ALL_SCENES)")
+                for scene_idx, scene_name in enumerate(scenes_to_run):
+                    runtime, merged_queue = _build_runtime_for_scene(task_entry=task_entry, scene=scene_name, allowed=allowed)
+                    print(format_merged_queue_summary(scene_name, runtime))
+                    should_reset_env = reset_env and (scene_idx == 0)
+                    print(
+                        f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} "
+                        f"(scene {scene_idx + 1}/{len(scenes_to_run)}: {scene_name})\n{'=' * 70}"
+                    )
+                    if scene_idx > 0 and reset_env:
+                        print("[info] ALL_SCENES mode: skip env reset for sub-scenes after the first one.")
+                    run_task_queue_on_connected_interface(
+                        interface=interface,
+                        sim_time=sim_time,
+                        robot_cfg=robot_entry["robot_cfg"],
+                        runtime=runtime,
+                        robot_id=task_entry["robot_id"],
+                        blocks=merged_queue,
+                        reset_env=should_reset_env,
+                        use_stamped=use_stamped,
+                    )
+            finally:
+                sim_time.shutdown()
+                if connected:
+                    interface.disconnect()
+                    print("[OK] Robot disconnected")
+        else:
+            scene_name = scenes_to_run[0]
+            runtime, merged_queue = _build_runtime_for_scene(task_entry=task_entry, scene=scene_name, allowed=allowed)
+            print(format_merged_queue_summary(scene_name, runtime))
+            print(
+                f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} "
+                f"(scene 1/1: {scene_name})\n{'=' * 70}"
+            )
+            run_task_queue(
+                robot_cfg=robot_entry["robot_cfg"],
+                runtime=runtime,
+                robot_id=task_entry["robot_id"],
+                blocks=merged_queue,
+                reset_env=reset_env,
+                use_stamped=use_stamped,
+            )

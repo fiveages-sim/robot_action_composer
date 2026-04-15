@@ -329,3 +329,58 @@ def run_task_queue(
         if robot_connected:
             interface.disconnect()
             print("[OK] Robot disconnected")
+
+
+def run_task_queue_on_connected_interface(
+    *,
+    interface: Any,
+    sim_time: SimTimeHelper,
+    robot_cfg: Any,
+    runtime: MergedQueueConfig,
+    robot_id: str,  # noqa: ARG001
+    blocks: Sequence[BlockSpec | dict[str, Any]],
+    reset_env: bool = True,
+    use_stamped: bool = True,
+    execute_stage_kwargs: Mapping[str, Any] | None = None,
+) -> None:
+    """Execute one task_queue on an already-connected interface (no connect/disconnect)."""
+    specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
+    if not specs:
+        raise ValueError("task queue blocks list is empty")
+
+    interface.send_fsm_command(FSM_HOLD)
+    sim_time.sleep(robot_cfg.fsm_switch_delay)
+    interface.send_fsm_command(FSM_OCS2)
+
+    if reset_env:
+        reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+
+    ctx = build_queue_runtime_context(
+        interface=interface,
+        robot_cfg=robot_cfg,
+        sim_time=sim_time,
+        runtime=runtime,
+        use_stamped=use_stamped,
+    )
+
+    for idx, spec in enumerate(specs):
+        lbl = f"block {idx + 1}/{len(specs)}"
+        if isinstance(spec, ParallelSpec):
+            _execute_parallel(
+                ctx,
+                spec,
+                runner_prefix="TaskQ",
+                idx_label=lbl,
+                execute_stage_kwargs=execute_stage_kwargs,
+            )
+        else:
+            _execute_block(
+                ctx,
+                spec,
+                runner_prefix="TaskQ",
+                idx_label=lbl,
+                execute_stage_kwargs=execute_stage_kwargs,
+            )
+
+    interface.send_fsm_command(FSM_HOLD)
+    print("[OK] Task queue completed")
