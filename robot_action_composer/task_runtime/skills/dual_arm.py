@@ -27,7 +27,14 @@ from robot_action_composer.motion_generation.tasks.bimanual_place import (  # py
     slice_place_stages_for_queue,
 )
 from robot_action_composer.motion_generation.tasks.drawer import euler_to_quaternion  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import (  # pyright: ignore[reportMissingImports]
+    BimanualParallelPickTaskConfig,
+    build_bimanual_parallel_pick_record_sequence,
+    parallel_pick_cfg_from_params,
+    slice_parallel_pick_stages_for_queue,
+)
 from robot_action_composer.motion_generation.tasks.handover import build_handover_sync_sequence  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.tasks.pick_place import _apply_target_pose_offset  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
 from robot_action_composer.task_runtime.registry import register_skill
@@ -217,6 +224,48 @@ def _require_handover_sync(ctx: QueueRuntimeContext):
             "need handover_position + orientations). Pick side arm comes from common.arm / single_arm.pick."
         )
     return h
+
+
+def _require_parallel_pick_cfg(params: Mapping[str, Any]) -> BimanualParallelPickTaskConfig:
+    return parallel_pick_cfg_from_params(params)
+
+
+def _resolve_parallel_pick_target_poses(
+    ctx: QueueRuntimeContext, cfg: BimanualParallelPickTaskConfig,
+) -> dict[str, Any]:
+    left_pose = get_object_pose_from_service(
+        ctx.base_world_pos,
+        ctx.base_world_quat,
+        cfg.left_pick.source_object_entity_path,
+        include_orientation=False,
+    )
+    right_pose = get_object_pose_from_service(
+        ctx.base_world_pos,
+        ctx.base_world_quat,
+        cfg.right_pick.source_object_entity_path,
+        include_orientation=False,
+    )
+    left_pose = _apply_target_pose_offset(left_pose, cfg.left_pick.target_pose_offset)
+    right_pose = _apply_target_pose_offset(right_pose, cfg.right_pick.target_pose_offset)
+    return {"left": left_pose, "right": right_pose}
+
+
+def _parallel_pick_full_stages(
+    ctx: QueueRuntimeContext,
+    cfg: BimanualParallelPickTaskConfig,
+    target_poses: Mapping[str, Any],
+) -> list[StageTarget]:
+    left_pose = target_poses.get("left")
+    right_pose = target_poses.get("right")
+    if left_pose is None or right_pose is None:
+        raise ValueError("parallel pick requires both left and right target poses")
+    return build_bimanual_parallel_pick_record_sequence(
+        task_cfg=cfg,
+        left_target_pose=left_pose,
+        right_target_pose=right_pose,
+        gripper_open=ctx.gripper_open,
+        gripper_closed=ctx.gripper_closed,
+    )
 
 
 def skill_carry_approach(
@@ -550,6 +599,69 @@ def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[l
     )
 
 
+def skill_parallel_pick_approach(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    cfg = _require_parallel_pick_cfg(params)
+    target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
+    ctx.parallel_pick_target_poses = dict(target_poses)
+    full = _parallel_pick_full_stages(ctx, cfg, target_poses)
+    approach, _g, _r = slice_parallel_pick_stages_for_queue(full)
+    return approach, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm parallel pick approach timeout",
+    )
+
+
+def skill_parallel_pick_grasp(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    cfg = _require_parallel_pick_cfg(params)
+    target_poses = ctx.parallel_pick_target_poses
+    if target_poses is None:
+        target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
+        ctx.parallel_pick_target_poses = dict(target_poses)
+    full = _parallel_pick_full_stages(ctx, cfg, target_poses)
+    _a, grasp, _r = slice_parallel_pick_stages_for_queue(full)
+    return grasp, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm parallel pick grasp timeout",
+    )
+
+
+def skill_parallel_pick_retreat(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    cfg = _require_parallel_pick_cfg(params)
+    target_poses = ctx.parallel_pick_target_poses
+    if target_poses is None:
+        target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
+        ctx.parallel_pick_target_poses = dict(target_poses)
+    full = _parallel_pick_full_stages(ctx, cfg, target_poses)
+    _a, _g, retreat = slice_parallel_pick_stages_for_queue(full)
+    return retreat, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm parallel pick retreat timeout",
+    )
+
+
+def skill_parallel_pick(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    cfg = _require_parallel_pick_cfg(params)
+    target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
+    ctx.parallel_pick_target_poses = dict(target_poses)
+    stages = _parallel_pick_full_stages(ctx, cfg, target_poses)
+    return stages, ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=ctx.frame_id,
+        warn_prefix="TaskQ dual_arm parallel pick timeout",
+    )
+
+
 def skill_goto_cache_pose(
     ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
@@ -624,6 +736,10 @@ def register_dual_arm_skills() -> None:
     register_skill("dual_arm.carry_grasp", skill_carry_grasp)
     register_skill("dual_arm.carry_lift_retreat", skill_carry_lift_retreat)
     register_skill("dual_arm.carry", skill_carry)
+    register_skill("dual_arm.parallel_pick_approach", skill_parallel_pick_approach)
+    register_skill("dual_arm.parallel_pick_grasp", skill_parallel_pick_grasp)
+    register_skill("dual_arm.parallel_pick_retreat", skill_parallel_pick_retreat)
+    register_skill("dual_arm.parallel_pick", skill_parallel_pick)
     register_skill("dual_arm.place_advance", skill_place_advance)
     register_skill("dual_arm.place_release", skill_place_release)
     register_skill("dual_arm.place_spread_retreat", skill_place_spread_retreat)

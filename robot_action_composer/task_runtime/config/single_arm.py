@@ -31,6 +31,7 @@ class QueueSlicePick:
     grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     retreat_direction_extra: float = 0.0
     retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    retreat_xyz: tuple[float, float, float] | None = None
     source_object_entity_path: str = ""
     grasp_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
     grasp_direction: str = "top"
