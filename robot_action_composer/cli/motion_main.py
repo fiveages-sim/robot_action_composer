@@ -336,10 +336,6 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                 options=["yes", "no"],
                 default_value="yes",
             ) == "yes"
-        if run_all_scenes and not reset_env:
-            print("[info] scene=ALL_SCENES forces reset_env=yes (each scene should start from clean env).")
-            reset_env = True
-
     _save_motion_last(
         isaac_dir=isaac_dir,
         robot_key=robot_key,

@@ -414,6 +414,9 @@ def skill_place_relative(
         translation_xyz: 平移 [x,y,z]（米），在 **motion 坐标系** 下同加；默认 [0,0,0]。
         spread_half: 单侧沿「右→左」在 motion 系 XY 平面的外张距离（米）；默认取 carry 的 ``carry_approach_clearance_y`` 或 0.04。
         retreat_xyz: 外张后左右再同加的位移 [x,y,z]（motion 系）；默认取 carry 的 ``carry_retreat_xyz`` 或 [-0.2,0,0]。
+        reference_object_entity_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为放置参考点。
+        reference_offset_xyz: 可选。与 ``reference_object_entity_path`` 联用，在参考点上再加偏移（米）。
+            最终会自动换算为本次的 ``translation_xyz``（即参考点目标 - 当前双手中点）。
         motion_frame_id / relative_frame_id: 可选。当前末端数值的**源系**优先取左右臂订阅到的 ``frame_id``，
             若无则退回 ``ctx.frame_id``（Isaac 下常为 base prim 名如 ``base_link``）。与 ``motion_frame_id`` 不同时
             用 ``ROS2RobotInterface.transform_pose`` 变到 motion 系再算几何；``ExecutionMeta.frame_id`` 为 motion 系。
@@ -445,6 +448,43 @@ def skill_place_relative(
             default_retreat = (-0.2, 0.0, 0.0)
 
     tr = _param_vec3(params, "translation_xyz", (0.0, 0.0, 0.0))
+    ref_path_raw = params.get("reference_object_entity_path")
+    if isinstance(ref_path_raw, str) and ref_path_raw.strip():
+        ref_path = ref_path_raw.strip()
+        ref_off = _param_vec3(params, "reference_offset_xyz", (0.0, 0.0, 0.0))
+        # 参考物位姿服务输出在 ctx.frame_id；必要时转换到 motion_frame 再参与几何计算。
+        ref_pose = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            ref_path,
+            include_orientation=False,
+        )
+        ref_motion = ref_pose
+        if motion_frame != ctx.frame_id:
+            if not hasattr(iface, "transform_pose"):
+                raise TypeError(
+                    "dual_arm.place_relative: reference_object_entity_path with motion_frame_id "
+                    "requires ROS2RobotInterface.transform_pose",
+                )
+            try:
+                tft = float(params.get("tf_lookup_timeout", 2.0))
+            except (TypeError, ValueError):
+                tft = 2.0
+            ref_motion = iface.transform_pose(ref_pose, ctx.frame_id, motion_frame, timeout=tft)
+            if ref_motion is None:
+                raise RuntimeError(
+                    f"dual_arm.place_relative: TF {ctx.frame_id!r} -> {motion_frame!r} failed "
+                    f"for reference_object_entity_path={ref_path!r}",
+                )
+
+        mid_x = (l0.position.x + r0.position.x) * 0.5
+        mid_y = (l0.position.y + r0.position.y) * 0.5
+        mid_z = (l0.position.z + r0.position.z) * 0.5
+        tx = float(ref_motion.position.x) + ref_off[0]
+        ty = float(ref_motion.position.y) + ref_off[1]
+        tz = float(ref_motion.position.z) + ref_off[2]
+        tr = (tx - mid_x, ty - mid_y, tz - mid_z)
+
     spread_half = float(params.get("spread_half", params.get("spread_y_half", default_spread)))
     ret = _param_vec3(params, "retreat_xyz", default_retreat)
     prefix = str(params.get("stage_prefix", "PlaceRel")).strip() or "PlaceRel"
