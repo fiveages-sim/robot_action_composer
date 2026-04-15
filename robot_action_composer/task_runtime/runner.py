@@ -271,17 +271,23 @@ def reset_queue_task_environment(
         return
     parallel_pick_cfg = _extract_parallel_pick_cfg_from_specs(specs)
     if parallel_pick_cfg is not None:
-        reset_simulation_and_randomize_object(
+        reset_simulation_state(
             parallel_pick_cfg.left_pick.source_object_entity_path,
-            xyz_offset=parallel_pick_cfg.left_pick.object_xyz_random_offset,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
-        reset_simulation_and_randomize_object(
+        randomize_object_xyz_after_reset(
+            parallel_pick_cfg.left_pick.source_object_entity_path,
+            xyz_offset=parallel_pick_cfg.left_pick.object_xyz_random_offset,
+        )
+        reset_simulation_state(
             parallel_pick_cfg.right_pick.source_object_entity_path,
-            xyz_offset=parallel_pick_cfg.right_pick.object_xyz_random_offset,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
+        )
+        randomize_object_xyz_after_reset(
+            parallel_pick_cfg.right_pick.source_object_entity_path,
+            xyz_offset=parallel_pick_cfg.right_pick.object_xyz_random_offset,
         )
         return
     reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
