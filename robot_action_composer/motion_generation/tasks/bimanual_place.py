@@ -14,12 +14,14 @@ from geometry_msgs.msg import Pose
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     StageTarget,
     build_bimanual_place_sequence,
+    carry_prepare_offset_is_active,
 )
 
-# ``build_bimanual_place_sequence``：0～2 段逆 retreat/lift + 松爪 + Y 张开 + 后撤（共 3～5 段）
+# ``build_bimanual_place_sequence``：0～2 段逆 retreat/lift + 松爪 + Y 张开 + 可选末段后撤（共 3～5 段）
 PLACE_ADVANCE_STAGE_COUNT_MAX = 2
-PLACE_RELEASE_AND_SPREAD_TAIL_STAGE_COUNT = 3
-PLACE_TOTAL_STAGES_MAX = PLACE_ADVANCE_STAGE_COUNT_MAX + PLACE_RELEASE_AND_SPREAD_TAIL_STAGE_COUNT
+# 逆序尾部：Release(1) + SpreadY(1) + 可选 RetreatOpen(1)；无 prepare 偏移时为 2
+PLACE_TRAILING_AFTER_ADVANCE_MAX = 3
+PLACE_TOTAL_STAGES_MAX = PLACE_ADVANCE_STAGE_COUNT_MAX + PLACE_TRAILING_AFTER_ADVANCE_MAX
 
 
 @dataclass(frozen=True)
@@ -32,9 +34,9 @@ class BimanualPlaceTaskConfig:
 
     place_object_entity_path: str
     place_half_span_y: float
-    place_prepare_offset: tuple[float, float, float]
     place_left_orientation: tuple[float, float, float, float]
     place_right_orientation: tuple[float, float, float, float]
+    place_prepare_offset: tuple[float, float, float] | None = None
     place_approach_clearance_y: float = 0.0
     place_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     place_lift_xyz: tuple[float, float, float] | None = None
@@ -50,14 +52,24 @@ def format_bimanual_place_task_cfg_summary(scene: str, task_cfg: BimanualPlaceTa
     )
 
 
+def place_trailing_after_advance_stage_count(cfg: BimanualPlaceTaskConfig) -> int:
+    """Release 之后：SpreadY + 可选 RetreatOpen；与 carry 一致，无 prepare 偏移时少末段。"""
+    return 3 if carry_prepare_offset_is_active(cfg.place_prepare_offset) else 2
+
+
 def slice_place_stages_for_queue(
     full: list[StageTarget],
+    *,
+    trailing_after_advance: int,
 ) -> tuple[list[StageTarget], list[StageTarget], list[StageTarget]]:
-    """前 0～2 段为逆 carry 的 advance；接着 1 段 release；最后 2 段 spread + retreat。"""
-    tail = PLACE_RELEASE_AND_SPREAD_TAIL_STAGE_COUNT
-    if len(full) < tail:
-        raise ValueError(f"place sequence too short: need >= {tail} stages, got {len(full)}")
-    n_adv = len(full) - tail
+    """前 0～2 段为逆 carry 的 advance；接着 ``trailing_after_advance`` 段为 release + spread（+ 可选 retreat）。"""
+    if trailing_after_advance not in (2, 3):
+        raise ValueError(f"trailing_after_advance must be 2 or 3, got {trailing_after_advance}")
+    if len(full) < trailing_after_advance:
+        raise ValueError(
+            f"place sequence too short: need >= {trailing_after_advance} stages, got {len(full)}",
+        )
+    n_adv = len(full) - trailing_after_advance
     if n_adv > PLACE_ADVANCE_STAGE_COUNT_MAX:
         raise ValueError(
             f"place advance too long: at most {PLACE_ADVANCE_STAGE_COUNT_MAX} stages, got {n_adv}",

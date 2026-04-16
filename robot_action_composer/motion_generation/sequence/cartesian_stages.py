@@ -28,6 +28,13 @@ PICK_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "CloseIn", "Grasp", "Lift", 
 PLACE_STAGE_SUFFIXES: tuple[str, ...] = ("Place", "Release", "PostReleaseRetreat")
 HANDOVER_STAGE_SUFFIXES: tuple[str, ...] = ("SyncMove", "ReceiverGrasp", "SourceRelease")
 CARRY_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "Forward", "CloseIn", "Grasp", "Lift", "Retreat")
+
+
+def carry_prepare_offset_is_active(carry_prepare_offset: tuple[float, float, float] | None) -> bool:
+    """为真时生成独立「远」预接近段；``None`` 或三轴全为 0 时与 Forward 位姿重合，由序列中省略该段。"""
+    if carry_prepare_offset is None:
+        return False
+    return any(abs(float(x)) > 1e-12 for x in carry_prepare_offset)
 # 与 :func:`build_bimanual_carry_sequence` 互逆：持箱到位 → 下降 → 张开 → Y 向张开 → 后撤
 BIMANUAL_PLACE_SUFFIXES: tuple[str, ...] = (
     "AdvanceToLift",
@@ -515,7 +522,7 @@ def build_bimanual_carry_sequence(
     *,
     object_center: Pose,
     carry_half_span_y: float,
-    carry_prepare_offset: tuple[float, float, float],
+    carry_prepare_offset: tuple[float, float, float] | None = None,
     carry_approach_clearance_y: float = 0.0,
     carry_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
     carry_left_orientation: tuple[float, float, float, float],
@@ -534,6 +541,9 @@ def build_bimanual_carry_sequence(
 
     ``carry_lift_xyz`` / ``carry_retreat_xyz`` 为 ``None``（YAML 不写）时**不生成**对应段；
     几何上仍用 ``(0,0,0)`` 合成另一段的终点（例如仅后撤时终点相对抓取点只加 ``carry_retreat_xyz``）。
+
+    ``carry_prepare_offset`` 为 ``None`` 或 ``[0,0,0]`` 时**不生成**第一段 Approach（与 Forward 重合），
+    序列以 Forward → CloseIn 起。
 
     ``output_frame_id``：写入各 :class:`StageTarget` 的 ``frame_id``，供 stamped / dual_stamped
     与位姿数值所用系一致（一般为队列 ``ctx.frame_id``）。
@@ -559,19 +569,25 @@ def build_bimanual_carry_sequence(
     grasp_y_half = carry_half_span_y + carry_xyz[1]
     grasp_z = cz + carry_xyz[2]
 
-    # 1-Approach: far back, arms spread wide
-    approach_l, approach_r = _lr_poses(
-        grasp_x + carry_prepare_offset[0],
-        grasp_y_half + carry_approach_clearance_y + carry_prepare_offset[1],
-        grasp_z + carry_prepare_offset[2],
+    has_prepare = carry_prepare_offset_is_active(carry_prepare_offset)
+    ox, oy, oz = (
+        (float(carry_prepare_offset[0]), float(carry_prepare_offset[1]), float(carry_prepare_offset[2]))
+        if carry_prepare_offset is not None
+        else (0.0, 0.0, 0.0)
     )
-    # 2-Forward: move to object X, but still spread wide
+    # 1-Approach（可选）: 相对抓取点带 prepare 偏移的远点；无偏移时省略（与 Forward 重合）
+    approach_l, approach_r = _lr_poses(
+        grasp_x + ox,
+        grasp_y_half + carry_approach_clearance_y + oy,
+        grasp_z + oz,
+    )
+    # Forward: 物体 X、仍带横向张开余量
     forward_l, forward_r = _lr_poses(
         grasp_x,
         grasp_y_half + carry_approach_clearance_y,
         grasp_z,
     )
-    # 3-CloseIn: narrow to grasp position
+    # CloseIn: 收拢到抓取位
     closein_l, closein_r = _lr_poses(grasp_x, grasp_y_half, grasp_z)
     # 4-Grasp: same position, close grippers
     eff_lx, eff_ly, eff_lz = (
@@ -595,30 +611,43 @@ def build_bimanual_carry_sequence(
         grasp_z + eff_lz + eff_rz,
     )
 
-    stages = [
+    stages: list[StageTarget] = []
+    si = 0
+    if has_prepare:
+        si += 1
+        stages.append(
+            StageTarget(
+                name=_stage_name(stage_prefix, si, CARRY_STAGE_SUFFIXES[0]),
+                left=ArmTarget(pose=approach_l, gripper=gripper_open),
+                right=ArmTarget(pose=approach_r, gripper=gripper_open),
+            ),
+        )
+    si += 1
+    stages.append(
         StageTarget(
-            name=_stage_name(stage_prefix, 1, CARRY_STAGE_SUFFIXES[0]),
-            left=ArmTarget(pose=approach_l, gripper=gripper_open),
-            right=ArmTarget(pose=approach_r, gripper=gripper_open),
-        ),
-        StageTarget(
-            name=_stage_name(stage_prefix, 2, CARRY_STAGE_SUFFIXES[1]),
+            name=_stage_name(stage_prefix, si, CARRY_STAGE_SUFFIXES[1]),
             left=ArmTarget(pose=forward_l, gripper=gripper_open),
             right=ArmTarget(pose=forward_r, gripper=gripper_open),
         ),
+    )
+    si += 1
+    stages.append(
         StageTarget(
-            name=_stage_name(stage_prefix, 3, CARRY_STAGE_SUFFIXES[2]),
+            name=_stage_name(stage_prefix, si, CARRY_STAGE_SUFFIXES[2]),
             left=ArmTarget(pose=closein_l, gripper=gripper_open),
             right=ArmTarget(pose=closein_r, gripper=gripper_open),
         ),
+    )
+    si += 1
+    stages.append(
         StageTarget(
-            name=_stage_name(stage_prefix, 4, CARRY_STAGE_SUFFIXES[3]),
+            name=_stage_name(stage_prefix, si, CARRY_STAGE_SUFFIXES[3]),
             left=ArmTarget(pose=closein_l, gripper=gripper_closed),
             right=ArmTarget(pose=closein_r, gripper=gripper_closed),
             wait_gripper_settle=True,
         ),
-    ]
-    idx = 5
+    )
+    idx = si + 1
     if carry_lift_xyz is not None:
         stages.append(
             StageTarget(
@@ -643,7 +672,7 @@ def build_bimanual_place_sequence(
     *,
     object_center: Pose,
     carry_half_span_y: float,
-    carry_prepare_offset: tuple[float, float, float],
+    carry_prepare_offset: tuple[float, float, float] | None = None,
     carry_approach_clearance_y: float = 0.0,
     carry_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
     carry_left_orientation: tuple[float, float, float, float],
@@ -659,6 +688,9 @@ def build_bimanual_place_sequence(
 
     起始姿态与 carry 末段一致：若有后撤段则双手在 retreat，否则在 lift（或未抬升则已在合拢位）。
     ``carry_lift_xyz`` / ``carry_retreat_xyz`` 为 ``None`` 时不生成与 carry 对应逆段（与 YAML 不写即跳过一致）。
+
+    ``carry_prepare_offset`` 为 ``None`` 或全 0 时，末段 ``RetreatOpen`` 与 ``SpreadY`` 位姿重合，不生成该末段
+    （与 :func:`build_bimanual_carry_sequence` 省略 Approach 一致）。
 
     ``output_frame_id``：各段 ``StageTarget.frame_id``，与 stamped 位姿系一致（一般为 ``ctx.frame_id``）。
     """
@@ -683,10 +715,16 @@ def build_bimanual_place_sequence(
     grasp_y_half = carry_half_span_y + carry_xyz[1]
     grasp_z = cz + carry_xyz[2]
 
+    has_prepare = carry_prepare_offset_is_active(carry_prepare_offset)
+    ox, oy, oz = (
+        (float(carry_prepare_offset[0]), float(carry_prepare_offset[1]), float(carry_prepare_offset[2]))
+        if carry_prepare_offset is not None
+        else (0.0, 0.0, 0.0)
+    )
     approach_l, approach_r = _lr_poses(
-        grasp_x + carry_prepare_offset[0],
-        grasp_y_half + carry_approach_clearance_y + carry_prepare_offset[1],
-        grasp_z + carry_prepare_offset[2],
+        grasp_x + ox,
+        grasp_y_half + carry_approach_clearance_y + oy,
+        grasp_z + oz,
     )
     forward_l, forward_r = _lr_poses(
         grasp_x,
@@ -744,14 +782,15 @@ def build_bimanual_place_sequence(
             right=ArmTarget(pose=forward_r, gripper=gripper_open),
         ),
     )
-    si += 1
-    stages.append(
-        StageTarget(
-            name=_stage_name(stage_prefix, si, BIMANUAL_PLACE_SUFFIXES[4]),
-            left=ArmTarget(pose=approach_l, gripper=gripper_open),
-            right=ArmTarget(pose=approach_r, gripper=gripper_open),
-        ),
-    )
+    if has_prepare:
+        si += 1
+        stages.append(
+            StageTarget(
+                name=_stage_name(stage_prefix, si, BIMANUAL_PLACE_SUFFIXES[4]),
+                left=ArmTarget(pose=approach_l, gripper=gripper_open),
+                right=ArmTarget(pose=approach_r, gripper=gripper_open),
+            ),
+        )
     return _stages_with_output_frame_id(stages, output_frame_id)
 
 
@@ -1018,6 +1057,7 @@ __all__ = [
     "StageTarget",
     "BIMANUAL_PLACE_SUFFIXES",
     "CARRY_STAGE_SUFFIXES",
+    "carry_prepare_offset_is_active",
     "HANDOVER_STAGE_SUFFIXES",
     "PICK_STAGE_SUFFIXES",
     "PLACE_STAGE_SUFFIXES",
