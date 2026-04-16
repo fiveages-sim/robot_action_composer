@@ -88,7 +88,7 @@
 - **并行块**：一项为 **`parallel:`**，值为子块列表（子块不可再嵌套 `parallel`）。见 **`types.ParallelSpec`** 注释中的 YAML 示例。
 - **交接（handover）典型顺序**（参见各机器人 `handover.yaml`）：
   1. **`robot.cache_ee_pose`**（`which: both`，写入 `scratch[key]`）→ `single_arm.pregrasp` → `single_arm.pick` → `dual_arm.handover_sync` → `single_arm.place` → **`dual_arm.goto_cache_pose`**（同一 `key`，双臂同步回起势末端位姿）。
-- **后退再回「队列起势」**：**`nav.navigate_backup`**（`distance_m`，沿 base +X 反向平移）→ **`parallel`**：`nav.send_nav_goal`（如 `x/y/yaw=0`）与 **`joint.movej_to_config`**（仅躯干时可设 **`skip_fsm_hold: true`**，避免并行时先发 `HOLD` 打断 Nav2）→ **`nav.wait_nav_arrived`** → **`dual_arm.goto_cache_pose`**（若任务开头已 **`robot.cache_ee_pose` `which: both`**）。参见 `FiveAges_W2/navigate_and_carry.yaml`。
+- **后退再回「队列起势」**：**`nav.navigate_backup`**（`distance_m`，沿 base +X 反向平移）→ **`parallel`**：`nav.send_nav_goal`（如 `x/y/yaw=0`）与 **`joint.movej_to_config`**（仅躯干时可设 **`skip_fsm_change: true`**，跳过该技能内 FSM 切换）→ **`nav.wait_nav_arrived`** → **`dual_arm.goto_cache_pose`**（若任务开头已 **`robot.cache_ee_pose` `which: both`**）。参见 `FiveAges_W2/navigate_and_carry.yaml`。
 - **会话暂存 / 状态快照**：**`session.scratch_put`**（`key` + `value`）、**`session.scratch_clear`**（可选 `prefix`）；**`robot.snapshot_state`**（可选 `key`，默认 `robot_state`，将关节状态与双臂末端位姿等写入 **`ctx.scratch`**，供后续自定义 skill 用 **`ctx.scratch_get`** 读取）。
 - **缓存回程点**：**`robot.cache_ee_pose`** 写在 **`task_queue` 靠前位置**（常见为 reset/OCS2 后首步，或 pregrasp 之后），写入 **`ctx.scratch[key]`**；Runner **不再**在连接时缓存 Cartesian home 或初始关节角。
   - **`which`**（可选）：**`work`**（默认，按 `common.arm` 单臂，扁平 `pose+gripper`）、**`left`** / **`right`**（显式单臂）、**`both`**（双臂结构 `{left, right}`，每侧 `pose+gripper`；可选 **`left_gripper`** / **`right_gripper`** 覆盖 **`gripper`**）。

@@ -43,8 +43,7 @@ def skill_movej_to_config(
         joint_tolerance (float): 到位判定阈值（rad），默认 0.05。
         resume_ocs2 (bool): 到位后切回 OCS2，供后续笛卡尔 skill 使用，默认 False。
             当本步骤是关节运动序列中最后一步、之后紧接 pick/place 等笛卡尔 skill 时设为 True。
-        skip_fsm_hold (bool): 为 True 时不发送初始 ``FSM_HOLD``。
-            用于与 ``nav.send_nav_goal`` 并行下发躯干（避免 Nav2 行驶中被 HOLD 打断）；默认 False。
+        skip_fsm_change (bool): 为 True 时跳过本 skill 内所有 FSM 切换（``HOLD`` 与 body-only 分支的 ``MOVEJ``）；默认 False。
         body_movej_duration (float, 可选): 执行本块前，动态设置 body joint controller 的 ``movej_duration``。
             controller 节点由 ``interface.body_controller`` 自动提供。
     """
@@ -54,7 +53,7 @@ def skill_movej_to_config(
     arrival_timeout = float(params.get("arrival_timeout", 30.0))
     joint_tolerance = float(params.get("joint_tolerance", 0.05))
     resume_ocs2 = bool(params.get("resume_ocs2", False))
-    skip_fsm_hold = bool(params.get("skip_fsm_hold", False))
+    skip_fsm_change = bool(params.get("skip_fsm_change", False))
     body_movej_duration = params.get("body_movej_duration", None)
 
     interface = ctx.interface
@@ -83,7 +82,7 @@ def skill_movej_to_config(
                 f"[MoveJ] WARN: failed to set {body_ctrl}.movej_duration = {duration_val}"
             )
 
-    if not skip_fsm_hold:
+    if not skip_fsm_change:
         try:
             interface.send_fsm_command(FSM_HOLD)
             if sleep_fn:
@@ -133,12 +132,13 @@ def skill_movej_to_config(
             print(f"[MoveJ] WARN: WBC body-via-dual failed: {exc}")
 
         if not body_sent:
-            try:
-                interface.send_fsm_command(FSM_MOVEJ)
-                if sleep_fn:
-                    sleep_fn(0.1)
-            except Exception as exc:
-                print(f"[MoveJ] WARN: FSM MOVEJ before split-body failed: {exc}")
+            if not skip_fsm_change:
+                try:
+                    interface.send_fsm_command(FSM_MOVEJ)
+                    if sleep_fn:
+                        sleep_fn(0.1)
+                except Exception as exc:
+                    print(f"[MoveJ] WARN: FSM MOVEJ before split-body failed: {exc}")
             try:
                 interface.send_body_joint_positions(body_positions)
                 print(f"[MoveJ] Body split-topic → {body_positions}")
