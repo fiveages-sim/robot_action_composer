@@ -11,6 +11,7 @@ from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMiss
     euler_rpy_to_quat_xyzw,
     quat_multiply,
     quat_normalize,
+    rotate_vector_by_quat,
 )
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
@@ -513,7 +514,8 @@ def skill_place_relative(
         spread_half: 单侧沿「右→左」在 motion 系 XY 平面的外张距离（米）；默认取 carry 的 ``arm_merge_distance_y`` 或 0.04。
         retreat_xyz: 外张后左右再同加的位移 [x,y,z]（motion 系）；默认取 carry 的 ``ee_retreat_offset`` 或 [-0.2,0,0]。
         reference_object_entity_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为放置参考点。
-        reference_offset_xyz: 可选。与 ``reference_object_entity_path`` 联用，在参考点上再加偏移（米）。
+        object_position_offset: 可选。与 ``reference_object_entity_path`` 联用，按参考物体自身坐标系
+            的偏移（米）补偿，再转换到 motion 系叠加到参考点（即偏移方向随参考物体姿态变化）。
             最终会自动换算为本次的 ``translation_xyz``（即参考点目标 - 当前双手中点）。
         motion_frame_id / relative_frame_id: 可选。当前末端数值的**源系**优先取左右臂订阅到的 ``frame_id``，
             若无则退回 ``ctx.frame_id``（Isaac 下常为 base prim 名如 ``base_link``）。与 ``motion_frame_id`` 不同时
@@ -555,13 +557,13 @@ def skill_place_relative(
     ref_path_raw = params.get("reference_object_entity_path")
     if isinstance(ref_path_raw, str) and ref_path_raw.strip():
         ref_path = ref_path_raw.strip()
-        ref_off = _param_vec3(params, "reference_offset_xyz", (0.0, 0.0, 0.0))
+        ref_off_obj = _param_vec3(params, "object_position_offset", (0.0, 0.0, 0.0))
         # 参考物位姿服务输出在 ctx.frame_id；必要时转换到 motion_frame 再参与几何计算。
         ref_pose = get_object_pose_from_service(
             ctx.base_world_pos,
             ctx.base_world_quat,
             ref_path,
-            include_orientation=False,
+            include_orientation=True,
         )
         ref_motion = ref_pose
         if motion_frame != ctx.frame_id:
@@ -584,9 +586,16 @@ def skill_place_relative(
         mid_x = (l0.position.x + r0.position.x) * 0.5
         mid_y = (l0.position.y + r0.position.y) * 0.5
         mid_z = (l0.position.z + r0.position.z) * 0.5
-        tx = float(ref_motion.position.x) + ref_off[0]
-        ty = float(ref_motion.position.y) + ref_off[1]
-        tz = float(ref_motion.position.z) + ref_off[2]
+        ref_q = (
+            float(ref_motion.orientation.x),
+            float(ref_motion.orientation.y),
+            float(ref_motion.orientation.z),
+            float(ref_motion.orientation.w),
+        )
+        ref_off_motion = rotate_vector_by_quat(ref_off_obj, ref_q)
+        tx = float(ref_motion.position.x) + ref_off_motion[0]
+        ty = float(ref_motion.position.y) + ref_off_motion[1]
+        tz = float(ref_motion.position.z) + ref_off_motion[2]
         tr = (tx - mid_x, ty - mid_y, tz - mid_z)
 
     spread_half = float(params.get("spread_half", params.get("spread_y_half", default_spread)))
