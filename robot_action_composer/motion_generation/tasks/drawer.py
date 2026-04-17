@@ -10,8 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     ArmSide,
     ArmStage,
@@ -23,23 +21,6 @@ from robot_action_composer.task_runtime.config.single_arm import (  # pyright: i
     QueueSingleArmSlice,
     QueueSlicePick,
 )
-
-
-def euler_to_quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
-    """Convert Euler angles to quaternion (ZYX: yaw, pitch, roll)."""
-    cy = np.cos(yaw * 0.5)
-    sy = np.sin(yaw * 0.5)
-    cp = np.cos(pitch * 0.5)
-    sp = np.sin(pitch * 0.5)
-    cr = np.cos(roll * 0.5)
-    sr = np.sin(roll * 0.5)
-
-    w = cr * cp * cy + sr * sp * sy
-    x = sr * cp * cy - cr * sp * sy
-    y = cr * sp * cy + sr * cp * sy
-    z = cr * cp * sy - sr * sp * cy
-
-    return (w, x, y, z)
 
 
 @dataclass(frozen=True)

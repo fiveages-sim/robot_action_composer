@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ros2_robot_interface import FSM_HOLD, FSM_MOVEJ, FSM_OCS2  # pyright: ignore[reportMissingImports]
+from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.movej_return import (  # pyright: ignore[reportMissingImports]
@@ -35,15 +35,15 @@ def skill_movej_to_config(
 
     params:
         body_positions (list[float], 可选): 躯干/腰部关节目标，典型 4 个。
-            可**单独**填写（无手臂目标）：**WBC**（``ocs2_wbc_controller`` 统一 topic）下用当前双臂位置
-            + 目标躯干走 ``send_dual_arm_joint_positions``；否则先 ``FSM_MOVEJ`` 再 ``send_body_joint_positions``。
+            与手臂组合时由 ``ROS2RobotInterface.send_coordinated_joint_positions`` 按 WBC / split 自动选路。
         left_arm_positions (list[float], 可选): 左臂关节目标，典型 7 个。
         right_arm_positions (list[float], 可选): 右臂关节目标，典型 7 个。
         arrival_timeout (float): 手臂到位等待超时（秒），默认 30.0。
         joint_tolerance (float): 到位判定阈值（rad），默认 0.05。
         resume_ocs2 (bool): 到位后切回 OCS2，供后续笛卡尔 skill 使用，默认 False。
             当本步骤是关节运动序列中最后一步、之后紧接 pick/place 等笛卡尔 skill 时设为 True。
-        skip_fsm_change (bool): 为 True 时跳过本 skill 内所有 FSM 切换（``HOLD`` 与 body-only 分支的 ``MOVEJ``）；默认 False。
+        skip_fsm_change (bool): 为 True 时跳过本 skill 开头的 ``HOLD``；默认 False。
+            关节指令内部的 FSM 仍由 ``ROS2RobotInterface`` 各 ``send_*`` 路径自行处理。
         body_movej_duration (float, 可选): 执行本块前，动态设置 body joint controller 的 ``movej_duration``。
             controller 节点由 ``interface.body_controller`` 自动提供。
     """
@@ -91,70 +91,20 @@ def skill_movej_to_config(
             print(f"[MoveJ] WARN: FSM HOLD failed: {exc}")
 
     moved = False
-    if left_positions and right_positions:
+    if body_positions or left_positions or right_positions:
         try:
-            interface.send_dual_arm_joint_positions(
-                left_positions,
-                right_positions,
+            interface.send_coordinated_joint_positions(
                 body_positions=body_positions or None,
+                left_arm_positions=left_positions or None,
+                right_arm_positions=right_positions or None,
             )
-            print(f"[MoveJ] Dual-arm → L:{left_positions}  R:{right_positions}")
             moved = True
+            print(
+                f"[MoveJ] coordinated  body={bool(body_positions)} "
+                f"L={bool(left_positions)} R={bool(right_positions)}"
+            )
         except Exception as exc:
-            print(f"[MoveJ] WARN: dual-arm failed, fallback: {exc}")
-
-    if not moved and left_positions and interface.left_arm_handler is not None:
-        interface.left_arm_handler.send_joint_positions(left_positions)
-        moved = True
-    if not moved and right_positions and interface.right_arm_handler is not None:
-        interface.right_arm_handler.send_joint_positions(right_positions)
-        moved = True
-
-    if not moved and body_positions:
-        body_sent = False
-        try:
-            ut = getattr(getattr(interface, "config", None), "unified_arm_joint_controller_topic", None) or ""
-            is_wbc = "ocs2_wbc_controller" in ut
-            categorized = interface.get_joint_state(categorized=True) or {}
-            lp = categorized.get("left_arm", {}).get("positions")
-            rp = categorized.get("right_arm", {}).get("positions")
-            if is_wbc and lp and rp and len(lp) >= 7 and len(rp) >= 7:
-                left_hold = [float(x) for x in lp[:7]]
-                right_hold = [float(x) for x in rp[:7]]
-                interface.send_dual_arm_joint_positions(
-                    left_hold,
-                    right_hold,
-                    body_positions=body_positions,
-                )
-                print(f"[MoveJ] Body via WBC unified (hold arms) → body={body_positions}")
-                body_sent = True
-        except Exception as exc:
-            print(f"[MoveJ] WARN: WBC body-via-dual failed: {exc}")
-
-        if not body_sent:
-            if not skip_fsm_change:
-                try:
-                    interface.send_fsm_command(FSM_MOVEJ)
-                    if sleep_fn:
-                        sleep_fn(0.1)
-                except Exception as exc:
-                    print(f"[MoveJ] WARN: FSM MOVEJ before split-body failed: {exc}")
-            try:
-                interface.send_body_joint_positions(body_positions)
-                print(f"[MoveJ] Body split-topic → {body_positions}")
-                body_sent = True
-            except Exception as exc:
-                print(f"[MoveJ] WARN: send_body_joint_positions failed: {exc}")
-
-        if body_sent:
-            moved = True
-
-    if body_positions and moved and (left_positions or right_positions):
-        try:
-            interface.send_body_joint_positions(body_positions)
-            print(f"[MoveJ] Body → {body_positions}")
-        except Exception as exc:
-            print(f"[MoveJ] WARN: send body joints failed: {exc}")
+            print(f"[MoveJ] WARN: send_coordinated_joint_positions failed: {exc}")
 
     if moved and (left_positions or right_positions or body_positions):
         result = interface.wait_until_joint_arrive(

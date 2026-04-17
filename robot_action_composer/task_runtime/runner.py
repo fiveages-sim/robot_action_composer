@@ -21,8 +21,9 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     set_prim_orientation_local,
 )
 
+from ros2_robot_interface.utils.quat_pose import euler_rpy_to_quat_wxyz  # pyright: ignore[reportMissingImports]
+
 from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
-from robot_action_composer.motion_generation.tasks.drawer import euler_to_quaternion  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import (  # pyright: ignore[reportMissingImports]
     BimanualParallelPickTaskConfig,
     parallel_pick_cfg_from_params,
@@ -242,7 +243,7 @@ def reset_queue_task_environment(
             sleep_fn=sim_time.sleep,
         )
         rot_z = random.uniform(-0.1, 0.1)
-        set_prim_orientation_local(drawer_all, euler_to_quaternion(0, 0, rot_z))
+        set_prim_orientation_local(drawer_all, euler_rpy_to_quat_wxyz(0, 0, rot_z))
         randomize_object_xyz_after_reset(
             drawer_all,
             xyz_offset=dcfg.object_xyz_random_offset_drawer,

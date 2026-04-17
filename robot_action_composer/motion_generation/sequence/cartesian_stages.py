@@ -17,6 +17,11 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from geometry_msgs.msg import Pose
 
+from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+    quat_normalize,
+    rotate_vector_by_quat,
+)
+
 if TYPE_CHECKING:
     from ros2_robot_interface.ros_interface import ROS2RobotInterface
 
@@ -28,6 +33,106 @@ PICK_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "CloseIn", "Grasp", "Lift", 
 PLACE_STAGE_SUFFIXES: tuple[str, ...] = ("Place", "Release", "PostReleaseRetreat")
 HANDOVER_STAGE_SUFFIXES: tuple[str, ...] = ("SyncMove", "ReceiverGrasp", "SourceRelease")
 CARRY_STAGE_SUFFIXES: tuple[str, ...] = ("Approach", "Forward", "CloseIn", "Grasp", "Lift", "Retreat")
+
+
+def _tool_offset_xyz_to_world_lr(
+    vec_tool: tuple[float, float, float],
+    q_left_xyzw: tuple[float, float, float, float],
+    q_right_xyzw: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """将工具系位移分别用左、右抓取四元数旋转到 ``output_frame_id`` / motion 系。"""
+    return (
+        rotate_vector_by_quat(vec_tool, q_left_xyzw),
+        rotate_vector_by_quat(vec_tool, q_right_xyzw),
+    )
+
+
+def _pose_xyz_orientation(
+    x: float,
+    y: float,
+    z: float,
+    q_xyzw: tuple[float, float, float, float],
+) -> Pose:
+    p = Pose()
+    p.position.x, p.position.y, p.position.z = x, y, z
+    p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w = q_xyzw[0], q_xyzw[1], q_xyzw[2], q_xyzw[3]
+    return p
+
+
+def _object_orientation_xyzw(p: Pose) -> tuple[float, float, float, float]:
+    """从物体 :class:`Pose` 读取姿态四元数 xyzw（与 ``object_position`` 所用坐标系一致，一般为 TF 后的 motion 系）。"""
+    return quat_normalize(
+        (
+            float(p.orientation.x),
+            float(p.orientation.y),
+            float(p.orientation.z),
+            float(p.orientation.w),
+        ),
+    )
+
+
+def _bimanual_carry_lr_xyz_triple_from_object_body(
+    object_position: Pose,
+    object_position_offset: tuple[float, float, float],
+    object_dual_arm_half_span_y: float,
+    arm_merge_distance_y: float,
+    carry_prepare_offset: tuple[float, float, float] | None,
+    *,
+    carry_left_orientation: tuple[float, float, float, float],
+    carry_right_orientation: tuple[float, float, float, float],
+) -> tuple[
+    tuple[tuple[float, float, float], tuple[float, float, float]],
+    tuple[tuple[float, float, float], tuple[float, float, float]],
+    tuple[tuple[float, float, float], tuple[float, float, float]],
+]:
+    """抓取几何：中线用物体姿态，左右张开用 motion 系 **Y**（通常为 ``arm_base`` 的 Y）。
+
+    - 名义抓取中线相对物体原点：物体系 ``(object_position_offset[0], 0, object_position_offset[2])``，经 ``R(q)`` 映到输出系后加到物体原点位置。
+    - **左右半宽** ``object_dual_arm_half_span_y+object_position_offset[1]`` 及 **Approach 余量** ``arm_merge_distance_y`` 沿输出系 **Y 轴**（非物体固连 Y）。
+    - ``carry_prepare_offset``：与各臂 **末端工具系** 下的平移（与 ``ee_lift_offset`` 在 ``tool`` 帧语义一致），
+      同一 ``(dx,dy,dz)`` 分别经 ``carry_left_orientation`` / ``carry_right_orientation`` 旋到输出系后加到 Forward 远点。
+    """
+    q = _object_orientation_xyzw(object_position)
+    cx = float(object_position.position.x)
+    cy = float(object_position.position.y)
+    cz = float(object_position.position.z)
+    ocx, ocy, ocz = float(object_position_offset[0]), float(object_position_offset[1]), float(object_position_offset[2])
+    half = float(object_dual_arm_half_span_y) + ocy
+    clear = float(arm_merge_distance_y)
+
+    d_mid = rotate_vector_by_quat((ocx, 0.0, ocz), q)
+    p_mid = (cx + d_mid[0], cy + d_mid[1], cz + d_mid[2])
+
+    pl_close = (p_mid[0], p_mid[1] + half, p_mid[2])
+    pr_close = (p_mid[0], p_mid[1] - half, p_mid[2])
+    pl_fwd = (p_mid[0], p_mid[1] + half + clear, p_mid[2])
+    pr_fwd = (p_mid[0], p_mid[1] - half - clear, p_mid[2])
+
+    if carry_prepare_offset_is_active(carry_prepare_offset):
+        ox = float(carry_prepare_offset[0])
+        oy = float(carry_prepare_offset[1])
+        oz = float(carry_prepare_offset[2])
+        vec = (ox, oy, oz)
+        d_l = rotate_vector_by_quat(vec, carry_left_orientation)
+        d_r = rotate_vector_by_quat(vec, carry_right_orientation)
+        pl_app = (pl_fwd[0] + d_l[0], pl_fwd[1] + d_l[1], pl_fwd[2] + d_l[2])
+        pr_app = (pr_fwd[0] + d_r[0], pr_fwd[1] + d_r[1], pr_fwd[2] + d_r[2])
+    else:
+        pl_app, pr_app = pl_fwd, pr_fwd
+
+    return (pl_close, pr_close), (pl_fwd, pr_fwd), (pl_app, pr_app)
+
+
+def _lr_poses_from_xyz_pair(
+    pl: tuple[float, float, float],
+    pr: tuple[float, float, float],
+    carry_left_orientation: tuple[float, float, float, float],
+    carry_right_orientation: tuple[float, float, float, float],
+) -> tuple[Pose, Pose]:
+    return (
+        _pose_xyz_orientation(pl[0], pl[1], pl[2], carry_left_orientation),
+        _pose_xyz_orientation(pr[0], pr[1], pr[2], carry_right_orientation),
+    )
 
 
 def carry_prepare_offset_is_active(carry_prepare_offset: tuple[float, float, float] | None) -> bool:
@@ -520,15 +625,18 @@ def build_handover_sequence(
 
 def build_bimanual_carry_sequence(
     *,
-    object_center: Pose,
-    carry_half_span_y: float,
+    object_position: Pose,
+    object_dual_arm_half_span_y: float,
     carry_prepare_offset: tuple[float, float, float] | None = None,
-    carry_approach_clearance_y: float = 0.0,
-    carry_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    arm_merge_distance_y: float = 0.0,
+    object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     carry_left_orientation: tuple[float, float, float, float],
     carry_right_orientation: tuple[float, float, float, float],
-    carry_lift_xyz: tuple[float, float, float] | None = None,
-    carry_retreat_xyz: tuple[float, float, float] | None = None,
+    ee_lift_offset: tuple[float, float, float] | None = None,
+    ee_retreat_offset: tuple[float, float, float] | None = None,
+    carry_linear_displacement_frame: str = "tool",
+    carry_lift_motion_delta: tuple[float, float, float] | None = None,
+    carry_retreat_motion_delta: tuple[float, float, float] | None = None,
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Carry",
@@ -537,10 +645,18 @@ def build_bimanual_carry_sequence(
     """Build a bimanual symmetric carry sequence.
 
     Both arms approach, close in, grasp, then optional lift / retreat.
-    Left/right positions are mirrored about the object centre along Y.
 
-    ``carry_lift_xyz`` / ``carry_retreat_xyz`` 为 ``None``（YAML 不写）时**不生成**对应段；
-    几何上仍用 ``(0,0,0)`` 合成另一段的终点（例如仅后撤时终点相对抓取点只加 ``carry_retreat_xyz``）。
+    **抓取几何**：``object_position_offset[0]`` / ``object_position_offset[2]`` 与物体系 X/Z 对齐，经 ``R(q)`` 映到输出系后定抓取中线；
+    ``object_dual_arm_half_span_y+object_position_offset[1]``、``arm_merge_distance_y`` 沿输出系 **Y**（通常为 ``arm_base`` Y）
+    左右展开；``carry_prepare_offset`` 为末端工具系 ``(dx,dy,dz)``（与 ``ee_lift_offset`` 的 tool 语义一致），
+    左右各用 ``carry_*_orientation`` 旋到输出系后加到 Forward 远点。
+
+    ``ee_lift_offset`` / ``ee_retreat_offset`` 为 ``None``（YAML 不写）时**不生成**对应段；
+    几何上仍用 ``(0,0,0)`` 合成另一段的终点（例如仅后撤时终点相对抓取点只加 ``ee_retreat_offset``）。
+
+    **Lift/Retreat 位移系**（``carry_linear_displacement_frame``）：``motion`` 时 ``carry_*_xyz`` 为输出系
+    轴向分量，左右同加；``tool`` 时为末端工具系，经 ``carry_*_orientation`` 旋到输出系；若传入
+    ``carry_lift_motion_delta`` / ``carry_retreat_motion_delta``（已为输出系向量），则优先用于该段。
 
     ``carry_prepare_offset`` 为 ``None`` 或 ``[0,0,0]`` 时**不生成**第一段 Approach（与 Forward 重合），
     序列以 Forward → CloseIn 起。
@@ -548,67 +664,75 @@ def build_bimanual_carry_sequence(
     ``output_frame_id``：写入各 :class:`StageTarget` 的 ``frame_id``，供 stamped / dual_stamped
     与位姿数值所用系一致（一般为队列 ``ctx.frame_id``）。
     """
-    cx = object_center.position.x
-    cy = object_center.position.y
-    cz = object_center.position.z
-
-    def _lr_poses(
-        x: float, y_half: float, z: float,
-    ) -> tuple[Pose, Pose]:
-        left = Pose()
-        left.position.x, left.position.y, left.position.z = x, cy + y_half, z
-        left.orientation.x, left.orientation.y = carry_left_orientation[0], carry_left_orientation[1]
-        left.orientation.z, left.orientation.w = carry_left_orientation[2], carry_left_orientation[3]
-        right = Pose()
-        right.position.x, right.position.y, right.position.z = x, cy - y_half, z
-        right.orientation.x, right.orientation.y = carry_right_orientation[0], carry_right_orientation[1]
-        right.orientation.z, right.orientation.w = carry_right_orientation[2], carry_right_orientation[3]
-        return left, right
-
-    grasp_x = cx + carry_xyz[0]
-    grasp_y_half = carry_half_span_y + carry_xyz[1]
-    grasp_z = cz + carry_xyz[2]
-
+    (pl_close, pr_close), (pl_fwd, pr_fwd), (pl_app, pr_app) = _bimanual_carry_lr_xyz_triple_from_object_body(
+        object_position,
+        object_position_offset,
+        object_dual_arm_half_span_y,
+        arm_merge_distance_y,
+        carry_prepare_offset,
+        carry_left_orientation=carry_left_orientation,
+        carry_right_orientation=carry_right_orientation,
+    )
     has_prepare = carry_prepare_offset_is_active(carry_prepare_offset)
-    ox, oy, oz = (
-        (float(carry_prepare_offset[0]), float(carry_prepare_offset[1]), float(carry_prepare_offset[2]))
-        if carry_prepare_offset is not None
-        else (0.0, 0.0, 0.0)
+    closein_l, closein_r = _lr_poses_from_xyz_pair(
+        pl_close, pr_close, carry_left_orientation, carry_right_orientation,
     )
-    # 1-Approach（可选）: 相对抓取点带 prepare 偏移的远点；无偏移时省略（与 Forward 重合）
-    approach_l, approach_r = _lr_poses(
-        grasp_x + ox,
-        grasp_y_half + carry_approach_clearance_y + oy,
-        grasp_z + oz,
+    forward_l, forward_r = _lr_poses_from_xyz_pair(
+        pl_fwd, pr_fwd, carry_left_orientation, carry_right_orientation,
     )
-    # Forward: 物体 X、仍带横向张开余量
-    forward_l, forward_r = _lr_poses(
-        grasp_x,
-        grasp_y_half + carry_approach_clearance_y,
-        grasp_z,
+    approach_l, approach_r = _lr_poses_from_xyz_pair(
+        pl_app, pr_app, carry_left_orientation, carry_right_orientation,
     )
-    # CloseIn: 收拢到抓取位
-    closein_l, closein_r = _lr_poses(grasp_x, grasp_y_half, grasp_z)
     # 4-Grasp: same position, close grippers
     eff_lx, eff_ly, eff_lz = (
-        (float(carry_lift_xyz[0]), float(carry_lift_xyz[1]), float(carry_lift_xyz[2]))
-        if carry_lift_xyz is not None
+        (float(ee_lift_offset[0]), float(ee_lift_offset[1]), float(ee_lift_offset[2]))
+        if ee_lift_offset is not None
         else (0.0, 0.0, 0.0)
     )
     eff_rx, eff_ry, eff_rz = (
-        (float(carry_retreat_xyz[0]), float(carry_retreat_xyz[1]), float(carry_retreat_xyz[2]))
-        if carry_retreat_xyz is not None
+        (float(ee_retreat_offset[0]), float(ee_retreat_offset[1]), float(ee_retreat_offset[2]))
+        if ee_retreat_offset is not None
         else (0.0, 0.0, 0.0)
     )
-    lift_l, lift_r = _lr_poses(
-        grasp_x + eff_lx,
-        grasp_y_half + eff_ly,
-        grasp_z + eff_lz,
+    glx, gly, glz = pl_close[0], pl_close[1], pl_close[2]
+    grx, gry, grz = pr_close[0], pr_close[1], pr_close[2]
+    lin_frame = str(carry_linear_displacement_frame or "tool").strip().lower()
+    if carry_lift_motion_delta is not None:
+        dl = dr = (
+            float(carry_lift_motion_delta[0]),
+            float(carry_lift_motion_delta[1]),
+            float(carry_lift_motion_delta[2]),
+        )
+    elif ee_lift_offset is not None and lin_frame == "motion":
+        dl = dr = (eff_lx, eff_ly, eff_lz)
+    elif ee_lift_offset is not None:
+        dl, dr = _tool_offset_xyz_to_world_lr(
+            (eff_lx, eff_ly, eff_lz), carry_left_orientation, carry_right_orientation,
+        )
+    else:
+        z0 = (0.0, 0.0, 0.0)
+        dl = dr = z0
+    if carry_retreat_motion_delta is not None:
+        tl = tr = (
+            float(carry_retreat_motion_delta[0]),
+            float(carry_retreat_motion_delta[1]),
+            float(carry_retreat_motion_delta[2]),
+        )
+    elif ee_retreat_offset is not None and lin_frame == "motion":
+        tl = tr = (eff_rx, eff_ry, eff_rz)
+    elif ee_retreat_offset is not None:
+        tl, tr = _tool_offset_xyz_to_world_lr(
+            (eff_rx, eff_ry, eff_rz), carry_left_orientation, carry_right_orientation,
+        )
+    else:
+        tl = tr = (0.0, 0.0, 0.0)
+    lift_l = _pose_xyz_orientation(glx + dl[0], gly + dl[1], glz + dl[2], carry_left_orientation)
+    lift_r = _pose_xyz_orientation(grx + dr[0], gry + dr[1], grz + dr[2], carry_right_orientation)
+    retreat_l = _pose_xyz_orientation(
+        glx + dl[0] + tl[0], gly + dl[1] + tl[1], glz + dl[2] + tl[2], carry_left_orientation,
     )
-    retreat_l, retreat_r = _lr_poses(
-        grasp_x + eff_lx + eff_rx,
-        grasp_y_half + eff_ly + eff_ry,
-        grasp_z + eff_lz + eff_rz,
+    retreat_r = _pose_xyz_orientation(
+        grx + dr[0] + tr[0], gry + dr[1] + tr[1], grz + dr[2] + tr[2], carry_right_orientation,
     )
 
     stages: list[StageTarget] = []
@@ -648,7 +772,7 @@ def build_bimanual_carry_sequence(
         ),
     )
     idx = si + 1
-    if carry_lift_xyz is not None:
+    if ee_lift_offset is not None:
         stages.append(
             StageTarget(
                 name=_stage_name(stage_prefix, idx, CARRY_STAGE_SUFFIXES[4]),
@@ -657,7 +781,7 @@ def build_bimanual_carry_sequence(
             ),
         )
         idx += 1
-    if carry_retreat_xyz is not None:
+    if ee_retreat_offset is not None:
         stages.append(
             StageTarget(
                 name=_stage_name(stage_prefix, idx, CARRY_STAGE_SUFFIXES[5]),
@@ -670,15 +794,15 @@ def build_bimanual_carry_sequence(
 
 def build_bimanual_place_sequence(
     *,
-    object_center: Pose,
-    carry_half_span_y: float,
+    object_position: Pose,
+    object_dual_arm_half_span_y: float,
     carry_prepare_offset: tuple[float, float, float] | None = None,
-    carry_approach_clearance_y: float = 0.0,
-    carry_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    arm_merge_distance_y: float = 0.0,
+    object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     carry_left_orientation: tuple[float, float, float, float],
     carry_right_orientation: tuple[float, float, float, float],
-    carry_lift_xyz: tuple[float, float, float] | None = None,
-    carry_retreat_xyz: tuple[float, float, float] | None = None,
+    ee_lift_offset: tuple[float, float, float] | None = None,
+    ee_retreat_offset: tuple[float, float, float] | None = None,
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Place",
@@ -687,62 +811,69 @@ def build_bimanual_place_sequence(
     """双臂对称放置：与 :func:`build_bimanual_carry_sequence` 几何一致，阶段顺序为其逆（持箱后释放）。
 
     起始姿态与 carry 末段一致：若有后撤段则双手在 retreat，否则在 lift（或未抬升则已在合拢位）。
-    ``carry_lift_xyz`` / ``carry_retreat_xyz`` 为 ``None`` 时不生成与 carry 对应逆段（与 YAML 不写即跳过一致）。
+    ``ee_lift_offset`` / ``ee_retreat_offset`` 为 ``None`` 时不生成与 carry 对应逆段（与 YAML 不写即跳过一致）。
 
     ``carry_prepare_offset`` 为 ``None`` 或全 0 时，末段 ``RetreatOpen`` 与 ``SpreadY`` 位姿重合，不生成该末段
     （与 :func:`build_bimanual_carry_sequence` 省略 Approach 一致）。
 
     ``output_frame_id``：各段 ``StageTarget.frame_id``，与 stamped 位姿系一致（一般为 ``ctx.frame_id``）。
+
+    与 :func:`build_bimanual_carry_sequence` 相同：抓取几何见该函数；``carry_prepare_offset`` 与
+    ``ee_lift_offset`` / ``ee_retreat_offset`` 均为末端工具系位移（经各自姿态旋到输出系）。
     """
-    cx = object_center.position.x
-    cy = object_center.position.y
-    cz = object_center.position.z
-
-    def _lr_poses(
-        x: float, y_half: float, z: float,
-    ) -> tuple[Pose, Pose]:
-        left = Pose()
-        left.position.x, left.position.y, left.position.z = x, cy + y_half, z
-        left.orientation.x, left.orientation.y = carry_left_orientation[0], carry_left_orientation[1]
-        left.orientation.z, left.orientation.w = carry_left_orientation[2], carry_left_orientation[3]
-        right = Pose()
-        right.position.x, right.position.y, right.position.z = x, cy - y_half, z
-        right.orientation.x, right.orientation.y = carry_right_orientation[0], carry_right_orientation[1]
-        right.orientation.z, right.orientation.w = carry_right_orientation[2], carry_right_orientation[3]
-        return left, right
-
-    grasp_x = cx + carry_xyz[0]
-    grasp_y_half = carry_half_span_y + carry_xyz[1]
-    grasp_z = cz + carry_xyz[2]
-
+    (pl_close, pr_close), (pl_fwd, pr_fwd), (pl_app, pr_app) = _bimanual_carry_lr_xyz_triple_from_object_body(
+        object_position,
+        object_position_offset,
+        object_dual_arm_half_span_y,
+        arm_merge_distance_y,
+        carry_prepare_offset,
+        carry_left_orientation=carry_left_orientation,
+        carry_right_orientation=carry_right_orientation,
+    )
     has_prepare = carry_prepare_offset_is_active(carry_prepare_offset)
-    ox, oy, oz = (
-        (float(carry_prepare_offset[0]), float(carry_prepare_offset[1]), float(carry_prepare_offset[2]))
-        if carry_prepare_offset is not None
-        else (0.0, 0.0, 0.0)
+    closein_l, closein_r = _lr_poses_from_xyz_pair(
+        pl_close, pr_close, carry_left_orientation, carry_right_orientation,
     )
-    approach_l, approach_r = _lr_poses(
-        grasp_x + ox,
-        grasp_y_half + carry_approach_clearance_y + oy,
-        grasp_z + oz,
+    forward_l, forward_r = _lr_poses_from_xyz_pair(
+        pl_fwd, pr_fwd, carry_left_orientation, carry_right_orientation,
     )
-    forward_l, forward_r = _lr_poses(
-        grasp_x,
-        grasp_y_half + carry_approach_clearance_y,
-        grasp_z,
+    approach_l, approach_r = _lr_poses_from_xyz_pair(
+        pl_app, pr_app, carry_left_orientation, carry_right_orientation,
     )
-    closein_l, closein_r = _lr_poses(grasp_x, grasp_y_half, grasp_z)
-    has_lift = carry_lift_xyz is not None
-    has_retreat = carry_retreat_xyz is not None
+    has_lift = ee_lift_offset is not None
+    has_retreat = ee_retreat_offset is not None
     eff_lx, eff_ly, eff_lz = (
-        (float(carry_lift_xyz[0]), float(carry_lift_xyz[1]), float(carry_lift_xyz[2]))
-        if carry_lift_xyz is not None
+        (float(ee_lift_offset[0]), float(ee_lift_offset[1]), float(ee_lift_offset[2]))
+        if ee_lift_offset is not None
         else (0.0, 0.0, 0.0)
     )
-    lift_l, lift_r = _lr_poses(
-        grasp_x + eff_lx,
-        grasp_y_half + eff_ly,
-        grasp_z + eff_lz,
+    eff_rx, eff_ry, eff_rz = (
+        (float(ee_retreat_offset[0]), float(ee_retreat_offset[1]), float(ee_retreat_offset[2]))
+        if ee_retreat_offset is not None
+        else (0.0, 0.0, 0.0)
+    )
+    glx, gly, glz = pl_close[0], pl_close[1], pl_close[2]
+    grx, gry, grz = pr_close[0], pr_close[1], pr_close[2]
+    if ee_lift_offset is not None:
+        dl, dr = _tool_offset_xyz_to_world_lr(
+            (eff_lx, eff_ly, eff_lz), carry_left_orientation, carry_right_orientation,
+        )
+    else:
+        z0 = (0.0, 0.0, 0.0)
+        dl = dr = z0
+    if ee_retreat_offset is not None:
+        tl, tr = _tool_offset_xyz_to_world_lr(
+            (eff_rx, eff_ry, eff_rz), carry_left_orientation, carry_right_orientation,
+        )
+    else:
+        tl = tr = (0.0, 0.0, 0.0)
+    lift_l = _pose_xyz_orientation(glx + dl[0], gly + dl[1], glz + dl[2], carry_left_orientation)
+    lift_r = _pose_xyz_orientation(grx + dr[0], gry + dr[1], grz + dr[2], carry_right_orientation)
+    retreat_l = _pose_xyz_orientation(
+        glx + dl[0] + tl[0], gly + dl[1] + tl[1], glz + dl[2] + tl[2], carry_left_orientation,
+    )
+    retreat_r = _pose_xyz_orientation(
+        grx + dr[0] + tr[0], gry + dr[1] + tr[1], grz + dr[2] + tr[2], carry_right_orientation,
     )
 
     stages: list[StageTarget] = []
@@ -752,8 +883,8 @@ def build_bimanual_place_sequence(
         stages.append(
             StageTarget(
                 name=_stage_name(stage_prefix, si, BIMANUAL_PLACE_SUFFIXES[0]),
-                left=ArmTarget(pose=lift_l, gripper=gripper_closed),
-                right=ArmTarget(pose=lift_r, gripper=gripper_closed),
+                left=ArmTarget(pose=retreat_l, gripper=gripper_closed),
+                right=ArmTarget(pose=retreat_r, gripper=gripper_closed),
             ),
         )
     if has_lift:

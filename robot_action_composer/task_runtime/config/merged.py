@@ -45,7 +45,7 @@ def _try_handover(flat: Mapping[str, Any]) -> HandoverSyncConfig | None:
 
 def _try_carry(flat: Mapping[str, Any]) -> BimanualCarryTaskConfig | None:
     kw = kwargs_for_dataclass(BimanualCarryTaskConfig, flat)
-    if "carry_half_span_y" not in kw:
+    if "object_dual_arm_half_span_y" not in kw:
         return None
     try:
         return _dataclass_from_combined(BimanualCarryTaskConfig, kw)
@@ -103,13 +103,13 @@ def _try_place(
 
     merged: dict[str, Any] = {
         "place_object_entity_path": str(po).strip(),
-        "place_half_span_y": carry.carry_half_span_y,
+        "place_half_span_y": carry.object_dual_arm_half_span_y,
         "place_prepare_offset": carry.carry_prepare_offset,
-        "place_left_orientation": carry.carry_left_orientation,
-        "place_right_orientation": carry.carry_right_orientation,
-        "place_lift_xyz": carry.carry_lift_xyz,
-        "place_retreat_xyz": carry.carry_retreat_xyz,
-        "place_approach_clearance_y": carry.carry_approach_clearance_y,
+        "place_left_orientation": carry.left_base_orientation,
+        "place_right_orientation": carry.right_base_orientation,
+        "place_lift_xyz": carry.ee_lift_offset,
+        "place_retreat_xyz": carry.ee_retreat_offset,
+        "place_approach_clearance_y": carry.arm_merge_distance_y,
         "place_xyz": off,
     }
     for k, v in flat.items():
