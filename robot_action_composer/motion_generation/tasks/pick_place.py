@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from ros2_robot_interface.utils.quat_pose import rotate_vector_by_quat  # pyright: ignore[reportMissingImports]
+
 from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.config.single_arm import (  # pyright: ignore[reportMissingImports]
     QueueSlicePlace,
@@ -24,6 +26,21 @@ def _apply_target_pose_offset(pose: Any, offset: tuple[float, float, float]) -> 
     return pose
 
 
+def apply_object_local_offset_to_pose(pose: Any, offset: tuple[float, float, float]) -> Any:
+    """Apply ``offset`` in object local frame to ``pose`` position."""
+    q = (
+        float(pose.orientation.x),
+        float(pose.orientation.y),
+        float(pose.orientation.z),
+        float(pose.orientation.w),
+    )
+    dx, dy, dz = rotate_vector_by_quat(offset, q)
+    pose.position.x += dx
+    pose.position.y += dy
+    pose.position.z += dz
+    return pose
+
+
 def resolve_place_skill_from_entity(
     place: QueueSlicePlace,
     *,
@@ -32,18 +49,18 @@ def resolve_place_skill_from_entity(
     current_obs: dict[str, Any] | None = None,
     ee_prefix_for_orientation_fallback: str = "left_ee",
 ) -> QueueSlicePlace:
-    """When ``run_place_before_return`` and ``place_object_entity_path`` are set, fill
+    """When ``run_place_before_return`` and ``place_object_prim_path`` are set, fill
     ``place_position`` from the Isaac entity service (plus ``place_pose_offset``).
 
     If ``place_orientation`` is still ``None``, copy the current EE quaternion from
     ``current_obs`` (same idea as aligning pick target orientation to the arm).
     """
-    if not place.run_place_before_return or not place.place_object_entity_path:
+    if not place.run_place_before_return or not place.place_object_prim_path:
         return place
     place_pose = get_object_pose_from_service(
         base_world_pos,
         base_world_quat,
-        place.place_object_entity_path,
+        place.place_object_prim_path,
         include_orientation=False,
     )
     place_pose = _apply_target_pose_offset(place_pose, place.place_pose_offset)

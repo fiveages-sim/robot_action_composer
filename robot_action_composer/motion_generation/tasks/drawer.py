@@ -41,7 +41,7 @@ class DrawerGeometryConfig:
 def format_drawer_task_cfg_summary(scene: str, drawer: DrawerGeometryConfig, single: QueueSingleArmSlice) -> str:
     p, c = single.pick, single.common
     return (
-        f"[Drawer] scene={scene} object={p.source_object_entity_path} "
+        f"[Drawer] scene={scene} object={p.object_prim_path} "
         f"drawer_prim={drawer.source_object_path_drawer} | "
         f"arm={c.arm}, grasp_dir={p.grasp_direction}, pull_distance={drawer.pull_distance}"
     )
@@ -63,18 +63,18 @@ def build_single_arm_pull_drawer_sequence(
     arm_side: ArmSide,
     gripper_open: float,
     gripper_closed: float,
-    grasp_orientation: tuple[float, float, float, float],
+    ee_base_orientation: tuple[float, float, float, float],
     grasp_direction_vector: tuple[float, float, float],
     pull_distance: float,
 ) -> list[StageTarget]:
     arm_seq: list[ArmStage] = list(
         build_single_arm_pick_sequence(
             target_pose=target_pose,
-            approach_clearance=pick.approach_clearance,
-            grasp_clearance=drawer.grasp_clearance_drawer,
-            grasp_orientation=grasp_orientation,
+            ee_base_orientation=ee_base_orientation,
+            prepare_offset=pick.prepare_offset,
+            pick_clearance=drawer.grasp_clearance_drawer,
             grasp_direction_vector=grasp_direction_vector,
-            grasp_offset=pick.grasp_offset,
+            object_position_offset=pick.object_position_offset,
             retreat_direction_extra=pull_distance,
             retreat_offset=pick.retreat_offset,
             gripper_open=gripper_open,
@@ -93,17 +93,17 @@ def build_single_arm_close_drawer_sequence(
     arm_side: ArmSide,
     gripper_open: float,
     gripper_closed: float,
-    grasp_orientation: tuple[float, float, float, float],
+    ee_base_orientation: tuple[float, float, float, float],
     grasp_direction_vector: tuple[float, float, float],
 ) -> list[StageTarget]:
     arm_seq: list[ArmStage] = list(
         build_single_arm_pick_sequence(
             target_pose=target_pose,
-            approach_clearance=0,
-            grasp_clearance=drawer.grasp_clearance_drawer,
-            grasp_orientation=grasp_orientation,
+            ee_base_orientation=ee_base_orientation,
+            prepare_offset=(0.0, 0.0, 0.0),
+            pick_clearance=drawer.grasp_clearance_drawer,
             grasp_direction_vector=grasp_direction_vector,
-            grasp_offset=pick.grasp_offset,
+            object_position_offset=pick.object_position_offset,
             retreat_direction_extra=0,
             retreat_offset=pick.retreat_offset,
             gripper_open=gripper_open,

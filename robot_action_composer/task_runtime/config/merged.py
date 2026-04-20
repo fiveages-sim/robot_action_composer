@@ -60,8 +60,8 @@ def _xyz3_tuple(v: Any) -> tuple[float, float, float]:
 
 
 def _place_flat_looks_like_simple(flat: Mapping[str, Any]) -> bool:
-    """仅 ``place_object_entity_path`` + ``place_offset``、无 ``place_half_span_y`` 的简化放置。"""
-    po = flat.get("place_object_entity_path")
+    """仅 ``place_object_prim_path`` + ``place_offset``、无 ``place_half_span_y`` 的简化放置。"""
+    po = flat.get("place_object_prim_path")
     if po is None or (isinstance(po, str) and not po.strip()):
         return False
     return "place_offset" in flat and "place_half_span_y" not in flat
@@ -71,9 +71,9 @@ def _try_place(
     flat: Mapping[str, Any],
     carry: BimanualCarryTaskConfig | None,
 ) -> BimanualPlaceTaskConfig | None:
-    """完整 ``place_*`` 或简化 ``place_object_entity_path`` + ``place_offset``（几何从 carry 复用）。"""
+    """完整 ``place_*`` 或简化 ``place_object_prim_path`` + ``place_offset``（几何从 carry 复用）。"""
     names = {f.name for f in fields(BimanualPlaceTaskConfig)}
-    po = flat.get("place_object_entity_path")
+    po = flat.get("place_object_prim_path")
     if po is None or (isinstance(po, str) and not str(po).strip()):
         return None
 
@@ -102,7 +102,7 @@ def _try_place(
         ) from e
 
     merged: dict[str, Any] = {
-        "place_object_entity_path": str(po).strip(),
+        "place_object_prim_path": str(po).strip(),
         "place_half_span_y": carry.object_dual_arm_half_span_y,
         "place_prepare_offset": carry.carry_prepare_offset,
         "place_left_orientation": carry.left_base_orientation,
@@ -113,7 +113,7 @@ def _try_place(
         "place_xyz": off,
     }
     for k, v in flat.items():
-        if k in ("place_object_entity_path", "place_offset"):
+        if k in ("place_object_prim_path", "place_offset"):
             continue
         if k in names:
             merged[k] = v
@@ -133,7 +133,7 @@ def _resolve_place_config(
     cfg = _try_place(place_flat, carry=carry)
     if cfg is None and _place_flat_looks_like_simple(place_flat) and carry is None:
         raise ValueError(
-            "dual_arm.place 简化形式（place_object_entity_path + place_offset）需要同一任务中配置 "
+            "dual_arm.place 简化形式（place_object_prim_path + place_offset）需要同一任务中配置 "
             "dual_arm.carry，以便复用双臂姿态、半宽、预接近与抬升/后撤等几何。"
         )
     return cfg

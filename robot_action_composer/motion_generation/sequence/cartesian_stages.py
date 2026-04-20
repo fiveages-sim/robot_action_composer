@@ -217,6 +217,8 @@ class StageTarget:
     frame_id: str | None = None
     #: 为 True 时，在发臂目标与夹爪指令后额外 ``sleep(gripper_action_wait)``（替代按名字子串猜测）。
     wait_gripper_settle: bool = False
+    #: 为 True 时跳过本段夹爪命令下发（仅发送左右臂 pose）。
+    skip_gripper_command: bool = False
 
     def to_action_dict(
         self,
@@ -339,12 +341,12 @@ def _poses_same_position(a: Pose, b: Pose, *, eps_sq: float = _PLACE_POSE_POS_EP
 def build_single_arm_pick_sequence(
     *,
     target_pose: Pose,
-    approach_clearance: float,
-    grasp_clearance: float,
-    grasp_orientation: tuple[float, float, float, float],
+    ee_base_orientation: tuple[float, float, float, float],
+    prepare_offset: tuple[float, float, float] | None = None,
+    pick_clearance: float = 0.01,
     grasp_direction: str = "top",
     grasp_direction_vector: DirectionVec | None = None,
-    grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     retreat_direction_extra: float = 0.0,
     retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     retreat_xyz: tuple[float, float, float] | None = None,
@@ -356,17 +358,31 @@ def build_single_arm_pick_sequence(
         grasp_direction=grasp_direction,
         grasp_direction_vector=grasp_direction_vector,
     )
-    approach_pose = _make_pose_from_target(
-        target_pose, offset=approach_clearance,
-        direction_vec=direction_vec, orientation=grasp_orientation,
+    # pick_clearance 采用工具系语义：沿 ee_base_orientation 的局部 +Z 偏移到 close-in。
+    cdx, cdy, cdz = rotate_vector_by_quat((0.0, 0.0, pick_clearance), ee_base_orientation)
+    close_in_pose = Pose()
+    close_in_pose.position.x = target_pose.position.x + cdx
+    close_in_pose.position.y = target_pose.position.y + cdy
+    close_in_pose.position.z = target_pose.position.z + cdz
+    close_in_pose.orientation.x, close_in_pose.orientation.y, close_in_pose.orientation.z, close_in_pose.orientation.w = (
+        ee_base_orientation
     )
-    close_in_pose = _make_pose_from_target(
-        target_pose, offset=grasp_clearance,
-        direction_vec=direction_vec, orientation=grasp_orientation,
+    close_in_pose.position.x += object_position_offset[0]
+    close_in_pose.position.y += object_position_offset[1]
+    close_in_pose.position.z += object_position_offset[2]
+    has_prepare = (
+        prepare_offset is not None
+        and any(abs(float(x)) > 1e-12 for x in prepare_offset)
     )
-    close_in_pose.position.x += grasp_offset[0]
-    close_in_pose.position.y += grasp_offset[1]
-    close_in_pose.position.z += grasp_offset[2]
+    if has_prepare and prepare_offset is not None:
+        pdx, pdy, pdz = rotate_vector_by_quat(prepare_offset, ee_base_orientation)
+        approach_pose = Pose()
+        approach_pose.position.x = close_in_pose.position.x + pdx
+        approach_pose.position.y = close_in_pose.position.y + pdy
+        approach_pose.position.z = close_in_pose.position.z + pdz
+        approach_pose.orientation = close_in_pose.orientation
+    else:
+        approach_pose = close_in_pose
     lift_pose = Pose()
     lift_pose.position.x = close_in_pose.position.x + retreat_offset[0]
     lift_pose.position.y = close_in_pose.position.y + retreat_offset[1]
@@ -380,33 +396,48 @@ def build_single_arm_pick_sequence(
         retreat_pose.orientation = lift_pose.orientation
     else:
         retreat_pose = _make_pose_from_target(
-            target_pose, offset=approach_clearance + retreat_direction_extra,
-            direction_vec=direction_vec, orientation=grasp_orientation,
+            close_in_pose, offset=retreat_direction_extra,
+            direction_vec=direction_vec, orientation=ee_base_orientation,
         )
-
-    return [
+    stages: list[ArmStage] = []
+    i = 1
+    if has_prepare:
+        stages.append(
+            ArmStage(
+                _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[0]),
+                ArmTarget(pose=approach_pose, gripper=gripper_open),
+            )
+        )
+        i += 1
+    stages.append(
         ArmStage(
-            _stage_name(stage_prefix, 1, PICK_STAGE_SUFFIXES[0]),
-            ArmTarget(pose=approach_pose, gripper=gripper_open),
-        ),
-        ArmStage(
-            _stage_name(stage_prefix, 2, PICK_STAGE_SUFFIXES[1]),
+            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[1]),
             ArmTarget(pose=close_in_pose, gripper=gripper_open),
-        ),
+        )
+    )
+    i += 1
+    stages.append(
         ArmStage(
-            _stage_name(stage_prefix, 3, PICK_STAGE_SUFFIXES[2]),
+            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[2]),
             ArmTarget(pose=close_in_pose, gripper=gripper_closed),
             wait_gripper_settle=True,
-        ),
+        )
+    )
+    i += 1
+    stages.append(
         ArmStage(
-            _stage_name(stage_prefix, 4, PICK_STAGE_SUFFIXES[3]),
+            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[3]),
             ArmTarget(pose=lift_pose, gripper=gripper_closed),
-        ),
+        )
+    )
+    i += 1
+    stages.append(
         ArmStage(
-            _stage_name(stage_prefix, 5, PICK_STAGE_SUFFIXES[4]),
+            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[4]),
             ArmTarget(pose=retreat_pose, gripper=gripper_closed),
-        ),
-    ]
+        )
+    )
+    return stages
 
 
 def build_single_arm_place_sequence(
@@ -1046,6 +1077,8 @@ def _send_gripper_commands(
     stage: StageTarget,
     gripper_mode: GripperMode,
 ) -> None:
+    if stage.skip_gripper_command:
+        return
     if stage.left and interface.left_gripper_handler:
         if gripper_mode == GripperMode.TARGET_COMMAND:
             interface.left_gripper_handler.send_target_command(int(stage.left.gripper))

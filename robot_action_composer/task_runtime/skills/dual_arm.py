@@ -26,23 +26,16 @@ from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyri
 from robot_action_composer.motion_generation.tasks.bimanual_carry import (  # pyright: ignore[reportMissingImports]
     BimanualCarryTaskConfig,
     build_bimanual_carry_record_sequence,
-    carry_approach_stage_count,
-    slice_carry_stages_for_queue,
-)
-from robot_action_composer.motion_generation.tasks.bimanual_place import (  # pyright: ignore[reportMissingImports]
-    BimanualPlaceTaskConfig,
-    build_bimanual_place_record_sequence,
-    place_trailing_after_advance_stage_count,
-    slice_place_stages_for_queue,
 )
 from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import (  # pyright: ignore[reportMissingImports]
     BimanualParallelPickTaskConfig,
     build_bimanual_parallel_pick_record_sequence,
     parallel_pick_cfg_from_params,
-    slice_parallel_pick_stages_for_queue,
 )
 from robot_action_composer.motion_generation.tasks.handover import build_handover_sync_sequence  # pyright: ignore[reportMissingImports]
-from robot_action_composer.motion_generation.tasks.pick_place import _apply_target_pose_offset  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
+    apply_object_local_offset_to_pose,
+)
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
 from robot_action_composer.task_runtime.registry import register_skill
@@ -205,15 +198,6 @@ def _set_pose_quat_xyzw(p: Pose, q: tuple[float, float, float, float]) -> None:
     p.orientation.w = w
 
 
-def _require_place(ctx: QueueRuntimeContext) -> BimanualPlaceTaskConfig:
-    p = ctx.place_task_cfg
-    if p is None:
-        raise TypeError(
-            "dual_arm.place* skills require place_task_cfg (MergedQueueConfig.place / skill_defaults.dual_arm.place)"
-        )
-    return p
-
-
 def _carry_base_frame_id(ctx: QueueRuntimeContext) -> str:
     """物体解算 ``get_object_pose_from_service`` 所用系，与 ``ctx.frame_id`` 一致。"""
     s = str(ctx.frame_id).strip()
@@ -279,18 +263,6 @@ def _carry_full_stages(
     )
 
 
-def _place_full_stages(
-    ctx: QueueRuntimeContext, cfg: BimanualPlaceTaskConfig, object_position: Any,
-) -> list[StageTarget]:
-    return build_bimanual_place_record_sequence(
-        place_task_cfg=cfg,
-        object_position=object_position,
-        gripper_open=ctx.gripper_open,
-        gripper_closed=ctx.gripper_closed,
-        output_frame_id=ctx.frame_id,
-    )
-
-
 def _require_handover_sync(ctx: QueueRuntimeContext):
     h = ctx.handover_sync
     if h is None:
@@ -311,17 +283,17 @@ def _resolve_parallel_pick_target_poses(
     left_pose = get_object_pose_from_service(
         ctx.base_world_pos,
         ctx.base_world_quat,
-        cfg.left_pick.source_object_entity_path,
-        include_orientation=False,
+        cfg.left_pick.object_prim_path,
+        include_orientation=True,
     )
     right_pose = get_object_pose_from_service(
         ctx.base_world_pos,
         ctx.base_world_quat,
-        cfg.right_pick.source_object_entity_path,
-        include_orientation=False,
+        cfg.right_pick.object_prim_path,
+        include_orientation=True,
     )
-    left_pose = _apply_target_pose_offset(left_pose, cfg.left_pick.target_pose_offset)
-    right_pose = _apply_target_pose_offset(right_pose, cfg.right_pick.target_pose_offset)
+    left_pose = apply_object_local_offset_to_pose(left_pose, cfg.left_pick.target_pose_offset)
+    right_pose = apply_object_local_offset_to_pose(right_pose, cfg.right_pick.target_pose_offset)
     return {"left": left_pose, "right": right_pose}
 
 
@@ -343,165 +315,7 @@ def _parallel_pick_full_stages(
     )
 
 
-def skill_carry_approach(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂搬运：Approach → Forward → CloseIn（夹爪张开）。写入 ``ctx.carry_object_position`` 供后续段复用。
-
-    ``MergedQueueConfig.carry`` 可设 ``motion_frame_id``（如 ``arm_base``），与 ``dual_arm.place_relative`` 一致：物体位姿从 ``ctx.frame_id`` TF 到该系再建序列；``ExecutionMeta.frame_id`` 为该系。
-    """
-    cfg = _require_carry(ctx)
-    _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label="dual_arm.carry_approach")
-    oc_base = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        cfg.source_object_entity_path,
-        include_orientation=False,
-    )
-    oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
-    ctx.carry_object_position = oc
-    exec_f = _carry_execution_frame_id(cfg, ctx)
-    full = _carry_full_stages(ctx, cfg, oc, output_frame_id=exec_f)
-    approach, _g, _lr = slice_carry_stages_for_queue(
-        full, approach_stage_count=carry_approach_stage_count(cfg),
-    )
-    return approach, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=exec_f,
-        warn_prefix="TaskQ dual_arm carry approach timeout",
-    )
-
-
-def skill_carry_grasp(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂搬运：Grasp（闭合）。须先于本块执行 ``dual_arm.carry_approach`` 以填充 ``ctx.carry_object_position``。"""
-    cfg = _require_carry(ctx)
-    _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label="dual_arm.carry_grasp")
-    exec_f = _carry_execution_frame_id(cfg, ctx)
-    oc = ctx.carry_object_position
-    if oc is None:
-        oc_base = get_object_pose_from_service(
-            ctx.base_world_pos,
-            ctx.base_world_quat,
-            cfg.source_object_entity_path,
-            include_orientation=False,
-        )
-        oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
-        ctx.carry_object_position = oc
-    full = _carry_full_stages(ctx, cfg, oc, output_frame_id=exec_f)
-    _a, grasp, _lr = slice_carry_stages_for_queue(
-        full, approach_stage_count=carry_approach_stage_count(cfg),
-    )
-    return grasp, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=exec_f,
-        warn_prefix="TaskQ dual_arm carry grasp timeout",
-    )
-
-
-def skill_carry_lift_retreat(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂搬运：Lift → Retreat。"""
-    cfg = _require_carry(ctx)
-    _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label="dual_arm.carry_lift_retreat")
-    exec_f = _carry_execution_frame_id(cfg, ctx)
-    oc = ctx.carry_object_position
-    if oc is None:
-        oc_base = get_object_pose_from_service(
-            ctx.base_world_pos,
-            ctx.base_world_quat,
-            cfg.source_object_entity_path,
-            include_orientation=False,
-        )
-        oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
-        ctx.carry_object_position = oc
-    full = _carry_full_stages(ctx, cfg, oc, output_frame_id=exec_f)
-    _a, _g, lift_retreat = slice_carry_stages_for_queue(
-        full, approach_stage_count=carry_approach_stage_count(cfg),
-    )
-    return lift_retreat, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=exec_f,
-        warn_prefix="TaskQ dual_arm carry lift/retreat timeout",
-    )
-
-
-def skill_place_advance(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any],
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂放置：先「送入」两段（retreat→lift、lift→close-in），夹爪闭合持箱。写入 ``ctx.place_object_position``。"""
-    cfg = _require_place(ctx)
-    object_position = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        cfg.place_object_entity_path,
-        include_orientation=False,
-    )
-    ctx.place_object_position = object_position
-    full = _place_full_stages(ctx, cfg, object_position)
-    advance, _rel, _sr = slice_place_stages_for_queue(
-        full, trailing_after_advance=place_trailing_after_advance_stage_count(cfg),
-    )
-    return advance, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm place advance timeout",
-    )
-
-
-def skill_place_release(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any],
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂放置：在合拢位松爪（须先于本块执行 ``dual_arm.place_advance`` 以填充 ``ctx.place_object_position``）。"""
-    cfg = _require_place(ctx)
-    oc = ctx.place_object_position
-    if oc is None:
-        oc = get_object_pose_from_service(
-            ctx.base_world_pos,
-            ctx.base_world_quat,
-            cfg.place_object_entity_path,
-            include_orientation=False,
-        )
-        ctx.place_object_position = oc
-    full = _place_full_stages(ctx, cfg, oc)
-    _adv, release, _sr = slice_place_stages_for_queue(
-        full, trailing_after_advance=place_trailing_after_advance_stage_count(cfg),
-    )
-    return release, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm place release timeout",
-    )
-
-
-def skill_place_spread_retreat(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any],
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂放置：Y 向张开后再后撤至预接近位（夹爪张开）。"""
-    cfg = _require_place(ctx)
-    oc = ctx.place_object_position
-    if oc is None:
-        oc = get_object_pose_from_service(
-            ctx.base_world_pos,
-            ctx.base_world_quat,
-            cfg.place_object_entity_path,
-            include_orientation=False,
-        )
-        ctx.place_object_position = oc
-    full = _place_full_stages(ctx, cfg, oc)
-    _adv, _rel, spread_retreat = slice_place_stages_for_queue(
-        full, trailing_after_advance=place_trailing_after_advance_stage_count(cfg),
-    )
-    return spread_retreat, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm place spread/retreat timeout",
-    )
-
-
-def skill_place_relative(
+def skill_place(
     ctx: QueueRuntimeContext, params: Mapping[str, Any],
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     """双臂相对放置：读当前左右末端位姿 → 同向平移(持箱) → 松爪 → 沿双手连线外张 → 后撤。
@@ -513,8 +327,8 @@ def skill_place_relative(
         translation_xyz: 平移 [x,y,z]（米），在 **motion 坐标系** 下同加；默认 [0,0,0]。
         spread_half: 单侧沿「右→左」在 motion 系 XY 平面的外张距离（米）；默认取 carry 的 ``arm_merge_distance_y`` 或 0.04。
         retreat_xyz: 外张后左右再同加的位移 [x,y,z]（motion 系）；默认取 carry 的 ``ee_retreat_offset`` 或 [-0.2,0,0]。
-        reference_object_entity_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为放置参考点。
-        object_position_offset: 可选。与 ``reference_object_entity_path`` 联用，按参考物体自身坐标系
+        reference_object_prim_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为放置参考点。
+        object_position_offset: 可选。与 ``reference_object_prim_path`` 联用，按参考物体自身坐标系
             的偏移（米）补偿，再转换到 motion 系叠加到参考点（即偏移方向随参考物体姿态变化）。
             最终会自动换算为本次的 ``translation_xyz``（即参考点目标 - 当前双手中点）。
         motion_frame_id / relative_frame_id: 可选。当前末端数值的**源系**优先取左右臂订阅到的 ``frame_id``，
@@ -528,20 +342,20 @@ def skill_place_relative(
     _apply_arm_movel_duration(
         ctx,
         duration=params.get("arm_movel_duration", getattr(carry, "arm_movel_duration", None) if carry else None),
-        label="dual_arm.place_relative",
+        label="dual_arm.place",
     )
     iface = ctx.interface
     lh, rh = iface.left_arm_handler, iface.right_arm_handler
     if lh is None or rh is None:
-        raise TypeError("dual_arm.place_relative requires left and right arm handlers")
+        raise TypeError("dual_arm.place requires left and right arm handlers")
     l0_raw = lh.get_pose()
     r0_raw = rh.get_pose()
     if l0_raw is None or r0_raw is None:
-        raise RuntimeError("dual_arm.place_relative: could not read current left/right EE poses")
+        raise RuntimeError("dual_arm.place: could not read current left/right EE poses")
 
-    pose_frame = _ee_pose_source_frame(lh, rh, ctx.frame_id, label="dual_arm.place_relative")
+    pose_frame = _ee_pose_source_frame(lh, rh, ctx.frame_id, label="dual_arm.place")
     l0, r0, motion_frame = _motion_frame_poses_from_params(
-        iface, l0_raw, r0_raw, pose_frame, params, label="dual_arm.place_relative",
+        iface, l0_raw, r0_raw, pose_frame, params, label="dual_arm.place",
     )
 
     default_spread = 0.04
@@ -554,7 +368,7 @@ def skill_place_relative(
             default_retreat = (-0.2, 0.0, 0.0)
 
     tr = _param_vec3(params, "translation_xyz", (0.0, 0.0, 0.0))
-    ref_path_raw = params.get("reference_object_entity_path")
+    ref_path_raw = params.get("reference_object_prim_path")
     if isinstance(ref_path_raw, str) and ref_path_raw.strip():
         ref_path = ref_path_raw.strip()
         ref_off_obj = _param_vec3(params, "object_position_offset", (0.0, 0.0, 0.0))
@@ -569,7 +383,7 @@ def skill_place_relative(
         if motion_frame != ctx.frame_id:
             if not hasattr(iface, "transform_pose"):
                 raise TypeError(
-                    "dual_arm.place_relative: reference_object_entity_path with motion_frame_id "
+                    "dual_arm.place: reference_object_prim_path with motion_frame_id "
                     "requires ROS2RobotInterface.transform_pose",
                 )
             try:
@@ -579,8 +393,8 @@ def skill_place_relative(
             ref_motion = iface.transform_pose(ref_pose, ctx.frame_id, motion_frame, timeout=tft)
             if ref_motion is None:
                 raise RuntimeError(
-                    f"dual_arm.place_relative: TF {ctx.frame_id!r} -> {motion_frame!r} failed "
-                    f"for reference_object_entity_path={ref_path!r}",
+                    f"dual_arm.place: TF {ctx.frame_id!r} -> {motion_frame!r} failed "
+                    f"for reference_object_prim_path={ref_path!r}",
                 )
 
         mid_x = (l0.position.x + r0.position.x) * 0.5
@@ -616,7 +430,7 @@ def skill_place_relative(
     return stages, ExecutionMeta(
         send_mode=_dual_mode(ctx),
         frame_id=motion_frame,
-        warn_prefix="TaskQ dual_arm place_relative timeout",
+        warn_prefix="TaskQ dual_arm place timeout",
     )
 
 
@@ -635,7 +449,7 @@ def skill_bimanual_align(
         align_position: 可选 ``[x, y, z]``（米），双臂中心目标位置；与 ``target_mid_*`` 二选一优先用本项。
         target_mid_y: 默认 ``0.0``；未写 ``align_position`` 时生效。
         target_mid_x / target_mid_z: 可选；未写 ``align_position`` 时未写则不调整该轴。
-        orientation_delta_rpy, min_abs_orientation_rpy, motion_frame_id, gripper,
+        orientation_delta_rpy, min_abs_orientation_rpy, motion_frame_id,
         min_abs_delta_y / min_abs_delta_x / min_abs_delta_z, stage_name, arm_movel_duration: 同前。
     """
     label = "dual_arm.bimanual_align"
@@ -750,11 +564,7 @@ def skill_bimanual_align(
         _set_pose_quat_xyzw(l1, ql)
         _set_pose_quat_xyzw(r1, qr)
 
-    g_raw = params.get("gripper")
-    if g_raw is None:
-        g_cmd = float(ctx.gripper_closed)
-    else:
-        g_cmd = float(g_raw)
+    g_cmd = float(ctx.gripper_closed)
 
     stage_name = str(params.get("stage_name", "BimanualAlign-1-Move")).strip() or "BimanualAlign-1-Move"
     fid = str(motion_frame).strip() or None
@@ -764,6 +574,7 @@ def skill_bimanual_align(
             left=ArmTarget(pose=l1, gripper=g_cmd),
             right=ArmTarget(pose=r1, gripper=g_cmd),
             frame_id=fid,
+            skip_gripper_command=True,
         ),
     ]
     return stages, ExecutionMeta(
@@ -773,39 +584,14 @@ def skill_bimanual_align(
     )
 
 
-def skill_bimanual_align_mid_y(
-    ctx: QueueRuntimeContext, params: Mapping[str, Any],
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    """向后兼容别名，等价于 :func:`skill_bimanual_align`（技能名 ``dual_arm.bimanual_align_mid_y``）。"""
-    return skill_bimanual_align(ctx, params)
-
-
-def skill_place(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂放置：一次执行全部 5 段（与 ``place_advance`` / ``release`` / ``spread_retreat`` 等价）。"""
-    cfg = _require_place(ctx)
-    object_position = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        cfg.place_object_entity_path,
-        include_orientation=False,
-    )
-    ctx.place_object_position = object_position
-    stages = _place_full_stages(ctx, cfg, object_position)
-    return stages, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm place timeout",
-    )
-
-
 def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂搬运：一次执行全部 6 段（兼容旧队列；新任务推荐 ``carry_approach`` / ``grasp`` / ``lift_retreat``）。"""
+    """双臂搬运：一次执行完整搬运序列。"""
     cfg = _require_carry(ctx)
     _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label="dual_arm.carry")
     oc_base = get_object_pose_from_service(
         ctx.base_world_pos,
         ctx.base_world_quat,
-        cfg.source_object_entity_path,
+        cfg.object_prim_path,
         include_orientation=False,
     )
     oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
@@ -816,55 +602,6 @@ def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[l
         send_mode=_dual_mode(ctx),
         frame_id=exec_f,
         warn_prefix="TaskQ dual_arm carry timeout",
-    )
-
-
-def skill_parallel_pick_approach(
-    ctx: QueueRuntimeContext, params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    cfg = _require_parallel_pick_cfg(params)
-    target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
-    ctx.parallel_pick_target_poses = dict(target_poses)
-    full = _parallel_pick_full_stages(ctx, cfg, target_poses)
-    approach, _g, _r = slice_parallel_pick_stages_for_queue(full)
-    return approach, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm parallel pick approach timeout",
-    )
-
-
-def skill_parallel_pick_grasp(
-    ctx: QueueRuntimeContext, params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    cfg = _require_parallel_pick_cfg(params)
-    target_poses = ctx.parallel_pick_target_poses
-    if target_poses is None:
-        target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
-        ctx.parallel_pick_target_poses = dict(target_poses)
-    full = _parallel_pick_full_stages(ctx, cfg, target_poses)
-    _a, grasp, _r = slice_parallel_pick_stages_for_queue(full)
-    return grasp, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm parallel pick grasp timeout",
-    )
-
-
-def skill_parallel_pick_retreat(
-    ctx: QueueRuntimeContext, params: Mapping[str, Any]
-) -> tuple[list[StageTarget], ExecutionMeta]:
-    cfg = _require_parallel_pick_cfg(params)
-    target_poses = ctx.parallel_pick_target_poses
-    if target_poses is None:
-        target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
-        ctx.parallel_pick_target_poses = dict(target_poses)
-    full = _parallel_pick_full_stages(ctx, cfg, target_poses)
-    _a, _g, retreat = slice_parallel_pick_stages_for_queue(full)
-    return retreat, ExecutionMeta(
-        send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
-        warn_prefix="TaskQ dual_arm parallel pick retreat timeout",
     )
 
 
@@ -952,20 +689,9 @@ def skill_handover_sync(
 
 
 def register_dual_arm_skills() -> None:
-    register_skill("dual_arm.carry_approach", skill_carry_approach)
-    register_skill("dual_arm.carry_grasp", skill_carry_grasp)
-    register_skill("dual_arm.carry_lift_retreat", skill_carry_lift_retreat)
     register_skill("dual_arm.carry", skill_carry)
-    register_skill("dual_arm.parallel_pick_approach", skill_parallel_pick_approach)
-    register_skill("dual_arm.parallel_pick_grasp", skill_parallel_pick_grasp)
-    register_skill("dual_arm.parallel_pick_retreat", skill_parallel_pick_retreat)
     register_skill("dual_arm.parallel_pick", skill_parallel_pick)
-    register_skill("dual_arm.place_advance", skill_place_advance)
-    register_skill("dual_arm.place_release", skill_place_release)
-    register_skill("dual_arm.place_spread_retreat", skill_place_spread_retreat)
-    register_skill("dual_arm.place_relative", skill_place_relative)
     register_skill("dual_arm.bimanual_align", skill_bimanual_align)
-    register_skill("dual_arm.bimanual_align_mid_y", skill_bimanual_align_mid_y)
     register_skill("dual_arm.place", skill_place)
     register_skill("dual_arm.handover_sync", skill_handover_sync)
     register_skill("dual_arm.goto_cache_pose", skill_goto_cache_pose)

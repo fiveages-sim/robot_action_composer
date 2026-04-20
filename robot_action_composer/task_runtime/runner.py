@@ -234,7 +234,7 @@ def reset_queue_task_environment(
         drawer_all = dcfg.source_object_path_drawer_all
         if not apple_path or not drawer_prim or not drawer_all:
             raise ValueError(
-                "drawer task queue requires source_object_entity_path (task_cfg or single_arm.pick params), "
+                "drawer task queue requires object_prim_path (task_cfg or single_arm.pick params), "
                 "source_object_path_drawer, source_object_path_drawer_all"
             )
         reset_simulation_state(
@@ -252,20 +252,20 @@ def reset_queue_task_environment(
         return
     if runtime.carry is not None:
         reset_simulation_state(
-            runtime.carry.source_object_entity_path,
+            runtime.carry.object_prim_path,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
         return
     if runtime.handover is not None:
         pk = runtime.single_arm.pick
-        if not pk.source_object_entity_path:
+        if not pk.object_prim_path:
             raise ValueError(
-                "handover task env reset requires source_object_entity_path on single_arm.pick "
+                "handover task env reset requires object_prim_path on single_arm.pick "
                 "(skill_defaults.single_arm.pick or skill_params for pick block)"
             )
         reset_simulation_state(
-            pk.source_object_entity_path,
+            pk.object_prim_path,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
@@ -273,28 +273,28 @@ def reset_queue_task_environment(
     parallel_pick_cfg = _extract_parallel_pick_cfg_from_specs(specs)
     if parallel_pick_cfg is not None:
         reset_simulation_state(
-            parallel_pick_cfg.left_pick.source_object_entity_path,
+            parallel_pick_cfg.left_pick.object_prim_path,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
         randomize_object_xyz_after_reset(
-            parallel_pick_cfg.left_pick.source_object_entity_path,
+            parallel_pick_cfg.left_pick.object_prim_path,
             xyz_offset=parallel_pick_cfg.left_pick.object_xyz_random_offset,
         )
         reset_simulation_state(
-            parallel_pick_cfg.right_pick.source_object_entity_path,
+            parallel_pick_cfg.right_pick.object_prim_path,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
         randomize_object_xyz_after_reset(
-            parallel_pick_cfg.right_pick.source_object_entity_path,
+            parallel_pick_cfg.right_pick.object_prim_path,
             xyz_offset=parallel_pick_cfg.right_pick.object_xyz_random_offset,
         )
         return
     reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
     if not reset_source_path:
         raise ValueError(
-            "source_object_entity_path is required for env reset "
+            "object_prim_path is required for env reset "
             "(set on task_cfg or under skill_defaults / skill_params for single_arm.pick)"
         )
     reset_simulation_state(

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """双臂放置任务配置与笛卡尔序列（与 :mod:`~.bimanual_carry` 几何对称、参数独立）。
 
-YAML 可写**完整** ``place_*``，或使用**简化**形式：仅 ``place_object_entity_path`` + ``place_offset``
+YAML 可写**完整** ``place_*``，或使用**简化**形式：仅 ``place_object_prim_path`` + ``place_offset``
 （相对放置参考中心的位移）；其余与 ``dual_arm.carry`` 一致，由合并逻辑从 carry 拷贝（需同任务定义 carry）。
 """
 
@@ -32,7 +32,7 @@ class BimanualPlaceTaskConfig:
     便于与搬运参数独立调参。
     """
 
-    place_object_entity_path: str
+    place_object_prim_path: str
     place_half_span_y: float
     place_left_orientation: tuple[float, float, float, float]
     place_right_orientation: tuple[float, float, float, float]
@@ -45,7 +45,7 @@ class BimanualPlaceTaskConfig:
 
 def format_bimanual_place_task_cfg_summary(scene: str, task_cfg: BimanualPlaceTaskConfig) -> str:
     return (
-        f"[Scene] {scene} place -> {task_cfg.place_object_entity_path}, "
+        f"[Scene] {scene} place -> {task_cfg.place_object_prim_path}, "
         f"place_half_span_y={task_cfg.place_half_span_y}, "
         f"place_prepare_offset={task_cfg.place_prepare_offset}, "
         f"place_lift_xyz={task_cfg.place_lift_xyz!r}, place_retreat_xyz={task_cfg.place_retreat_xyz!r}"

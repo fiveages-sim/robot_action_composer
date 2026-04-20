@@ -28,7 +28,7 @@ PARALLEL_PICK_TOTAL_STAGES = (
 
 @dataclass(frozen=True)
 class ParallelPickArmConfig:
-    source_object_entity_path: str = ""
+    object_prim_path: str = ""
     object_xyz_random_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     target_pose_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     approach_clearance: float = 0.2
@@ -37,7 +37,7 @@ class ParallelPickArmConfig:
     retreat_direction_extra: float = 0.0
     retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     retreat_xyz: tuple[float, float, float] | None = None
-    grasp_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
+    ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
     grasp_direction: str = "top"
     grasp_direction_vector: tuple[float, float, float] | None = None
 
@@ -57,8 +57,8 @@ def parallel_pick_cfg_from_params(params: Mapping[str, Any]) -> BimanualParallel
         )
     left = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, dict(left_raw)))
     right = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, dict(right_raw)))
-    if not left.source_object_entity_path or not right.source_object_entity_path:
-        raise ValueError("left_pick.source_object_entity_path and right_pick.source_object_entity_path are required")
+    if not left.object_prim_path or not right.object_prim_path:
+        raise ValueError("left_pick.object_prim_path and right_pick.object_prim_path are required")
     return BimanualParallelPickTaskConfig(left_pick=left, right_pick=right)
 
 
@@ -84,12 +84,12 @@ def build_bimanual_parallel_pick_record_sequence(
     right = task_cfg.right_pick
     left_seq = build_single_arm_pick_sequence(
         target_pose=left_target_pose,
-        approach_clearance=left.approach_clearance,
-        grasp_clearance=left.grasp_clearance,
-        grasp_orientation=left.grasp_orientation,
+        ee_base_orientation=left.ee_base_orientation,
+        prepare_offset=(0.0, 0.0, left.approach_clearance),
+        pick_clearance=left.grasp_clearance,
         grasp_direction=left.grasp_direction,
         grasp_direction_vector=left.grasp_direction_vector,
-        grasp_offset=left.grasp_offset,
+        object_position_offset=left.grasp_offset,
         retreat_direction_extra=left.retreat_direction_extra,
         retreat_offset=left.retreat_offset,
         retreat_xyz=left.retreat_xyz,
@@ -99,12 +99,12 @@ def build_bimanual_parallel_pick_record_sequence(
     )
     right_seq = build_single_arm_pick_sequence(
         target_pose=right_target_pose,
-        approach_clearance=right.approach_clearance,
-        grasp_clearance=right.grasp_clearance,
-        grasp_orientation=right.grasp_orientation,
+        ee_base_orientation=right.ee_base_orientation,
+        prepare_offset=(0.0, 0.0, right.approach_clearance),
+        pick_clearance=right.grasp_clearance,
         grasp_direction=right.grasp_direction,
         grasp_direction_vector=right.grasp_direction_vector,
-        grasp_offset=right.grasp_offset,
+        object_position_offset=right.grasp_offset,
         retreat_direction_extra=right.retreat_direction_extra,
         retreat_offset=right.retreat_offset,
         retreat_xyz=right.retreat_xyz,

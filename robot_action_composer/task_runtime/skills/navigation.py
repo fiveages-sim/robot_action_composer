@@ -14,7 +14,6 @@
           yaw: 0.0
           frame_id: map
           timeout: 60.0
-      - skill: single_arm.pregrasp
       - skill: single_arm.pick
 
 并行模式（未来 runner 支持 parallel 语法后）::
@@ -23,7 +22,6 @@
       - parallel:
           - skill: robot.send_nav_goal
             params: {x: 2.0, y: 1.5, yaw: 0.0}
-          - skill: single_arm.pregrasp   # 导航期间准备手臂姿态
       - skill: robot.wait_nav_arrived
         params: {timeout: 60.0}
       - skill: single_arm.pick
@@ -178,14 +176,14 @@ def skill_navigate_to_object(
 ) -> tuple[list[Any], ExecutionMeta]:
     """根据 Isaac Sim 中物体的世界坐标自动计算导航目标，并阻塞等待到达。
 
-    从 ``object_entity_path`` 获取物体世界 (x, y)，叠加 ``approach_offset_x/y``
+    从 ``object_prim_path`` 获取物体世界 (x, y)，叠加 ``approach_offset_x/y``
     后作为 Nav2 目标，适合"先导航到物体附近再抓取"的场景。
 
     完成后自动刷新 ``ctx.base_world_pos/quat``。
 
     params:
-        object_entity_path (str): Isaac Sim 物体的 Prim 路径（世界坐标查询用）。
-            若未指定，则从 ``ctx.task_cfg.source_object_entity_path`` 读取。
+        object_prim_path (str): Isaac Sim 物体的 Prim 路径（世界坐标查询用）。
+            若未指定，则从 ``ctx.task_cfg.object_prim_path`` 读取。
         approach_offset_x (float, 可选): 导航目标相对物体世界 X 的偏移（米），默认 -0.20。
             负值表示机器人在物体 -X 方向（从 X 前方接近）。
         approach_offset_y (float, 可选): 导航目标相对物体世界 Y 的偏移（米），默认 0.0。
@@ -195,14 +193,14 @@ def skill_navigate_to_object(
         poll_period (float, 可选): 轮询间隔（秒），默认 0.1。
     """
     object_path = str(
-        params.get("object_entity_path")
-        or getattr(ctx.task_cfg, "source_object_entity_path", None)
+        params.get("object_prim_path")
+        or getattr(ctx.task_cfg, "object_prim_path", None)
         or ""
     )
     if not object_path:
         raise ValueError(
-            "nav.navigate_to_object requires 'object_entity_path' param "
-            "or ctx.task_cfg.source_object_entity_path"
+            "nav.navigate_to_object requires 'object_prim_path' param "
+            "or ctx.task_cfg.object_prim_path"
         )
 
     offset_x = float(params.get("approach_offset_x", -0.20))

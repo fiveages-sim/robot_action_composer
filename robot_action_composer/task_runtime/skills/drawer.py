@@ -145,7 +145,7 @@ def skill_drawer_pull_open(
 
     ctx.drawer = DrawerPhaseState(
         place_pose_ref=place_pose_ref,
-        grasp_orientation_xyzw=grasp_ori_drawer,
+        ee_base_orientation_xyzw=grasp_ori_drawer,
         grasp_direction_vector=dir_drawer,
         handle_offset_rotated=handle_offset,
     )
@@ -153,7 +153,7 @@ def skill_drawer_pull_open(
     tc = ctx.task_cfg
     if not isinstance(tc, QueueSingleArmSlice):
         raise TypeError(f"drawer pull_open expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
-    # 块级 params（如 retreat_direction_extra）只作用于本次拉抽屉，不写回 ctx.task_cfg，避免影响后续 pick
+    # 块级 params（如 pull_distance）只作用于本次拉抽屉，不写回 ctx.task_cfg，避免影响后续 pick
     tc_pull = overlay_queue_single_arm_from_params(tc, params)
 
     pull_dist = float(params.get("pull_distance", dcfg.pull_distance))
@@ -167,7 +167,7 @@ def skill_drawer_pull_open(
         arm_side=_pick_arm_side(ctx),
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
-        grasp_orientation=grasp_ori_drawer,
+        ee_base_orientation=grasp_ori_drawer,
         grasp_direction_vector=dir_drawer,
         pull_distance=pull_dist,
     )
@@ -182,7 +182,7 @@ def skill_drawer_pull_open(
         place=replace(
             tc.place,
             place_position=apple_place,
-            place_object_entity_path="",
+            place_object_prim_path="",
             run_place_before_return=True,
         ),
     )
@@ -207,7 +207,7 @@ def skill_drawer_close_push(
 
     path_drawer = dcfg.source_object_path_drawer
     place_pose_ref = drw.place_pose_ref
-    grasp_ori = drw.grasp_orientation_xyzw
+    grasp_ori = drw.ee_base_orientation_xyzw
     dir_vec = drw.grasp_direction_vector
     handle_off = drw.handle_offset_rotated
 
@@ -218,7 +218,7 @@ def skill_drawer_close_push(
         include_orientation=True,
     )
     grasp_ori = quat_multiply(grasp_ori, (0, -0.2164396, 0, 0.976296))
-    drw.grasp_orientation_xyzw = grasp_ori
+    drw.ee_base_orientation_xyzw = grasp_ori
 
     _apply_target_pose_offset(source_target_pose_d, handle_off)
     handler = _primary_arm_handler(ctx)
@@ -242,7 +242,7 @@ def skill_drawer_close_push(
         arm_side=_pick_arm_side(ctx),
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
-        grasp_orientation=grasp_ori,
+        ee_base_orientation=grasp_ori,
         grasp_direction_vector=dir_vec,
     )
     rcfg = ctx.robot_cfg

@@ -64,7 +64,7 @@ def merge_flat_with_skill_place(
     base_flat: Mapping[str, Any],
     skill_defaults: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Overlay ``skill_defaults['dual_arm.place']``（如 ``place_object_entity_path``）到扁平 preset。"""
+    """Overlay ``skill_defaults['dual_arm.place']``（如 ``place_object_prim_path``）到扁平 preset。"""
     sd = dict(skill_defaults or {})
     place_sd = dict(sd.get("dual_arm.place") or {})
     return {**dict(base_flat), **place_sd}
@@ -186,25 +186,25 @@ def iter_leaf_block_specs(specs: Sequence[Any]) -> Any:
 def _default_pick_source_path(task_cfg: Any) -> str:
     pick = getattr(task_cfg, "pick", None)
     if pick is not None:
-        src = getattr(pick, "source_object_entity_path", "") or ""
+        src = getattr(pick, "object_prim_path", "") or ""
         s = str(src).strip()
         if s:
             return s
-    top = getattr(task_cfg, "source_object_entity_path", None)
+    top = getattr(task_cfg, "object_prim_path", None)
     if isinstance(top, str) and top.strip():
         return top.strip()
     return ""
 
 
 def reset_settle_entity_path_from_queue(specs: Sequence[Any], task_cfg: Any) -> str:
-    """首个 ``single_arm.pick`` 块若覆写 ``source_object_entity_path`` 则用之，否则用 ``task_cfg.pick`` 默认。"""
+    """首个 ``single_arm.pick`` 块若覆写 ``object_prim_path`` 则用之，否则用 ``task_cfg.pick`` 默认。"""
     from robot_action_composer.task_runtime.types import BlockSpec
 
     base = _default_pick_source_path(task_cfg)
     for s in iter_leaf_block_specs(specs):
         if isinstance(s, BlockSpec) and s.skill == "single_arm.pick":
             p = dict(s.params)
-            raw = p.get("source_object_entity_path")
+            raw = p.get("object_prim_path")
             if isinstance(raw, str) and raw.strip():
                 return raw.strip()
             break

@@ -104,7 +104,7 @@ flowchart TB
 - **`registry.py`**：`register_skill(name, fn)` / `get_skill(name)`。  
 - **`task_runtime/skills/`**（import 时副作用注册）：
   - **`single_arm`**：`pregrasp`、`pick`、`place`、**`goto_cache_pose`**（读 **`robot.cache_ee_pose`** 的单臂或双臂缓存中的**一侧**，笛卡尔回程）等。
-  - **`dual_arm`**：`carry` / `carry_approach` / `carry_grasp` / `carry_lift_retreat`；**`place`** / **`place_advance`** / **`place_release`** / **`place_spread_retreat`**（与 carry 几何互逆、相对货架 prim 的放置）；**`place_relative`**（相对当前双臂末端；可选 **`motion_frame_id`** 经 TF 在躯干系算几何并发目标，适配腰转后外张方向）；`handover_sync`、**`goto_cache_pose`**（双臂同步回 **`cache_ee_pose` `which: both`**）。
+  - **`dual_arm`**：`carry`；**`place`** / **`place_advance`** / **`place_release`** / **`place_spread_retreat`**（与 carry 几何互逆、相对货架 prim 的放置）；**`place_relative`**（相对当前双臂末端；可选 **`motion_frame_id`** 经 TF 在躯干系算几何并发目标，适配腰转后外张方向）；`handover_sync`、**`goto_cache_pose`**（双臂同步回 **`cache_ee_pose` `which: both`**）。
   - **`drawer`**：`single_arm.drawer.*` 系列。
   - **`navigation`**：Nav2 相关封装（与 `isaac_sim` 取位姿配合）。
   - **`joint`**：**`joint.movej_to_config`**、**`joint.goto_cached_joints`**（读 **`robot.cache_joint_state`** 写入的 **`scratch`**）。
@@ -130,7 +130,7 @@ flowchart TB
 - **`task_config_io.py`**：扫描 **`task_configs/*.yaml`**，**`flatten_queue_task_overrides`**（禁止根键 `pick`/`place`/`handover`/`carry`/`drawer` 嵌套等规则）。
 - **`discovery/registry_loader.py`**：对传入根目录下的 **`robots/*/robot_config.py`** + **`task_configs/`** 做发现，供 CLI / inference 使用。
 
-详细约定见 **[TASK_CONFIG_YAML.md](TASK_CONFIG_YAML.md)**、**[ROBOT_CONFIG.md](ROBOT_CONFIG.md)**。
+详细约定见 **[TASK_CONFIG_YAML.md](TASK_CONFIG_YAML.md)**、**[SKILLS_REFERENCE.md](SKILLS_REFERENCE.md)**、**[ROBOT_CONFIG.md](ROBOT_CONFIG.md)**。
 
 ---
 

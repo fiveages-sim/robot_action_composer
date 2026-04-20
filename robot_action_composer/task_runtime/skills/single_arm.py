@@ -1,4 +1,4 @@
-"""Generic single-arm queue skills (pregrasp / pick / place / Cartesian cache goto).
+"""Generic single-arm queue skills (pick / place / Cartesian cache goto).
 
 单臂段使用 :class:`~robot_action_composer.task_runtime.config.single_arm.QueueSingleArmSlice`（由扁平 preset 解析）。
 笛卡尔回程用 ``robot.cache_ee_pose`` + ``single_arm.goto_cache_pose``。
@@ -11,10 +11,10 @@ from dataclasses import replace
 from typing import Any
 
 from geometry_msgs.msg import Pose
+from ros2_robot_interface.utils.quat_pose import rotate_vector_by_quat  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     ArmSide,
-    ArmStage,
     ArmTarget,
     SendMode,
     StageTarget,
@@ -27,10 +27,9 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
 from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
-    _apply_target_pose_offset,
+    apply_object_local_offset_to_pose,
     resolve_place_skill_from_entity,
 )
-from robot_action_composer.ros_interface_utils import arm_handler_pose_or_raise  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext, queue_primary_ee_frame_id
 from robot_action_composer.task_runtime.registry import register_skill
@@ -55,6 +54,50 @@ def _arm_side_and_ee_prefix(qt: QueueSingleArmSlice) -> tuple[ArmSide, bool, str
 
 def _stamped_mode(ctx: QueueRuntimeContext) -> SendMode:
     return SendMode.STAMPED if ctx.use_stamped else SendMode.UNSTAMPED
+
+
+_ROS_ARM_MOVEL_DURATION_PARAM = "movel_duration"
+
+
+def _apply_arm_movel_duration(ctx: QueueRuntimeContext, *, duration: Any, label: str) -> None:
+    """在单臂笛卡尔段执行前写 ``arm_controller.movel_duration``。"""
+    if duration is None:
+        return
+    try:
+        d = float(duration)
+    except (TypeError, ValueError):
+        print(f"[{label}] WARN: arm_movel_duration must be numeric, got {duration!r}")
+        return
+    iface = ctx.interface
+    node = str(getattr(iface, "arm_controller", "") or "").strip()
+    if not node:
+        print(
+            f"[{label}] WARN: arm_movel_duration={d} but arm_controller is empty; "
+            "configure unified_arm_joint_controller_topic / left_arm_joint_controller_topic on ROS2RobotInterface."
+        )
+        return
+    ok = iface.set_node_parameters(full_node_name=node, parameters={_ROS_ARM_MOVEL_DURATION_PARAM: d})
+    if ok:
+        print(f"[{label}] Set {node}.{_ROS_ARM_MOVEL_DURATION_PARAM} = {d}")
+    else:
+        print(f"[{label}] WARN: failed to set {node}.{_ROS_ARM_MOVEL_DURATION_PARAM} = {d}")
+
+
+def _pick_execution_frame_id(ctx: QueueRuntimeContext, motion_frame_id: Any) -> str:
+    base_f = str(ctx.frame_id).strip() or "base_link"
+    if motion_frame_id is None:
+        return base_f
+    raw = str(motion_frame_id).strip()
+    return raw or base_f
+
+
+def _pick_tf_timeout(raw: Any) -> float:
+    if raw is None:
+        return 2.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 2.0
 
 
 def _is_bimanual_ee_cache(raw: Mapping[str, Any]) -> bool:
@@ -82,55 +125,66 @@ def _scratch_pose_entry_to_geometry_pose(entry: Mapping[str, Any]) -> Pose:
     return pose
 
 
-def skill_pregrasp(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
-    qt = overlay_queue_single_arm_from_params(ctx.task_cfg, params)
-    arm_side, source_is_right, ee_prefix = _arm_side_and_ee_prefix(qt)
-    handler = ctx.interface.right_arm_handler if source_is_right else ctx.interface.left_arm_handler
-    home = arm_handler_pose_or_raise(handler, label=ee_prefix)
-    pregrasp_target = ArmTarget(pose=home, gripper=ctx.gripper_open)
-    stages = assign_to_arm([ArmStage("TaskQ-pregrasp", pregrasp_target)], arm_side)
-    return stages, ExecutionMeta(
-        send_mode=_stamped_mode(ctx),
-        frame_id=queue_primary_ee_frame_id(ctx),
-        warn_prefix="TaskQ pregrasp timeout",
-    )
-
-
 def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
     if not isinstance(ctx.task_cfg, QueueSingleArmSlice):
         raise TypeError(f"single_arm.pick expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}")
     qt = overlay_queue_single_arm_from_params(ctx.task_cfg, params)
     arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
     pk = qt.pick
-    path = pk.source_object_entity_path
-    target_pose_offset = pk.target_pose_offset
-    approach_clearance = pk.approach_clearance
-    grasp_clearance = pk.grasp_clearance
-    grasp_orientation = pk.grasp_orientation
+    path = pk.object_prim_path
+    object_position_offset = pk.object_position_offset
+    prepare_offset = pk.prepare_offset
+    pick_clearance = pk.pick_clearance
+    ee_base_orientation = pk.ee_base_orientation
     grasp_direction = pk.grasp_direction
     grasp_direction_vector = pk.grasp_direction_vector
-    grasp_offset = pk.grasp_offset
-    retreat_direction_extra = pk.retreat_direction_extra
-    retreat_offset = pk.retreat_offset
-    retreat_xyz = pk.retreat_xyz
+    motion_frame_id = pk.motion_frame_id
+    tf_lookup_timeout = pk.tf_lookup_timeout
+    arm_movel_duration = pk.arm_movel_duration
+    retreat_offset = (
+        rotate_vector_by_quat(pk.ee_lift_offset, ee_base_orientation)
+        if pk.ee_lift_offset is not None
+        else (0.0, 0.0, 0.0)
+    )
+    retreat_xyz = (
+        rotate_vector_by_quat(pk.ee_retreat_offset, ee_base_orientation)
+        if pk.ee_retreat_offset is not None
+        else None
+    )
     if not path:
-        raise ValueError("source_object_entity_path is required for skill single_arm.pick")
+        raise ValueError("object_prim_path is required for skill single_arm.pick")
+    _apply_arm_movel_duration(ctx, duration=arm_movel_duration, label="single_arm.pick")
+    exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
     target = get_object_pose_from_service(
         ctx.base_world_pos,
         ctx.base_world_quat,
         path,
-        include_orientation=False,
+        include_orientation=True,
     )
-    target = _apply_target_pose_offset(target, target_pose_offset)
+    if exec_f != ctx.frame_id:
+        iface = ctx.interface
+        if not hasattr(iface, "transform_pose"):
+            raise TypeError("single_arm.pick: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)")
+        transformed = iface.transform_pose(
+            target,
+            str(ctx.frame_id),
+            exec_f,
+            timeout=_pick_tf_timeout(tf_lookup_timeout),
+        )
+        if transformed is None:
+            raise RuntimeError(
+                f"single_arm.pick: TF {ctx.frame_id!r} -> {exec_f!r} failed for object pose; "
+                "check motion_frame_id and TF."
+            )
+        target = transformed
+    target = apply_object_local_offset_to_pose(target, object_position_offset)
     arm_seq = build_single_arm_pick_sequence(
         target_pose=target,
-        approach_clearance=approach_clearance,
-        grasp_clearance=grasp_clearance,
-        grasp_orientation=grasp_orientation,
+        ee_base_orientation=ee_base_orientation,
+        prepare_offset=prepare_offset,
+        pick_clearance=pick_clearance,
         grasp_direction=grasp_direction,
         grasp_direction_vector=grasp_direction_vector,
-        grasp_offset=grasp_offset,
-        retreat_direction_extra=retreat_direction_extra,
         retreat_offset=retreat_offset,
         retreat_xyz=retreat_xyz,
         gripper_open=ctx.gripper_open,
@@ -142,7 +196,7 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     ctx.gripper_for_return_home = ctx.gripper_closed
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
-        frame_id=ctx.frame_id,
+        frame_id=exec_f,
         warn_prefix="TaskQ pick timeout",
     )
 
@@ -183,7 +237,7 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
     if pl2.place_position is None or pl2.place_orientation is None:
         raise ValueError(
             "place_position and place_orientation are required when run_place_before_return=True "
-            "(set via skill params, place_object_entity_path, or skill_defaults.single_arm.place)"
+            "(set via skill params, place_object_prim_path, or skill_defaults.single_arm.place)"
         )
     ctx.task_cfg = replace(ctx.task_cfg, place=pl2)
     arm_seq = build_single_arm_place_sequence(
@@ -281,7 +335,6 @@ def skill_goto_cache_pose(
 
 
 def register_single_arm_skills() -> None:
-    register_skill("single_arm.pregrasp", skill_pregrasp)
     register_skill("single_arm.pick", skill_pick)
     register_skill("single_arm.place", skill_place)
     register_skill("single_arm.goto_cache_pose", skill_goto_cache_pose)

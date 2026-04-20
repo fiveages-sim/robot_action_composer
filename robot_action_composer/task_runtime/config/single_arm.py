@@ -25,23 +25,24 @@ class QueueSliceCommon:
 class QueueSlicePick:
     """当前工作臂抓取几何（由 ``common.arm`` 决定左/右）。"""
 
-    target_pose_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    approach_clearance: float = 0.2
-    grasp_clearance: float = 0.01
-    grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    retreat_direction_extra: float = 0.0
-    retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    retreat_xyz: tuple[float, float, float] | None = None
-    source_object_entity_path: str = ""
-    grasp_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
+    object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    prepare_offset: tuple[float, float, float] | None = None
+    pick_clearance: float = 0.01
+    ee_lift_offset: tuple[float, float, float] | None = None
+    ee_retreat_offset: tuple[float, float, float] | None = None
+    object_prim_path: str = ""
+    ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
     grasp_direction: str = "top"
     grasp_direction_vector: tuple[float, float, float] | None = None
+    motion_frame_id: str | None = None
+    tf_lookup_timeout: float | None = None
+    arm_movel_duration: float | None = None
 
 
 @dataclass(frozen=True)
 class QueueSlicePlace:
     run_place_before_return: bool = False
-    place_object_entity_path: str = ""
+    place_object_prim_path: str = ""
     place_pose_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     place_direction: str = "top"
     place_direction_vector: tuple[float, float, float] | None = None
@@ -72,8 +73,8 @@ class QueueSingleArmSlice:
         return self.common.arm
 
     @property
-    def source_object_entity_path(self) -> str:
-        return self.pick.source_object_entity_path
+    def object_prim_path(self) -> str:
+        return self.pick.object_prim_path
 
     @classmethod
     def from_merged_key_dict(cls, flat: Mapping[str, Any]) -> QueueSingleArmSlice:
@@ -93,16 +94,17 @@ def format_queue_single_arm_summary(scene: str, task: QueueSingleArmSlice) -> st
     """CLI 一行摘要。"""
     p, pl, c = task.pick, task.place, task.common
     parts = [
-        f"[Scene] {scene} -> {p.source_object_entity_path}",
+        f"[Scene] {scene} -> {p.object_prim_path}",
         f"arm={c.arm}, direction={p.grasp_direction}",
-        f"orientation={p.grasp_orientation}",
-        f"approach_clearance={p.approach_clearance}, grasp_clearance={p.grasp_clearance}",
-        f"target_pose_offset={p.target_pose_offset}",
-        f"retreat_direction_extra={p.retreat_direction_extra}, retreat_offset={p.retreat_offset}",
+        f"orientation={p.ee_base_orientation}",
+        f"prepare_offset={p.prepare_offset}, pick_clearance={p.pick_clearance}",
+        f"ee_lift_offset={p.ee_lift_offset}, ee_retreat_offset={p.ee_retreat_offset}",
+        f"object_position_offset={p.object_position_offset}",
+        f"motion_frame_id={p.motion_frame_id}, arm_movel_duration={p.arm_movel_duration}",
     ]
     if pl.run_place_before_return:
-        if pl.place_object_entity_path:
-            parts.append(f"place_object={pl.place_object_entity_path}, place_offset={pl.place_pose_offset}")
+        if pl.place_object_prim_path:
+            parts.append(f"place_object={pl.place_object_prim_path}, place_offset={pl.place_pose_offset}")
         else:
             parts.append(f"place_position={pl.place_position}")
         parts.append(f"place_orientation={pl.place_orientation}")
