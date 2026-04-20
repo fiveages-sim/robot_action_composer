@@ -137,10 +137,7 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
 - **效果**：一次执行完整搬运序列（接近/闭合/抬升/后撤）。
 - **参数**：无块级专用参数（读取 `dual_arm.carry` 配置）。
 
-
-
-Uploading dual arm carry.mp4…
-
+https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
 
 
 
