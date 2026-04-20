@@ -35,7 +35,6 @@ skill_defaults:
     arm: right
     object_prim_path: /World/object
   single_arm.place:
-    run_place_before_return: true
 
 task_queue:
   - skill: robot.cache_ee_pose

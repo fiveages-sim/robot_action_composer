@@ -41,6 +41,8 @@ from robot_action_composer.task_runtime.context import QueueRuntimeContext
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.skills.single_arm import (
     _is_bimanual_ee_cache,
+    _pick_execution_frame_id,
+    _pick_tf_timeout,
     _scratch_pose_entry_to_geometry_pose,
 )
 from robot_action_composer.task_runtime.types import ExecutionMeta
@@ -278,22 +280,41 @@ def _require_parallel_pick_cfg(params: Mapping[str, Any]) -> BimanualParallelPic
 
 
 def _resolve_parallel_pick_target_poses(
-    ctx: QueueRuntimeContext, cfg: BimanualParallelPickTaskConfig,
+    ctx: QueueRuntimeContext,
+    cfg: BimanualParallelPickTaskConfig,
+    *,
+    execution_frame_id: str,
+    tf_timeout: float,
 ) -> dict[str, Any]:
-    left_pose = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        cfg.left_pick.object_prim_path,
-        include_orientation=True,
-    )
-    right_pose = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        cfg.right_pick.object_prim_path,
-        include_orientation=True,
-    )
-    left_pose = apply_object_local_offset_to_pose(left_pose, cfg.left_pick.target_pose_offset)
-    right_pose = apply_object_local_offset_to_pose(right_pose, cfg.right_pick.target_pose_offset)
+    """物体系偏移与 ``single_arm.pick`` 一致；必要时将目标位姿从 ``ctx.frame_id`` 变到 ``execution_frame_id``。"""
+    src = str(ctx.frame_id).strip() or "base_link"
+    exec_f = str(execution_frame_id).strip() or src
+
+    def _one(side: str, prim: str, off: tuple[float, float, float]) -> Pose:
+        pose = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            prim,
+            include_orientation=True,
+        )
+        pose = apply_object_local_offset_to_pose(pose, off)
+        if exec_f != src:
+            iface = ctx.interface
+            if not hasattr(iface, "transform_pose"):
+                raise TypeError(
+                    "dual_arm.parallel_pick: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)"
+                )
+            transformed = iface.transform_pose(pose, src, exec_f, timeout=tf_timeout)
+            if transformed is None:
+                raise RuntimeError(
+                    f"dual_arm.parallel_pick: TF {src!r} -> {exec_f!r} failed for {side} object pose; "
+                    "check motion_frame_id and TF."
+                )
+            return transformed
+        return pose
+
+    left_pose = _one("left", cfg.left_pick.object_prim_path, cfg.left_pick.object_position_offset)
+    right_pose = _one("right", cfg.right_pick.object_prim_path, cfg.right_pick.object_position_offset)
     return {"left": left_pose, "right": right_pose}
 
 
@@ -439,16 +460,12 @@ def skill_bimanual_align(
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     """持箱时双臂对齐：将 **左右末端中点** 移到目标位置（可选姿态增量），``motion_frame_id`` 下计算。
 
-    左右手 **同加** 位置增量，相对几何不变。目标可写 ``align_position: [x,y,z]`` 一次指定三轴，或用
-    ``target_mid_y``（默认 ``0``）与可选 ``target_mid_x`` / ``target_mid_z`` 分段指定；若同时存在
-    ``align_position``，则以 ``align_position`` 为准。
+    左右手 **同加** 位置增量，相对几何不变。目标仅支持 ``align_position: [x,y,z]`` 一次指定三轴。
 
     姿态：可选 ``orientation_delta_rpy``（``[roll, pitch, yaw]`` 弧度），左乘当前左、右末端四元数。
 
     params:
-        align_position: 可选 ``[x, y, z]``（米），双臂中心目标位置；与 ``target_mid_*`` 二选一优先用本项。
-        target_mid_y: 默认 ``0.0``；未写 ``align_position`` 时生效。
-        target_mid_x / target_mid_z: 可选；未写 ``align_position`` 时未写则不调整该轴。
+        align_position: 必填 ``[x, y, z]``（米），双臂中心目标位置（``motion_frame_id`` 下）。
         orientation_delta_rpy, min_abs_orientation_rpy, motion_frame_id,
         min_abs_delta_y / min_abs_delta_x / min_abs_delta_z, stage_name, arm_movel_duration: 同前。
     """
@@ -467,31 +484,12 @@ def skill_bimanual_align(
         iface, l0_raw, r0_raw, pose_frame, params, label=label,
     )
 
-    def _opt_float(key: str) -> float | None:
-        v = params.get(key)
-        if v is None:
-            return None
-        try:
-            return float(v)
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"{key} must be a float or null") from e
-
     ap = params.get("align_position")
-    if ap is not None:
-        if not isinstance(ap, (list, tuple)) or len(ap) != 3:
-            raise ValueError("align_position must be a length-3 list [x, y, z]")
-        target_mid_x = float(ap[0])
-        target_mid_y = float(ap[1])
-        target_mid_z = float(ap[2])
-        use_align_xyz = True
-    else:
-        use_align_xyz = False
-        try:
-            target_mid_y = float(params.get("target_mid_y", 0.0))
-        except (TypeError, ValueError) as e:
-            raise ValueError("target_mid_y must be a float") from e
-        target_mid_x = _opt_float("target_mid_x")
-        target_mid_z = _opt_float("target_mid_z")
+    if not isinstance(ap, (list, tuple)) or len(ap) != 3:
+        raise ValueError("align_position is required and must be a length-3 list [x, y, z]")
+    target_mid_x = float(ap[0])
+    target_mid_y = float(ap[1])
+    target_mid_z = float(ap[2])
 
     try:
         min_abs = float(params.get("min_abs_delta_y", 1e-4))
@@ -509,14 +507,9 @@ def skill_bimanual_align(
     mid_x = (l0.position.x + r0.position.x) * 0.5
     mid_y = (l0.position.y + r0.position.y) * 0.5
     mid_z = (l0.position.z + r0.position.z) * 0.5
-    if use_align_xyz:
-        delta_x = target_mid_x - mid_x
-        delta_y = target_mid_y - mid_y
-        delta_z = target_mid_z - mid_z
-    else:
-        delta_y = target_mid_y - mid_y
-        delta_x = (target_mid_x - mid_x) if target_mid_x is not None else 0.0
-        delta_z = (target_mid_z - mid_z) if target_mid_z is not None else 0.0
+    delta_x = target_mid_x - mid_x
+    delta_y = target_mid_y - mid_y
+    delta_z = target_mid_z - mid_z
 
     dr, dp, dyaw = _param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
     try:
@@ -524,14 +517,9 @@ def skill_bimanual_align(
     except (TypeError, ValueError):
         min_abs_ori = 1e-4
     has_ori = max(abs(dr), abs(dp), abs(dyaw)) >= min_abs_ori
-    if use_align_xyz:
-        move_x = abs(delta_x) >= min_abs_x
-        move_y = abs(delta_y) >= min_abs
-        move_z = abs(delta_z) >= min_abs_z
-    else:
-        move_y = abs(delta_y) >= min_abs
-        move_x = target_mid_x is not None and abs(delta_x) >= min_abs_x
-        move_z = target_mid_z is not None and abs(delta_z) >= min_abs_z
+    move_x = abs(delta_x) >= min_abs_x
+    move_y = abs(delta_y) >= min_abs
+    move_z = abs(delta_z) >= min_abs_z
     if not (move_y or move_x or move_z or has_ori):
         return [], ExecutionMeta(
             send_mode=_dual_mode(ctx),
@@ -609,12 +597,31 @@ def skill_parallel_pick(
     ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     cfg = _require_parallel_pick_cfg(params)
-    target_poses = _resolve_parallel_pick_target_poses(ctx, cfg)
+    exec_l = _pick_execution_frame_id(ctx, cfg.left_pick.motion_frame_id)
+    exec_r = _pick_execution_frame_id(ctx, cfg.right_pick.motion_frame_id)
+    if exec_l != exec_r:
+        raise ValueError(
+            "dual_arm.parallel_pick: left_pick.motion_frame_id and right_pick.motion_frame_id must "
+            f"resolve to the same frame (got {exec_l!r} vs {exec_r!r})"
+        )
+    exec_f = exec_l
+    tf_timeout = max(
+        _pick_tf_timeout(cfg.left_pick.tf_lookup_timeout),
+        _pick_tf_timeout(cfg.right_pick.tf_lookup_timeout),
+    )
+    movel = cfg.left_pick.arm_movel_duration
+    if movel is None:
+        movel = cfg.right_pick.arm_movel_duration
+    _apply_arm_movel_duration(ctx, duration=movel, label="dual_arm.parallel_pick")
+    target_poses = _resolve_parallel_pick_target_poses(
+        ctx, cfg, execution_frame_id=exec_f, tf_timeout=tf_timeout,
+    )
     ctx.parallel_pick_target_poses = dict(target_poses)
     stages = _parallel_pick_full_stages(ctx, cfg, target_poses)
+    ctx.gripper_for_return_home = ctx.gripper_closed
     return stages, ExecutionMeta(
         send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
+        frame_id=exec_f,
         warn_prefix="TaskQ dual_arm parallel pick timeout",
     )
 

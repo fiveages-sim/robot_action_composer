@@ -58,7 +58,7 @@ def _require_drawer_geometry(ctx: QueueRuntimeContext) -> DrawerGeometryConfig:
     if d is None:
         raise TypeError(
             "single_arm.drawer.* skills require drawer_geometry "
-            "(set source_object_path_drawer and drawer fields in task YAML / merged flat)"
+            "(set source_object_path_drawer and drawer fields in task YAML overlays)"
         )
     return d
 
@@ -182,8 +182,7 @@ def skill_drawer_pull_open(
         place=replace(
             tc.place,
             place_position=apple_place,
-            place_object_prim_path="",
-            run_place_before_return=True,
+            object_prim_path="",
         ),
     )
     ctx.gripper_for_return_home = ctx.gripper_closed

@@ -9,12 +9,14 @@ from typing import Any
 
 from geometry_msgs.msg import Pose
 
+from ros2_robot_interface.utils.quat_pose import rotate_vector_by_quat  # pyright: ignore[reportMissingImports]
+
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     StageTarget,
     build_single_arm_pick_sequence,
     compose_bimanual_synchronized_sequence,
 )
-from robot_action_composer.task_runtime.merge.flat_presets import kwargs_for_dataclass  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.merge.utils import kwargs_for_dataclass  # pyright: ignore[reportMissingImports]
 
 PARALLEL_PICK_APPROACH_STAGE_COUNT = 2
 PARALLEL_PICK_GRASP_STAGE_COUNT = 1
@@ -28,18 +30,22 @@ PARALLEL_PICK_TOTAL_STAGES = (
 
 @dataclass(frozen=True)
 class ParallelPickArmConfig:
+    """单侧抓取几何，与 :class:`~robot_action_composer.task_runtime.config.single_arm.QueueSlicePick` 字段语义一致。"""
+
     object_prim_path: str = ""
-    object_xyz_random_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    target_pose_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    approach_clearance: float = 0.2
-    grasp_clearance: float = 0.01
-    grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    retreat_direction_extra: float = 0.0
-    retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    retreat_xyz: tuple[float, float, float] | None = None
+    object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    prepare_offset: tuple[float, float, float] | None = None
+    pick_clearance: float = 0.01
+    ee_lift_offset: tuple[float, float, float] | None = None
+    ee_retreat_offset: tuple[float, float, float] | None = None
     ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
-    grasp_direction: str = "top"
+    grasp_direction: str = "+z"
     grasp_direction_vector: tuple[float, float, float] | None = None
+    motion_frame_id: str | None = None
+    tf_lookup_timeout: float | None = None
+    arm_movel_duration: float | None = None
+    # reset / 仿真随机化用（不参与笛卡尔序列构建）
+    object_xyz_random_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,20 @@ def slice_parallel_pick_stages_for_queue(
     return full[0:i], full[i:j], full[j:]
 
 
+def _pick_retreat_world_vectors(
+    arm: ParallelPickArmConfig,
+) -> tuple[tuple[float, float, float], tuple[float, float, float] | None]:
+    """与 ``single_arm.skill_pick`` 一致：工具系抬升/后撤先按 ``ee_base_orientation`` 旋到世界系再交给序列构建。"""
+    q = arm.ee_base_orientation
+    retreat_offset = (
+        rotate_vector_by_quat(arm.ee_lift_offset, q) if arm.ee_lift_offset is not None else (0.0, 0.0, 0.0)
+    )
+    retreat_xyz = (
+        rotate_vector_by_quat(arm.ee_retreat_offset, q) if arm.ee_retreat_offset is not None else None
+    )
+    return retreat_offset, retreat_xyz
+
+
 def build_bimanual_parallel_pick_record_sequence(
     *,
     task_cfg: BimanualParallelPickTaskConfig,
@@ -82,17 +102,18 @@ def build_bimanual_parallel_pick_record_sequence(
 ) -> list[StageTarget]:
     left = task_cfg.left_pick
     right = task_cfg.right_pick
+    lo, lz = _pick_retreat_world_vectors(left)
+    ro, rz = _pick_retreat_world_vectors(right)
     left_seq = build_single_arm_pick_sequence(
         target_pose=left_target_pose,
         ee_base_orientation=left.ee_base_orientation,
-        prepare_offset=(0.0, 0.0, left.approach_clearance),
-        pick_clearance=left.grasp_clearance,
+        prepare_offset=left.prepare_offset,
+        pick_clearance=left.pick_clearance,
         grasp_direction=left.grasp_direction,
         grasp_direction_vector=left.grasp_direction_vector,
-        object_position_offset=left.grasp_offset,
-        retreat_direction_extra=left.retreat_direction_extra,
-        retreat_offset=left.retreat_offset,
-        retreat_xyz=left.retreat_xyz,
+        object_position_offset=(0.0, 0.0, 0.0),
+        retreat_offset=lo,
+        retreat_xyz=lz,
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
         stage_prefix="ParallelPickL",
@@ -100,14 +121,13 @@ def build_bimanual_parallel_pick_record_sequence(
     right_seq = build_single_arm_pick_sequence(
         target_pose=right_target_pose,
         ee_base_orientation=right.ee_base_orientation,
-        prepare_offset=(0.0, 0.0, right.approach_clearance),
-        pick_clearance=right.grasp_clearance,
+        prepare_offset=right.prepare_offset,
+        pick_clearance=right.pick_clearance,
         grasp_direction=right.grasp_direction,
         grasp_direction_vector=right.grasp_direction_vector,
-        object_position_offset=right.grasp_offset,
-        retreat_direction_extra=right.retreat_direction_extra,
-        retreat_offset=right.retreat_offset,
-        retreat_xyz=right.retreat_xyz,
+        object_position_offset=(0.0, 0.0, 0.0),
+        retreat_offset=ro,
+        retreat_xyz=rz,
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
         stage_prefix="ParallelPickR",

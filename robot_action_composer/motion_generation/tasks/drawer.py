@@ -25,7 +25,7 @@ from robot_action_composer.task_runtime.config.single_arm import (  # pyright: i
 
 @dataclass(frozen=True)
 class DrawerGeometryConfig:
-    """Drawer cabinet / handle prim paths and extents (merged flat → ``MergedQueueConfig.drawer``)."""
+    """Drawer cabinet / handle prim paths and extents (structured overlays → ``MergedQueueConfig.drawer``)."""
 
     source_object_path_drawer: str = ""
     source_object_path_drawer_all: str = ""

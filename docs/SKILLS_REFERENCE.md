@@ -33,7 +33,7 @@
     - `prepare_offset`：预接近偏移（工具系向量，语义与 `dual_arm.carry.carry_prepare_offset` 一致）。
     - `ee_lift_offset`：抓取后抬升位移（工具系向量；会按 `ee_base_orientation` 旋转后用于抬升段）。
     - `ee_retreat_offset`：抬升后后撤位移（工具系向量；会按 `ee_base_orientation` 旋转后用于后撤段）。
-    - `ee_pick_axis`：抓取轴向（末端坐标系，可用字符串方向或向量表示）。
+    - `ee_pick_axis`：抓取轴向（末端坐标系；使用 `+x/-x/+y/-y/+z/-z`，默认 `+z`）。
   - **执行控制**
     - `arm`：`left|right`。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
@@ -47,18 +47,28 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
 
 ### `single_arm.place`
 
-- **效果**：执行单臂放置序列；若配置关闭可跳过。
+- **效果**：执行单臂放置序列（在 `task_queue` 中出现即执行）；既支持放置到固定坐标（`place_position`），也支持基于参考物体坐标动态计算放置目标（`object_prim_path` + `object_position_offset`）。
 - **参数**（来自 `single_arm.place` 切片）：
   - **目标物体配置**
-    - `place_object_prim_path`：放置参考物体 Prim 路径（可解析放置位）。
-    - `place_position` / `place_orientation`：显式放置位姿。
+    - `object_prim_path`：放置参考物体 Prim 路径（可解析放置位）。
+    - `object_position_offset`：相对参考物体中心的放置偏移（物体局部坐标系；会按物体当前姿态旋转后叠加到放置目标）。
   - **运动系配置**
-    - `place_direction` / `place_direction_vector`：放置方向。
-    - `place_approach_clearance` / `place_insert_clearance`：接近与插入余量。
-    - `post_release_retract_offset`：松爪后回撤偏移。
+    - `place_position`：显式放置位置（运动系坐标；当未设置 `object_prim_path` 时，直接按该坐标放置）。
+    - `ee_base_orientation`：放置姿态四元数 `xyzw`（未设置时默认继承 `single_arm.pick.ee_base_orientation`）。
+    - `motion_frame_id`：放置目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
+    - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
+  - **末端系配置**
+    - `ee_place_axis`：放置轴向（末端坐标系；使用 `+x/-x/+y/-y/+z/-z`，不设置时继承 `ee_pick_axis`）。
+    - `place_insert_clearance`：放置闭合段偏移（工具系标量，沿 `ee_place_axis`）。
+    - `prepare_offset`：放置预接近偏移（工具系三维向量 `[x,y,z]`；按 `ee_base_orientation` 旋转后叠加到放置目标）。
+    - `ee_retreat_offset`：松爪后回撤偏移（工具系向量；按 `ee_base_orientation` 旋转后执行）。
   - **执行控制**
-    - `run_place_before_return`：是否执行放置。
-- **备注**：当 `run_place_before_return=true` 时，放置位置与姿态必须可解析。
+    - `arm`：`left|right`（不配置时默认继承 `single_arm.pick.arm`）。
+    - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
+- **备注**：
+  - 放置位置必须可解析；
+  - 未设置 `ee_base_orientation` 时，默认继承 `single_arm.pick.ee_base_orientation`；
+  - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick` 的 `ee_pick_axis` 配置（其默认值为 `+z`）。
 
 ### `single_arm.goto_cache_pose`
 
@@ -132,29 +142,32 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
 > 该技能从当前块 `params` 解析 `BimanualParallelPickTaskConfig`。  
 > 必须提供 `left_pick` 与 `right_pick` 两个映射。
 
-`left_pick` / `right_pick` 主要字段（与 `ParallelPickArmConfig` 对齐）：
+`left_pick` / `right_pick` 字段与 `single_arm.pick` 切片语义一致（每侧一套），并额外支持仿真 reset 用随机化字段：
 
 - **目标物体配置**
   - `object_prim_path`：该侧抓取目标物体 Prim 路径（必填）。
-  - `target_pose_offset`：目标位姿偏移（物体系平移）。
-  - `object_xyz_random_offset`：该侧目标物体随机偏移（配置保留字段，常用于任务 reset 相关流程）。
+  - `object_position_offset`：相对物体中心的抓取偏移（物体局部坐标系；与 `single_arm.pick` 相同）。
+  - `object_xyz_random_offset`：该侧物体在 reset 后的随机位置扰动（不参与笛卡尔序列，仅 `runner` 随机化用）。
 
 - **运动系配置**
-  - `approach_clearance`：接近高度/距离余量。
-  - `grasp_clearance`：闭合抓取时的靠近余量。
-  - `retreat_direction_extra`：沿抓取方向额外后退量。
-  - `retreat_offset`：后退段固定偏移。
-  - `retreat_xyz`：显式后退位移（可选，优先于方向推导）。
+  - `motion_frame_id`：该侧物体位姿解析后的输出坐标系（可选；不写则沿用任务 `frame_id`）。**左右两侧解析后必须相同**，否则双臂同步下发无法共用一个坐标系。
+  - `tf_lookup_timeout`：TF 查询超时（秒）；本块取左右两侧的较大值用于两侧物体位姿变换。
 
 - **末端系配置**
   - `ee_base_orientation`：抓取姿态四元数 `xyzw`。
-  - `grasp_direction` / `grasp_direction_vector`：抓取方向（字符串或向量）。
-  - `grasp_offset`：抓取点偏移。
+  - `pick_clearance`：闭合抓取阶段偏移（工具系，沿末端局部 +Z 解释，与 `build_single_arm_pick_sequence` 一致）。
+  - `prepare_offset`：预接近偏移（工具系三维向量；全 0 或省略时可省略预接近段）。
+  - `ee_lift_offset` / `ee_retreat_offset`：抬升与后撤（工具系向量；会分别按该侧 `ee_base_orientation` 旋转到世界系后写入序列，与 `single_arm.pick` 一致）。
+  - `grasp_direction` / `grasp_direction_vector`：抓取方向（轴向字符串或显式单位向量；与单臂 pick 相同）。
+
+- **执行控制**
+  - `arm_movel_duration`：可选；优先取 `left_pick`，否则取 `right_pick`，写入 `arm_controller.movel_duration`。
 
 #### `dual_arm.parallel_pick`
 
-- **效果**：一次执行完整双臂同时抓取序列。
-- **参数**：读取 `left_pick` / `right_pick` 配置（见上方字段列表）。
+- **效果**：一次执行完整双臂同时抓取序列（两侧各走一条 `build_single_arm_pick_sequence`，再按阶段同步合成）。
+- **参数**：读取 `left_pick` / `right_pick`（见上方字段列表）。
+- **备注**：执行完成后会将 `gripper_for_return_home` 置为闭合值（与单臂 pick 行为一致）。
 
 ### 2.3 放置（place）
 
@@ -185,16 +198,12 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
 
 - **效果**：保持双臂相对几何不变，整体把中点对齐到目标位置；可附加姿态增量。
 - **参数**：
-  - **目标位姿配置**
-    - `align_position`（`[float,float,float]`）：中点目标位置（与 `target_mid_*` 二选一）。
-    - `target_mid_y`（`float`，默认 `0.0`）：仅指定中点 Y 时使用。
-    - `target_mid_x` / `target_mid_z`（`float`）：可选中点 X/Z 目标。
-    - `orientation_delta_rpy`（`[float,float,float]`）：附加姿态增量（弧度）。
-  - **运动系配置**
+  - **运动系目标配置**
+    - `align_position`（`[float,float,float]`）：`motion_frame_id` 坐标系下的中点目标位置（必填）。
+    - `orientation_delta_rpy`（`[float,float,float]`）：在该运动系下定义的附加姿态增量（弧度）。
     - `motion_frame_id`（`str`）：对齐计算坐标系。
-  - **末端系配置**
-    - `arm_movel_duration`（`float`）：覆盖笛卡尔段 movel 时长。
   - **执行控制**
+    - `arm_movel_duration`（`float`）：覆盖笛卡尔段 movel 时长。
     - `stage_name`（`str`）：阶段名。
 
 ### 2.5 交接与回程
@@ -202,8 +211,12 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
 #### `dual_arm.handover_sync`
 
 - **效果**：执行双臂同步交接段。
-- **参数**：无块级专用参数（读 `skill_defaults.dual_arm.handover` / 场景覆盖）。
-- **备注**：抓取侧由 `common.arm` 决定。
+- **参数**（来自 `skill_defaults.dual_arm.handover` / 场景覆盖）：
+  - `handover_position`（`[x,y,z]`）：交接基准位置（米）。
+  - `source_handover_orientation`（`[x,y,z,w]`）：给出物体一侧末端的交接姿态四元数。
+  - `receiver_handover_orientation`（`[x,y,z,w]`）：接收侧末端的交接姿态四元数。
+  - `receiver_handover_offset`（`[x,y,z]`，可选）：仅作用于接收侧位姿的位置补偿（默认 `[0,0,0]`）。
+- **备注**：抓取侧由 `common.arm` 决定（`right` 则右臂为 source，反之左臂为 source）。
 
 #### `dual_arm.goto_cache_pose`
 

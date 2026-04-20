@@ -29,7 +29,7 @@ from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import
     parallel_pick_cfg_from_params,
 )
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
-from robot_action_composer.task_runtime.merge.flat_presets import reset_settle_entity_path_from_queue
+from robot_action_composer.task_runtime.merge.utils import reset_settle_entity_path_from_queue
 from robot_action_composer.task_runtime.registry import get_skill
 from robot_action_composer.task_runtime.config.merged import MergedQueueConfig
 from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec, QueueBlock, block_spec_from_mapping

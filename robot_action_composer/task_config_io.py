@@ -8,16 +8,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 _FORBIDDEN_ROOT_KEYS: frozenset[str] = frozenset({"pick", "place", "handover", "carry", "drawer"})
-# Consumed separately by merge_scene_skill_overlays_into_flat / merge_task_queue_skill_params, not part of flat preset keys.
 _STRIPPED_ROOT_KEYS: frozenset[str] = frozenset({"skill_params"})
 
 
-def flatten_queue_task_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten ``base_task_overrides`` or a scene-preset root to top-level scalars only.
-
-    Nested task sections are **not** supported — use ``skill_defaults`` / ``skill_params``
-    (e.g. ``single_arm.pick``, ``dual_arm.handover``, ``dual_arm.carry``).
-    """
+def queue_root_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract queue root overrides (excluding nested skill sections)."""
     if not isinstance(raw, Mapping):
         raise TypeError(f"task overrides must be a mapping, got {type(raw).__name__}")
     ctx = "base_task_overrides or scene preset"
@@ -154,6 +149,6 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskCon
 __all__ = [
     "TaskConfigDiscovery",
     "discover_task_configs",
-    "flatten_queue_task_overrides",
+    "queue_root_overrides",
     "load_task_dict_from_yaml",
 ]

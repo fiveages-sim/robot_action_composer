@@ -157,6 +157,13 @@ PLACE_RELATIVE_SUFFIXES: tuple[str, ...] = (
 )
 
 _GRASP_DIRECTION_TO_VEC: dict[str, DirectionVec] = {
+    "+x": (1.0, 0.0, 0.0),
+    "-x": (-1.0, 0.0, 0.0),
+    "+y": (0.0, 1.0, 0.0),
+    "-y": (0.0, -1.0, 0.0),
+    "+z": (0.0, 0.0, 1.0),
+    "-z": (0.0, 0.0, -1.0),
+    # Backward-compatible aliases.
     "top": (0.0, 0.0, 1.0),
     "front": (-1.0, 0.0, 0.0),
     "back": (1.0, 0.0, 0.0),
@@ -344,7 +351,7 @@ def build_single_arm_pick_sequence(
     ee_base_orientation: tuple[float, float, float, float],
     prepare_offset: tuple[float, float, float] | None = None,
     pick_clearance: float = 0.01,
-    grasp_direction: str = "top",
+    grasp_direction: str = "+z",
     grasp_direction_vector: DirectionVec | None = None,
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     retreat_direction_extra: float = 0.0,
@@ -444,58 +451,73 @@ def build_single_arm_place_sequence(
     *,
     place_position: tuple[float, float, float],
     place_orientation: tuple[float, float, float, float],
-    post_release_retract_offset: tuple[float, float, float],
+    ee_retreat_offset: tuple[float, float, float],
     gripper_open: float,
     gripper_closed: float,
-    place_direction: str = "top",
-    place_direction_vector: DirectionVec | None = None,
-    place_approach_clearance: float = 0.0,
+    place_axis: str = "top",
+    prepare_offset: tuple[float, float, float] | None = None,
     place_insert_clearance: float = 0.0,
     stage_prefix: str = "Place",
     start_index: int = 1,
 ) -> list[ArmStage]:
-    """Build place stages from a target pose, mirroring pick ``approach → insert`` semantics.
+    """Build place stages from a target pose, mirroring pick ``prepare → close-in`` semantics.
 
     The place *target* is ``place_position`` / ``place_orientation`` (object or slot frame).
-    Motion approaches along ``place_direction`` (or ``place_direction_vector``), same convention
-    as :func:`build_single_arm_pick_sequence`:
+    For consistency with single-arm pick, place offsets are interpreted in **tool frame**
+    and resolved by ``place_axis``:
 
-    - ``place_approach_clearance``: offset along the approach direction from the target (typically
-       stay *farther* along +direction before moving in).
-    - ``place_insert_clearance``: final offset along the same direction (like pick
-       ``grasp_clearance``; may be negative to move slightly past the nominal target).
+    - ``place_insert_clearance``: offset along local place axis from the nominal place target.
+    - ``prepare_offset``: tool-frame vector offset from insert pose (same semantics as pick
+      ``prepare_offset``), rotated by ``place_orientation``.
+    - ``ee_retreat_offset``: local tool-frame vector after release, rotated by
+      ``place_orientation`` before being applied.
 
     When approach and insert poses coincide (e.g. both clearances ``0``), the explicit approach
     stage is omitted (3 stages: Place / Release / PostReleaseRetreat).
     """
-    direction_vec = _resolve_grasp_direction_vec(
-        grasp_direction=place_direction,
-        grasp_direction_vector=place_direction_vector,
+    local_axis = _resolve_grasp_direction_vec(
+        grasp_direction=place_axis,
+        grasp_direction_vector=None,
     )
     target_pose = _make_pose(place_position, place_orientation)
-    approach_pose = _make_pose_from_target(
-        target_pose,
-        offset=place_approach_clearance,
-        direction_vec=direction_vec,
-        orientation=place_orientation,
+    local_insert = (
+        local_axis[0] * float(place_insert_clearance),
+        local_axis[1] * float(place_insert_clearance),
+        local_axis[2] * float(place_insert_clearance),
     )
-    final_pose = _make_pose_from_target(
-        target_pose,
-        offset=place_insert_clearance,
-        direction_vec=direction_vec,
-        orientation=place_orientation,
+    idx, idy, idz = rotate_vector_by_quat(local_insert, place_orientation)
+    final_pose = _make_pose(
+        (
+            float(target_pose.position.x) + idx,
+            float(target_pose.position.y) + idy,
+            float(target_pose.position.z) + idz,
+        ),
+        place_orientation,
     )
-    ox, oy, oz = post_release_retract_offset
+    has_prepare = prepare_offset is not None and any(abs(float(x)) > 1e-12 for x in prepare_offset)
+    if has_prepare and prepare_offset is not None:
+        adx, ady, adz = rotate_vector_by_quat(prepare_offset, place_orientation)
+        approach_pose = _make_pose(
+            (
+                float(final_pose.position.x) + adx,
+                float(final_pose.position.y) + ady,
+                float(final_pose.position.z) + adz,
+            ),
+            place_orientation,
+        )
+    else:
+        approach_pose = final_pose
+    ox, oy, oz = rotate_vector_by_quat(ee_retreat_offset, place_orientation)
     retract_pose = _make_pose(
         (
-            final_pose.position.x + ox,
-            final_pose.position.y + oy,
-            final_pose.position.z + oz,
+            float(final_pose.position.x) + ox,
+            float(final_pose.position.y) + oy,
+            float(final_pose.position.z) + oz,
         ),
         place_orientation,
     )
 
-    need_approach = not _poses_same_position(approach_pose, final_pose)
+    need_approach = has_prepare and (not _poses_same_position(approach_pose, final_pose))
     idx = start_index
     stages: list[ArmStage] = []
 

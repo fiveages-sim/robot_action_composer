@@ -13,9 +13,9 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
     from robot_action_composer.motion_generation.tasks.bimanual_place import BimanualPlaceTaskConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
     from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
-    from robot_action_composer.task_runtime.config import QUEUE_SINGLE_ARM_FLAT_KEYS  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.task_runtime.config import QUEUE_SINGLE_ARM_KEYS  # pyright: ignore[reportMissingImports]
 
-    names: set[str] = set(QUEUE_SINGLE_ARM_FLAT_KEYS)
+    names: set[str] = set(QUEUE_SINGLE_ARM_KEYS)
     names.add("base_link_entity_path")
     names.add("place_offset")
     names.update(
@@ -46,22 +46,19 @@ def _apply_task_preset_runtime(base: Any, preset_raw: dict[str, object]) -> Any:
 
 
 def _build_task_runtime(task_entry_cfg: Any) -> Any:
-    from robot_action_composer.task_config_io import flatten_queue_task_overrides
+    from robot_action_composer.task_config_io import queue_root_overrides
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
-        build_merged_queue_from_flat,
-        merge_pick_place_skill_overlay,
+        build_merged_queue_config,
     )
 
     if not (isinstance(task_entry_cfg, dict) and "base_task_overrides" in task_entry_cfg):
         raise TypeError("task YAML must be a dict with base_task_overrides")
-    flat = flatten_queue_task_overrides(task_entry_cfg["base_task_overrides"])
     skill_defaults = dict(task_entry_cfg.get("skill_defaults") or {})
-    flat = merge_pick_place_skill_overlay(flat, skill_defaults)
-    flat = {**flat, **dict(skill_defaults.get("dual_arm.handover") or {})}
-    flat = {**flat, **dict(skill_defaults.get("dual_arm.carry") or {})}
-    flat = {**flat, **dict(skill_defaults.get("single_arm.drawer") or {})}
-    place_flat = dict(skill_defaults.get("dual_arm.place") or {})
-    return build_merged_queue_from_flat(flat, place_flat if place_flat else None)
+    return build_merged_queue_config(
+        base_task_overrides=queue_root_overrides(task_entry_cfg["base_task_overrides"]),
+        skill_defaults=skill_defaults,
+        scene_preset=None,
+    )
 
 
 def _pointcloud_supported(robot_cfg: Any) -> bool:
@@ -78,7 +75,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
         select_task_with_optional_group,
     )
     from robot_action_composer.discovery.registry_loader import load_robot_entries
-    from robot_action_composer.task_config_io import flatten_queue_task_overrides
+    from robot_action_composer.task_config_io import queue_root_overrides
     from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
         merge_task_queue_skill_params,
     )
@@ -148,7 +145,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
             default_key=default_scene,
         )
         preset_raw: dict[str, object] = dict(scene_presets.get(scene_key, {}))
-        unknown = [k for k in flatten_queue_task_overrides(preset_raw) if k not in allowed]
+        unknown = [k for k in queue_root_overrides(preset_raw) if k not in allowed]
         if unknown:
             raise ValueError(f"Unknown scene preset keys: {unknown}")
         task_runtime = _apply_task_preset_runtime(task_runtime, preset_raw)

@@ -14,7 +14,7 @@ from robot_action_composer.task_runtime.config.single_arm import (  # pyright: i
     overlay_queue_single_arm_from_params,
     overlay_single_arm_pick_place,
 )
-from robot_action_composer.task_runtime.merge.flat_presets import kwargs_for_dataclass  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.merge.utils import kwargs_for_dataclass  # pyright: ignore[reportMissingImports]
 
 if TYPE_CHECKING:
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
@@ -34,17 +34,17 @@ def _dataclass_from_combined(cls: type[Any], combined: Mapping[str, Any]) -> Any
     return cls(**kw)
 
 
-def _try_handover(flat: Mapping[str, Any]) -> HandoverSyncConfig | None:
-    if flat.get("handover_position") is None:
+def _try_handover(values: Mapping[str, Any]) -> HandoverSyncConfig | None:
+    if values.get("handover_position") is None:
         return None
     try:
-        return _dataclass_from_combined(HandoverSyncConfig, flat)
+        return _dataclass_from_combined(HandoverSyncConfig, values)
     except TypeError:
         return None
 
 
-def _try_carry(flat: Mapping[str, Any]) -> BimanualCarryTaskConfig | None:
-    kw = kwargs_for_dataclass(BimanualCarryTaskConfig, flat)
+def _try_carry(values: Mapping[str, Any]) -> BimanualCarryTaskConfig | None:
+    kw = kwargs_for_dataclass(BimanualCarryTaskConfig, values)
     if "object_dual_arm_half_span_y" not in kw:
         return None
     try:
@@ -59,27 +59,27 @@ def _xyz3_tuple(v: Any) -> tuple[float, float, float]:
     return (float(v[0]), float(v[1]), float(v[2]))
 
 
-def _place_flat_looks_like_simple(flat: Mapping[str, Any]) -> bool:
+def _place_values_looks_like_simple(values: Mapping[str, Any]) -> bool:
     """仅 ``place_object_prim_path`` + ``place_offset``、无 ``place_half_span_y`` 的简化放置。"""
-    po = flat.get("place_object_prim_path")
+    po = values.get("place_object_prim_path")
     if po is None or (isinstance(po, str) and not po.strip()):
         return False
-    return "place_offset" in flat and "place_half_span_y" not in flat
+    return "place_offset" in values and "place_half_span_y" not in values
 
 
 def _try_place(
-    flat: Mapping[str, Any],
+    values: Mapping[str, Any],
     carry: BimanualCarryTaskConfig | None,
 ) -> BimanualPlaceTaskConfig | None:
     """完整 ``place_*`` 或简化 ``place_object_prim_path`` + ``place_offset``（几何从 carry 复用）。"""
     names = {f.name for f in fields(BimanualPlaceTaskConfig)}
-    po = flat.get("place_object_prim_path")
+    po = values.get("place_object_prim_path")
     if po is None or (isinstance(po, str) and not str(po).strip()):
         return None
 
     # 完整几何：含 place_half_span_y
-    if "place_half_span_y" in flat:
-        kw = kwargs_for_dataclass(BimanualPlaceTaskConfig, flat)
+    if "place_half_span_y" in values:
+        kw = kwargs_for_dataclass(BimanualPlaceTaskConfig, values)
         if "place_half_span_y" not in kw:
             return None
         kw.pop("place_offset", None)
@@ -89,13 +89,13 @@ def _try_place(
             return None
 
     # 简化：place_offset + 同任务中的 carry
-    if not _place_flat_looks_like_simple(flat):
+    if not _place_values_looks_like_simple(values):
         return None
     if carry is None:
         return None
 
     try:
-        off = _xyz3_tuple(flat["place_offset"])
+        off = _xyz3_tuple(values["place_offset"])
     except TypeError as e:
         raise ValueError(
             "dual_arm.place 简化形式需要 place_offset 为长度 3 的数值列表 [x,y,z]（米，物体系）。"
@@ -112,7 +112,7 @@ def _try_place(
         "place_approach_clearance_y": carry.arm_merge_distance_y,
         "place_xyz": off,
     }
-    for k, v in flat.items():
+    for k, v in values.items():
         if k in ("place_object_prim_path", "place_offset"):
             continue
         if k in names:
@@ -125,13 +125,13 @@ def _try_place(
 
 
 def _resolve_place_config(
-    place_flat: Mapping[str, Any] | None,
+    place_values: Mapping[str, Any] | None,
     carry: BimanualCarryTaskConfig | None,
 ) -> BimanualPlaceTaskConfig | None:
-    if not place_flat:
+    if not place_values:
         return None
-    cfg = _try_place(place_flat, carry=carry)
-    if cfg is None and _place_flat_looks_like_simple(place_flat) and carry is None:
+    cfg = _try_place(place_values, carry=carry)
+    if cfg is None and _place_values_looks_like_simple(place_values) and carry is None:
         raise ValueError(
             "dual_arm.place 简化形式（place_object_prim_path + place_offset）需要同一任务中配置 "
             "dual_arm.carry，以便复用双臂姿态、半宽、预接近与抬升/后撤等几何。"
@@ -139,12 +139,12 @@ def _resolve_place_config(
     return cfg
 
 
-def _try_drawer(flat: Mapping[str, Any]) -> Any | None:
-    if not flat.get("source_object_path_drawer"):
+def _try_drawer(values: Mapping[str, Any]) -> Any | None:
+    if not values.get("source_object_path_drawer"):
         return None
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 
-    return DrawerGeometryConfig(**kwargs_for_dataclass(DrawerGeometryConfig, flat))
+    return DrawerGeometryConfig(**kwargs_for_dataclass(DrawerGeometryConfig, values))
 
 
 @dataclass(frozen=True)
@@ -156,12 +156,12 @@ class MergedQueueConfig:
     place: BimanualPlaceTaskConfig | None = None
     handover: HandoverSyncConfig | None = None
     drawer: DrawerGeometryConfig | None = None
-    # 可选：任务 YAML（如 base_task_overrides / 场景扁平字段）覆盖 robot_config 的 Isaac base prim 路径
+    # 可选：任务 YAML（如 base_task_overrides / 场景 root 覆盖）覆盖 robot_config 的 Isaac base prim 路径
     base_link_entity_path: str | None = None
 
 
-def _optional_base_link_entity_path(merged_flat: Mapping[str, Any]) -> str | None:
-    raw = merged_flat.get("base_link_entity_path")
+def _optional_base_link_entity_path(overrides: Mapping[str, Any]) -> str | None:
+    raw = overrides.get("base_link_entity_path")
     if raw is None:
         return None
     if not isinstance(raw, str):
@@ -170,79 +170,97 @@ def _optional_base_link_entity_path(merged_flat: Mapping[str, Any]) -> str | Non
     return s or None
 
 
-def merge_pick_place_skill_overlay(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """single_arm.pick / single_arm.place 叠入同一 dict 时的 arm 规则（与 CLI 原 merge 一致）。"""
-    pick_sd = dict(overlay.get("single_arm.pick") or {})
-    place_sd = dict(overlay.get("single_arm.place") or {})
-    if "arm" in pick_sd and "arm" in place_sd:
-        place_sd = {k: v for k, v in place_sd.items() if k != "arm"}
-    return {**base, **pick_sd, **place_sd}
+def _queue_root_overrides(raw: Mapping[str, object] | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    return {
+        k: v
+        for k, v in dict(raw).items()
+        if k not in {"pick", "place", "handover", "carry", "drawer", "skill_params"}
+    }
 
 
-def _merged_optional_task_fields_flat(cfg: MergedQueueConfig) -> dict[str, Any]:
-    """carry / place / handover / drawer / base_link，不含 single_arm（用于与 scene 合并后做 _try_*）。"""
-    out: dict[str, Any] = {}
-    if cfg.base_link_entity_path is not None:
-        out["base_link_entity_path"] = cfg.base_link_entity_path
-    if cfg.carry is not None:
-        for f in fields(BimanualCarryTaskConfig):
-            out[f.name] = getattr(cfg.carry, f.name)
-    if cfg.place is not None:
-        for f in fields(BimanualPlaceTaskConfig):
-            out[f.name] = getattr(cfg.place, f.name)
-    if cfg.handover is not None:
-        for f in fields(HandoverSyncConfig):
-            out[f.name] = getattr(cfg.handover, f.name)
-    if cfg.drawer is not None:
-        from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
-
-        for f in fields(DrawerGeometryConfig):
-            out[f.name] = getattr(cfg.drawer, f.name)
-    return out
-
-
-def merge_scene_preset_into_merged_queue(
-    base: MergedQueueConfig,
-    preset_raw: Mapping[str, object],
+def build_merged_queue_config(
+    *,
+    base_task_overrides: Mapping[str, Any],
+    skill_defaults: Mapping[str, Any] | None = None,
+    scene_preset: Mapping[str, object] | None = None,
+    base_runtime: MergedQueueConfig | None = None,
 ) -> MergedQueueConfig:
-    """录制管线：在已有 runtime 上叠加场景 preset，单臂用 overlay，避免与 carry 等混用 to_flat/from_flat 往返。"""
-    from robot_action_composer.task_config_io import flatten_queue_task_overrides  # pyright: ignore[reportMissingImports]
+    """Build runtime config from structured overlays."""
+    root_base = dict(base_task_overrides or {})
+    root_scene = _queue_root_overrides(scene_preset)
+    sd = dict(skill_defaults or {})
+    scene_sp = dict((scene_preset or {}).get("skill_params") or {})
 
-    scene_flat = flatten_queue_task_overrides(preset_raw)
-    scene_sp = dict(preset_raw.get("skill_params") or {})
-
-    single = overlay_queue_single_arm_from_params(base.single_arm, scene_flat)
+    if base_runtime is None:
+        single = QueueSingleArmSlice.from_overrides(root_base)
+        single = overlay_single_arm_pick_place(
+            single,
+            dict(sd.get("single_arm.pick") or {}),
+            dict(sd.get("single_arm.place") or {}),
+        )
+    else:
+        single = base_runtime.single_arm
+    single = overlay_queue_single_arm_from_params(single, root_scene)
     single = overlay_single_arm_pick_place(
         single,
         dict(scene_sp.get("single_arm.pick") or {}),
         dict(scene_sp.get("single_arm.place") or {}),
     )
 
-    merged_flat = {**_merged_optional_task_fields_flat(base), **scene_flat}
-    merged_flat = merge_pick_place_skill_overlay(
-        merged_flat,
-        {
-            "single_arm.pick": dict(scene_sp.get("single_arm.pick") or {}),
-            "single_arm.place": dict(scene_sp.get("single_arm.place") or {}),
-        },
-    )
-    merged_flat = {**merged_flat, **dict(scene_sp.get("dual_arm.handover") or {})}
-    merged_flat = {**merged_flat, **dict(scene_sp.get("dual_arm.carry") or {})}
-    merged_flat = {**merged_flat, **dict(scene_sp.get("single_arm.drawer") or {})}
-
-    base_path = _optional_base_link_entity_path(merged_flat)
-    handover = _try_handover(merged_flat)
-    carry = _try_carry(merged_flat)
-    drawer = _try_drawer(merged_flat)
-    scene_place_sp = dict(scene_sp.get("dual_arm.place") or {})
-    base_place = (
-        {f.name: getattr(base.place, f.name) for f in fields(BimanualPlaceTaskConfig)}
-        if base.place is not None
+    carry_base = (
+        {f.name: getattr(base_runtime.carry, f.name) for f in fields(BimanualCarryTaskConfig)}
+        if base_runtime and base_runtime.carry is not None
         else {}
     )
-    place_flat = {**base_place, **scene_place_sp}
-    place = _resolve_place_config(place_flat, carry=carry)
+    carry_flat = {**carry_base, **root_base, **dict(sd.get("dual_arm.carry") or {}), **root_scene, **dict(scene_sp.get("dual_arm.carry") or {})}
+    carry = _try_carry(carry_flat)
 
+    handover_base = (
+        {f.name: getattr(base_runtime.handover, f.name) for f in fields(HandoverSyncConfig)}
+        if base_runtime and base_runtime.handover is not None
+        else {}
+    )
+    handover_flat = {
+        **handover_base,
+        **root_base,
+        **dict(sd.get("dual_arm.handover") or {}),
+        **root_scene,
+        **dict(scene_sp.get("dual_arm.handover") or {}),
+    }
+    handover = _try_handover(handover_flat)
+
+    drawer_base = {}
+    if base_runtime and base_runtime.drawer is not None:
+        from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
+
+        drawer_base = {f.name: getattr(base_runtime.drawer, f.name) for f in fields(DrawerGeometryConfig)}
+    drawer_flat = {
+        **drawer_base,
+        **root_base,
+        **dict(sd.get("single_arm.drawer") or {}),
+        **root_scene,
+        **dict(scene_sp.get("single_arm.drawer") or {}),
+    }
+    drawer = _try_drawer(drawer_flat)
+
+    place_base = (
+        {f.name: getattr(base_runtime.place, f.name) for f in fields(BimanualPlaceTaskConfig)}
+        if base_runtime and base_runtime.place is not None
+        else {}
+    )
+    place_values = {
+        **place_base,
+        **dict(sd.get("dual_arm.place") or {}),
+        **dict(scene_sp.get("dual_arm.place") or {}),
+    }
+    place = _resolve_place_config(place_values if place_values else None, carry=carry)
+
+    base_link_raw = root_scene.get("base_link_entity_path", root_base.get("base_link_entity_path"))
+    base_path = _optional_base_link_entity_path({"base_link_entity_path": base_link_raw}) if base_link_raw is not None else (
+        base_runtime.base_link_entity_path if base_runtime is not None else None
+    )
     return MergedQueueConfig(
         single_arm=single,
         carry=carry,
@@ -253,28 +271,16 @@ def merge_scene_preset_into_merged_queue(
     )
 
 
-def build_merged_queue_from_flat(
-    merged_flat: Mapping[str, Any],
-    place_flat: Mapping[str, Any] | None = None,
+def merge_scene_preset_into_merged_queue(
+    base: MergedQueueConfig,
+    preset_raw: Mapping[str, object],
 ) -> MergedQueueConfig:
-    """解析队列配置。
-
-    ``merged_flat`` 仅用于通用/单臂/carry/handover/drawer；``place_flat`` 独立解析
-    ``BimanualPlaceTaskConfig``（可直接来自 ``skill_defaults.dual_arm.place`` + 场景覆盖）。
-    """
-    base_path = _optional_base_link_entity_path(merged_flat)
-    single = QueueSingleArmSlice.from_merged_key_dict(merged_flat)
-    handover = _try_handover(merged_flat)
-    carry = _try_carry(merged_flat)
-    drawer = _try_drawer(merged_flat)
-    place = _resolve_place_config(place_flat, carry=carry)
-    return MergedQueueConfig(
-        single_arm=single,
-        carry=carry,
-        place=place,
-        handover=handover,
-        drawer=drawer,
-        base_link_entity_path=base_path,
+    """Overlay scene preset on top of existing runtime."""
+    return build_merged_queue_config(
+        base_task_overrides={},
+        skill_defaults={},
+        scene_preset=preset_raw,
+        base_runtime=base,
     )
 
 

@@ -21,14 +21,14 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
 
 @dataclass(frozen=True)
 class BimanualCarryTaskConfig:
-    """双臂对称搬运几何（扁平 YAML / ``dual_arm.carry`` 合并到 ``MergedQueueConfig.carry``）。"""
+    """双臂对称搬运几何（由结构化 ``dual_arm.carry`` 叠层得到）。"""
 
     object_prim_path: str
     # 沿 motion 输出系 **Y**（通常为 arm_base Y）单侧半宽（米），与 object_position_offset[1] 相加后左右对称展开
     object_dual_arm_half_span_y: float
     left_base_orientation: tuple[float, float, float, float]
     right_base_orientation: tuple[float, float, float, float]
-    # 可选：与 ``dual_arm.bimanual_align`` / ``dual_arm.bimanual_align_mid_y`` 的 ``orientation_delta_rpy`` 相同语义——
+    # 可选：与 ``dual_arm.bimanual_align`` 的 ``orientation_delta_rpy`` 相同语义——
     # ``[roll, pitch, yaw]`` 弧度，左乘 q_delta * q_ee，左右臂共用同一增量（在 ``carry_*_orientation`` 所在系，通常即 motion 系）
     orientation_delta_rpy: tuple[float, float, float] | None = None
     # 预闭合前：在**末端工具系**下相对 Forward 远点的平移（与 ``ee_lift_offset`` 的 tool 语义一致）；不写 / 全 0 则省略 Approach

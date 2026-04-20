@@ -9,7 +9,7 @@
 **robot_action_composer** 在 monorepo 中承担：
 
 - **运动层**：把任务几何与机器人约束变成 **`StageTarget` 序列**，并通过 **`ROS2RobotInterface`** 执行（笛卡尔 / 双臂同步 / MoveJ 等）。
-- **编排层**：用 **`task_queue`**（YAML 中的块列表）+ **技能注册表** + **运行时上下文**，把多段运动按顺序（或并行块）跑通；合并 **`skill_defaults` / `skill_params`** 与扁平 preset。
+- **编排层**：用 **`task_queue`**（YAML 中的块列表）+ **技能注册表** + **运行时上下文**，把多段运动按顺序（或并行块）跑通；按结构化叠层合并 **`skill_defaults` / `skill_params`**。
 - **周边**：Isaac Sim 实体位姿、仿真 reset、与 **LeRobot 录制**（可选 extra）的衔接。
 
 **不**在本包内实现：底层 OCS2 / MPC、Nav2 服务器本体；本包通过已有 ROS 2 接口与仿真服务交互。
@@ -120,14 +120,14 @@ flowchart TB
 ### 4.4 配置
 
 - **`config/single_arm.py`**：**`QueueSingleArmSlice`**（`common` / `pick` / `place`）及块参数 overlay。
-- **`config/merged.py`**：**`MergedQueueConfig`**：从扁平 dict 解析 **单臂切片 + 可选 `carry` / `handover`（`HandoverSyncConfig`）/ `drawer`**；**`drawer` 相关类型在 `_try_drawer` 内延迟 import**，避免与 `motion_generation.tasks.drawer` 循环依赖。
-- **`merge/`**：`flatten` 与 **`skill_defaults` / `skill_params`** 叠层（pick/place、handover、carry、drawer）、**`block_params.merge_task_queue_skill_params`**（按块合并最终 `params`）。
+- **`config/merged.py`**：**`MergedQueueConfig`**：从结构化配置（`base_task_overrides` + `skill_defaults` + `scene_presets.skill_params`）构建 **单臂切片 + 可选 `carry` / `handover`（`HandoverSyncConfig`）/ `drawer`**；**`drawer` 相关类型在 `_try_drawer` 内延迟 import**，避免与 `motion_generation.tasks.drawer` 循环依赖。
+- **`merge/`**：结构化叠层与块级参数注入：**`block_params.merge_task_queue_skill_params`**（按块合并最终 `params`）。
 
 ---
 
 ## 5. 配置与任务发现（YAML / 机器人目录）
 
-- **`task_config_io.py`**：扫描 **`task_configs/*.yaml`**，**`flatten_queue_task_overrides`**（禁止根键 `pick`/`place`/`handover`/`carry`/`drawer` 嵌套等规则）。
+- **`task_config_io.py`**：扫描 **`task_configs/*.yaml`**，并提取 **`queue_root_overrides`**（禁止根键 `pick`/`place`/`handover`/`carry`/`drawer` 嵌套等规则）。
 - **`discovery/registry_loader.py`**：对传入根目录下的 **`robots/*/robot_config.py`** + **`task_configs/`** 做发现，供 CLI / inference 使用。
 
 详细约定见 **[TASK_CONFIG_YAML.md](TASK_CONFIG_YAML.md)**、**[SKILLS_REFERENCE.md](SKILLS_REFERENCE.md)**、**[ROBOT_CONFIG.md](ROBOT_CONFIG.md)**。
@@ -140,7 +140,7 @@ flowchart TB
 |------|------|
 | **`isaac_sim/`** | 仿真 reset、实体位姿服务、`SimTimeHelper` 等 |
 | **`ros_interface_utils.py`** | 从机器人配置构造 **`ROS2RobotInterface`**、handler 辅助 |
-| **`cli/motion_main.py` / `record_main.py`** | IsaacSim 运动与录制入口（合并 flat → `build_merged_queue_from_flat` → `run_task_queue` 或录制管线） |
+| **`cli/motion_main.py` / `record_main.py`** | IsaacSim 运动与录制入口（结构化叠层构建 `MergedQueueConfig` → `run_task_queue` 或录制管线） |
 | **`dataset_recording/`** | `[recording]` extra：构建 **`ROS2Robot`**、episode 写入；运动中仍走 **`robot.ros2_interface`** |
 
 ---
