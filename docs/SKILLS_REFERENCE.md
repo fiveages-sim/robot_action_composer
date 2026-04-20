@@ -39,6 +39,12 @@
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **备注**：`object_prim_path` 必填。
 
+
+
+https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
+
+
+
 ### `single_arm.place`
 
 - **效果**：执行单臂放置序列；若配置关闭可跳过。
