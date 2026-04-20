@@ -137,6 +137,13 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
 - **效果**：一次执行完整搬运序列（接近/闭合/抬升/后撤）。
 - **参数**：无块级专用参数（读取 `dual_arm.carry` 配置）。
 
+
+
+Uploading dual arm carry.mp4…
+
+
+
+
 ### 2.2 双臂同时抓取（parallel_pick）
 
 > 该技能从当前块 `params` 解析 `BimanualParallelPickTaskConfig`。  
@@ -168,6 +175,12 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
 - **效果**：一次执行完整双臂同时抓取序列（两侧各走一条 `build_single_arm_pick_sequence`，再按阶段同步合成）。
 - **参数**：读取 `left_pick` / `right_pick`（见上方字段列表）。
 - **备注**：执行完成后会将 `gripper_for_return_home` 置为闭合值（与单臂 pick 行为一致）。
+
+
+
+https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
+
+
 
 ### 2.3 放置（place）
 
