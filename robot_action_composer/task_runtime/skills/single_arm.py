@@ -130,6 +130,43 @@ def _scratch_pose_entry_to_geometry_pose(entry: Mapping[str, Any]) -> Pose:
     return pose
 
 
+def _resolve_object_target_pose_from_pick_like_params(
+    *,
+    ctx: QueueRuntimeContext,
+    object_prim_path: str,
+    object_position_offset: tuple[float, float, float],
+    motion_frame_id: Any,
+    tf_lookup_timeout: Any,
+    label: str,
+) -> tuple[Pose, str]:
+    """Resolve object pose (+ local offset) into execution frame, mirroring ``single_arm.pick``."""
+    exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
+    target = get_object_pose_from_service(
+        ctx.base_world_pos,
+        ctx.base_world_quat,
+        object_prim_path,
+        include_orientation=True,
+    )
+    if exec_f != ctx.frame_id:
+        iface = ctx.interface
+        if not hasattr(iface, "transform_pose"):
+            raise TypeError(f"{label}: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)")
+        transformed = iface.transform_pose(
+            target,
+            str(ctx.frame_id),
+            exec_f,
+            timeout=_pick_tf_timeout(tf_lookup_timeout),
+        )
+        if transformed is None:
+            raise RuntimeError(
+                f"{label}: TF {ctx.frame_id!r} -> {exec_f!r} failed for object pose; "
+                "check motion_frame_id and TF."
+            )
+        target = transformed
+    target = apply_object_local_offset_to_pose(target, object_position_offset)
+    return target, exec_f
+
+
 def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
     if not isinstance(ctx.task_cfg, QueueSingleArmSlice):
         raise TypeError(f"single_arm.pick expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}")
@@ -159,30 +196,14 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     if not path:
         raise ValueError("object_prim_path is required for skill single_arm.pick")
     _apply_arm_movel_duration(ctx, duration=arm_movel_duration, label="single_arm.pick")
-    exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
-    target = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        path,
-        include_orientation=True,
+    target, exec_f = _resolve_object_target_pose_from_pick_like_params(
+        ctx=ctx,
+        object_prim_path=path,
+        object_position_offset=object_position_offset,
+        motion_frame_id=motion_frame_id,
+        tf_lookup_timeout=tf_lookup_timeout,
+        label="single_arm.pick",
     )
-    if exec_f != ctx.frame_id:
-        iface = ctx.interface
-        if not hasattr(iface, "transform_pose"):
-            raise TypeError("single_arm.pick: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)")
-        transformed = iface.transform_pose(
-            target,
-            str(ctx.frame_id),
-            exec_f,
-            timeout=_pick_tf_timeout(tf_lookup_timeout),
-        )
-        if transformed is None:
-            raise RuntimeError(
-                f"single_arm.pick: TF {ctx.frame_id!r} -> {exec_f!r} failed for object pose; "
-                "check motion_frame_id and TF."
-            )
-        target = transformed
-    target = apply_object_local_offset_to_pose(target, object_position_offset)
     arm_seq = build_single_arm_pick_sequence(
         target_pose=target,
         ee_base_orientation=ee_base_orientation,
@@ -203,6 +224,48 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
         warn_prefix="TaskQ pick timeout",
+    )
+
+
+def skill_pregrasp(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
+    """Move one arm to an object-relative Cartesian target pose (no grasp sequence)."""
+    if not isinstance(ctx.task_cfg, QueueSingleArmSlice):
+        raise TypeError(f"single_arm.pregrasp expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}")
+    qt = overlay_queue_single_arm_pick_from_params(ctx.task_cfg, params)
+    arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
+    pk = qt.pick
+    if not pk.object_prim_path:
+        raise ValueError("object_prim_path is required for skill single_arm.pregrasp")
+
+    _apply_arm_movel_duration(ctx, duration=pk.arm_movel_duration, label="single_arm.pregrasp")
+    target, exec_f = _resolve_object_target_pose_from_pick_like_params(
+        ctx=ctx,
+        object_prim_path=pk.object_prim_path,
+        object_position_offset=pk.object_position_offset,
+        motion_frame_id=pk.motion_frame_id,
+        tf_lookup_timeout=pk.tf_lookup_timeout,
+        label="single_arm.pregrasp",
+    )
+
+    # Pregrasp target orientation is explicitly driven by pick-like ee_base_orientation.
+    target.orientation.x = float(pk.ee_base_orientation[0])
+    target.orientation.y = float(pk.ee_base_orientation[1])
+    target.orientation.z = float(pk.ee_base_orientation[2])
+    target.orientation.w = float(pk.ee_base_orientation[3])
+
+    grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
+    stage_name = str(params.get("stage_name", "TaskQ-Pregrasp"))
+    arm_seq = build_single_arm_return_home_sequence(
+        home_pose=target,
+        gripper=grip_v,
+        stage_name=stage_name,
+    )
+    stages = assign_to_arm(arm_seq, arm_side)
+    ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
+    return stages, ExecutionMeta(
+        send_mode=_stamped_mode(ctx),
+        frame_id=exec_f,
+        warn_prefix="TaskQ pregrasp timeout",
     )
 
 
@@ -432,6 +495,7 @@ def skill_send_cartesian_goal(
 
 def register_single_arm_skills() -> None:
     register_skill("single_arm.pick", skill_pick)
+    register_skill("single_arm.pregrasp", skill_pregrasp)
     register_skill("single_arm.place", skill_place)
     register_skill("single_arm.goto_cache_pose", skill_goto_cache_pose)
     register_skill("single_arm.send_cartesian_goal", skill_send_cartesian_goal)

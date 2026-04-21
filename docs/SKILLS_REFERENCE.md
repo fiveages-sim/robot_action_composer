@@ -62,7 +62,24 @@
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **备注**：`object_prim_path` 必填。
 
-### 1.3 放置（`single_arm.place`）
+### 1.3 预抓取到位（`single_arm.pregrasp`）
+
+- **效果**：基于物体位姿 + 物体系偏移，生成单个笛卡尔目标并移动到位（不执行夹爪抓取序列）。
+- **参数**（与 `single_arm.pick` 同源，推荐沿用其默认层）：
+  - **目标物体配置**
+    - `object_prim_path`：目标物体 Prim 路径（必填）。
+    - `object_position_offset`：相对物体中心的偏移（物体局部坐标系；按物体当前姿态旋转后叠加）。
+  - **运动系配置**
+    - `ee_base_orientation`：目标末端姿态四元数 `xyzw`（直接作为到位姿态）。
+    - `motion_frame_id`：目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
+    - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
+  - **执行控制**
+    - `arm`：`left|right`（不写则沿用 `common.arm` / `single_arm.pick.arm` 叠层）。
+    - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
+    - `gripper`：可选；默认保持当前 `gripper_for_return_home`。
+    - `stage_name`：可选；默认 `TaskQ-Pregrasp`。
+
+### 1.4 放置（`single_arm.place`）
 
 - **效果**：执行单臂放置序列（在 `task_queue` 中出现即执行）；既支持放置到固定坐标（`place_position`），也支持基于参考物体坐标动态计算放置目标（`object_prim_path` + `object_position_offset`）。
 - **参数**（来自 `single_arm.place` 切片）：
@@ -87,7 +104,7 @@
   - 未设置 `ee_base_orientation` 时，默认继承 `single_arm.pick.ee_base_orientation`；
   - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick.ee_pick_axis`（默认 `+z`）。
 
-### 1.4 回程缓存末端（`single_arm.goto_cache_pose`）
+### 1.5 回程缓存末端（`single_arm.goto_cache_pose`）
 
 - **效果**：回到 `robot.cache_ee_pose` 记录的缓存末端位姿。
 - **参数**：
@@ -101,7 +118,7 @@
   - 单臂缓存可直接用；
   - 双臂缓存必须指定 `side` 或依赖 `common.arm` 推断。
 
-### 1.5 抽屉（`single_arm.drawer.*`）
+### 1.6 抽屉（`single_arm.drawer.*`）
 
 
 - **配置**：抽屉几何字段写在 **`single_arm.drawer`**，与 **`pull_open`** / **`close_push`** 共用。
@@ -116,12 +133,12 @@
     - `pull_distance`：拉开末段沿拉手拉出方向的行程（米）。
     - `ee_retreat_offset`：松爪后工具系平移；非零时：`pull_open` 在拉开 Cartesian 末尾追加松爪与撤出段，`close_push` 在到位 **`place_pose_ref`**（夹爪仍闭合）后再松爪并撤出。省略或全 0 则无上述撤出段。
 
-#### 1.5.1 拉开抽屉（`single_arm.drawer.pull_open`）
+#### 1.6.1 拉开抽屉（`single_arm.drawer.pull_open`）
 
 - **效果**：按几何生成拉开序列；写入 **`ctx.drawer`**，更新 **`ctx.task_cfg.place`** 放置提示；不改 **`ctx.task_cfg.pick`**。
 - **备注**：需有效 `object_prim_path` 与 `object_position_offset`；臂别由 **`common.arm`** 决定。
 
-#### 1.5.2 关上抽屉（`single_arm.drawer.close_push`）
+#### 1.6.2 关上抽屉（`single_arm.drawer.close_push`）
 
 - **效果**：须队列中已有 **`pull_open`**。粗定位 → 关抽屉 Cartesian → 闭合到位 **`place_pose_ref`** → 按 **`ee_retreat_offset`** 配置松爪并撤出。
 - **备注**：必须排在 **`pull_open`** 之后。
