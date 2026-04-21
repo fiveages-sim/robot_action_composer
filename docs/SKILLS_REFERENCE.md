@@ -33,7 +33,8 @@
     - `prepare_offset`：预接近偏移（工具系向量，语义与 `dual_arm.carry.carry_prepare_offset` 一致）。
     - `ee_lift_offset`：抓取后抬升位移（工具系向量；会按 `ee_base_orientation` 旋转后用于抬升段）。
     - `ee_retreat_offset`：抬升后后撤位移（工具系向量；会按 `ee_base_orientation` 旋转后用于后撤段）。
-    - `ee_pick_axis`：抓取轴向（末端坐标系；使用 `+x/-x/+y/-y/+z/-z`，默认 `+z`）。
+    - `ee_pick_axis`：末端抓取轴向字符串（与 `ee_place_axis` 对称）；`+x/-x/+y/-y/+z/-z`，默认 `+z`。
+    - `ee_pick_direction_vector`：抓取后撤等所用的方向单位向量 `[x,y,z]`（可选；非空时覆盖 `ee_pick_axis`）。
   - **执行控制**
     - `arm`：`left|right`。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
@@ -52,7 +53,7 @@
     - `motion_frame_id`：放置目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
   - **末端系配置**
-    - `ee_place_axis`：放置轴向（末端坐标系；使用 `+x/-x/+y/-y/+z/-z`，不设置时继承 `ee_pick_axis`）。
+    - `ee_place_axis`：放置轴向（末端坐标系；使用 `+x/-x/+y/-y/+z/-z`，不设置时继承 `single_arm.pick.ee_pick_axis`）。
     - `place_insert_clearance`：放置闭合段偏移（工具系标量，沿 `ee_place_axis`）。
     - `prepare_offset`：放置预接近偏移（工具系三维向量 `[x,y,z]`；按 `ee_base_orientation` 旋转后叠加到放置目标）。
     - `ee_retreat_offset`：松爪后回撤偏移（工具系向量；按 `ee_base_orientation` 旋转后执行）。
@@ -62,7 +63,7 @@
 - **备注**：
   - 放置位置必须可解析；
   - 未设置 `ee_base_orientation` 时，默认继承 `single_arm.pick.ee_base_orientation`；
-  - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick` 的 `ee_pick_axis` 配置（其默认值为 `+z`）。
+  - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick.ee_pick_axis`（默认 `+z`）。
 
 ### 1.3 回程缓存末端（`single_arm.goto_cache_pose`）
 
@@ -89,7 +90,7 @@
   - **几何**
     - `drawer_clearance`：沿末端 **+Z** 的闭合段偏移（米）。
     - `prepare_offset`：预接近（工具系）；全 0 / 省略则无 Approach 段。
-    - `pull_distance`：拉开末段沿 grasp 方向的行程（米）。
+    - `pull_distance`：拉开末段沿拉手拉出方向的行程（米）。
     - `ee_retreat_offset`：松爪后工具系平移；非零时：`pull_open` 在拉开 Cartesian 末尾追加松爪与撤出段，`close_push` 在到位 **`place_pose_ref`**（夹爪仍闭合）后再松爪并撤出。省略或全 0 则无上述撤出段。
 
 #### 1.4.1 拉开抽屉（`single_arm.drawer.pull_open`）
@@ -152,12 +153,11 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
 > 该技能从当前块 `params` 解析 `BimanualParallelPickTaskConfig`。  
 > 必须提供 `left_pick` 与 `right_pick` 两个映射。
 
-`left_pick` / `right_pick` 字段与 `single_arm.pick` 切片语义一致（每侧一套），并额外支持仿真 reset 用随机化字段：
+`left_pick` / `right_pick` 字段与 `single_arm.pick` 切片语义一致（每侧一套）：
 
 - **目标物体配置**
   - `object_prim_path`：该侧抓取目标物体 Prim 路径（必填）。
   - `object_position_offset`：相对物体中心的抓取偏移（物体局部坐标系；与 `single_arm.pick` 相同）。
-  - `object_xyz_random_offset`：该侧物体在 reset 后的随机位置扰动（不参与笛卡尔序列，仅 `runner` 随机化用）。
 
 - **运动系配置**
   - `motion_frame_id`：该侧物体位姿解析后的输出坐标系（可选；不写则沿用任务 `frame_id`）。**左右两侧解析后必须相同**，否则双臂同步下发无法共用一个坐标系。
@@ -168,7 +168,7 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
   - `pick_clearance`：闭合抓取阶段偏移（工具系，沿末端局部 +Z 解释，与 `build_single_arm_pick_sequence` 一致）。
   - `prepare_offset`：预接近偏移（工具系三维向量；全 0 或省略时可省略预接近段）。
   - `ee_lift_offset` / `ee_retreat_offset`：抬升与后撤（工具系向量；会分别按该侧 `ee_base_orientation` 旋转到世界系后写入序列，与 `single_arm.pick` 一致）。
-  - `grasp_direction` / `grasp_direction_vector`：抓取方向（轴向字符串或显式单位向量；与单臂 pick 相同）。
+  - `ee_pick_axis` / `ee_pick_direction_vector`：与单臂 `QueueSlicePick` 相同（轴向或显式单位向量）。
 
 - **执行控制**
   - `arm_movel_duration`：可选；优先取 `left_pick`，否则取 `right_pick`，写入 `arm_controller.movel_duration`。
@@ -222,17 +222,26 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `arm_movel_duration`（`float`）：覆盖笛卡尔段 movel 时长。
     - `stage_name`（`str`）：阶段名。
 
-### 2.5 交接与回程
+### 2.5 双臂交接物体
 
-#### `dual_arm.handover_sync`
+#### `dual_arm.handover`
 
-- **效果**：执行双臂同步交接段。
+- **效果**：执行双臂同步交接段（两臂同步到交接位 -> 接收侧闭合 -> 给出侧松开）。
 - **参数**（来自 `skill_defaults.dual_arm.handover` / 场景覆盖）：
-  - `handover_position`（`[x,y,z]`）：交接基准位置（米）。
-  - `source_handover_orientation`（`[x,y,z,w]`）：给出物体一侧末端的交接姿态四元数。
-  - `receiver_handover_orientation`（`[x,y,z,w]`）：接收侧末端的交接姿态四元数。
-  - `receiver_handover_offset`（`[x,y,z]`，可选）：仅作用于接收侧位姿的位置补偿（默认 `[0,0,0]`）。
-- **备注**：抓取侧由 `common.arm` 决定（`right` 则右臂为 source，反之左臂为 source）。
+  - **运动系目标配置**
+    - `handover_position`（`[x,y,z]`）：交接基准位置（米，`motion_frame_id` 坐标系）。
+    - `left_handover_orientation` / `right_handover_orientation`（`[x,y,z,w]`）：左右臂在交接点的末端姿态四元数（xyzw）。
+  - **接收侧补偿配置**
+    - `receiver_handover_offset`（`[x,y,z]`，默认 `[0,0,0]`）：仅加到**接收臂**目标位；用于微调两手接触间隙（例如避免提前碰撞、补偿夹爪厚度/模型偏差）。
+  - **执行控制**
+    - `motion_frame_id`（`str`，可选）：交接目标输出坐标系；不写则沿用任务 `frame_id`。
+    - `tf_lookup_timeout`（`float`，可选）：`motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
+    - `arm_movel_duration`（`float`，可选）：执行前写入 `arm_controller.movel_duration`。
+- **备注**：
+  - 给出侧 / 接收侧无需单独配置：由 `single_arm.pick.arm`（合并后与 `common.arm` 一致）自动推导；抓取臂为给出侧，另一臂为接收侧。
+  - 交接段仅负责“交换物体”，不包含后续放置；通常后接 `single_arm.place` 或 `dual_arm.goto_cache_pose`。
+
+### 2.6 回程
 
 #### `dual_arm.goto_cache_pose`
 

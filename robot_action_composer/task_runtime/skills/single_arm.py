@@ -141,8 +141,8 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     prepare_offset = pk.prepare_offset
     pick_clearance = pk.pick_clearance
     ee_base_orientation = pk.ee_base_orientation
-    grasp_direction = pk.grasp_direction
-    grasp_direction_vector = pk.grasp_direction_vector
+    ee_pick_axis = pk.ee_pick_axis
+    ee_pick_direction_vector = pk.ee_pick_direction_vector
     motion_frame_id = pk.motion_frame_id
     tf_lookup_timeout = pk.tf_lookup_timeout
     arm_movel_duration = pk.arm_movel_duration
@@ -188,8 +188,8 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         ee_base_orientation=ee_base_orientation,
         prepare_offset=prepare_offset,
         pick_clearance=pick_clearance,
-        grasp_direction=grasp_direction,
-        grasp_direction_vector=grasp_direction_vector,
+        ee_pick_axis=ee_pick_axis,
+        ee_pick_direction_vector=ee_pick_direction_vector,
         retreat_offset=retreat_offset,
         retreat_xyz=retreat_xyz,
         gripper_open=ctx.gripper_open,
@@ -262,7 +262,7 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
     arm_seq = build_single_arm_place_sequence(
         place_position=pl2.place_position,
         place_orientation=pl2.ee_base_orientation,
-        place_axis=(pl2.ee_place_axis if pl2.ee_place_axis is not None else qt.pick.grasp_direction),
+        place_axis=(pl2.ee_place_axis if pl2.ee_place_axis is not None else qt.pick.ee_pick_axis),
         prepare_offset=pl2.prepare_offset,
         place_insert_clearance=pl2.place_insert_clearance,
         ee_retreat_offset=pl2.ee_retreat_offset,

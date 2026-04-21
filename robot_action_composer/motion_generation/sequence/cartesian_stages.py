@@ -156,7 +156,7 @@ PLACE_RELATIVE_SUFFIXES: tuple[str, ...] = (
     "RetreatOpen",
 )
 
-_GRASP_DIRECTION_TO_VEC: dict[str, DirectionVec] = {
+_AXIS_LABEL_TO_UNIT_VEC: dict[str, DirectionVec] = {
     "+x": (1.0, 0.0, 0.0),
     "-x": (-1.0, 0.0, 0.0),
     "+y": (0.0, 1.0, 0.0),
@@ -279,29 +279,29 @@ def _stages_with_output_frame_id(
     return [replace(s, frame_id=fid) for s in stages]
 
 
-def _resolve_grasp_direction_vec(
+def _resolve_axis_direction_unit_vec(
     *,
-    grasp_direction: str,
-    grasp_direction_vector: DirectionVec | None,
+    axis_label: str,
+    explicit_direction_vector: DirectionVec | None,
 ) -> DirectionVec:
-    if grasp_direction_vector is not None:
+    if explicit_direction_vector is not None:
         vx, vy, vz = (
-            float(grasp_direction_vector[0]),
-            float(grasp_direction_vector[1]),
-            float(grasp_direction_vector[2]),
+            float(explicit_direction_vector[0]),
+            float(explicit_direction_vector[1]),
+            float(explicit_direction_vector[2]),
         )
     else:
-        key = grasp_direction.lower()
-        if key not in _GRASP_DIRECTION_TO_VEC:
+        key = axis_label.lower()
+        if key not in _AXIS_LABEL_TO_UNIT_VEC:
             raise ValueError(
-                f"Unsupported grasp_direction: {grasp_direction}. "
-                f"Expected one of: {', '.join(sorted(_GRASP_DIRECTION_TO_VEC))}"
+                f"Unsupported axis label: {axis_label}. "
+                f"Expected one of: {', '.join(sorted(_AXIS_LABEL_TO_UNIT_VEC))}"
             )
-        vx, vy, vz = _GRASP_DIRECTION_TO_VEC[key]
+        vx, vy, vz = _AXIS_LABEL_TO_UNIT_VEC[key]
 
     norm = math.sqrt(vx * vx + vy * vy + vz * vz)
     if norm < 1e-8:
-        raise ValueError("grasp_direction_vector norm is too small")
+        raise ValueError("explicit_direction_vector norm is too small")
     return (vx / norm, vy / norm, vz / norm)
 
 
@@ -351,8 +351,8 @@ def build_single_arm_pick_sequence(
     ee_base_orientation: tuple[float, float, float, float],
     prepare_offset: tuple[float, float, float] | None = None,
     pick_clearance: float = 0.01,
-    grasp_direction: str = "+z",
-    grasp_direction_vector: DirectionVec | None = None,
+    ee_pick_axis: str = "+z",
+    ee_pick_direction_vector: DirectionVec | None = None,
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     retreat_direction_extra: float = 0.0,
     retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
@@ -361,9 +361,9 @@ def build_single_arm_pick_sequence(
     gripper_closed: float,
     stage_prefix: str = "Pickup",
 ) -> list[ArmStage]:
-    direction_vec = _resolve_grasp_direction_vec(
-        grasp_direction=grasp_direction,
-        grasp_direction_vector=grasp_direction_vector,
+    direction_vec = _resolve_axis_direction_unit_vec(
+        axis_label=ee_pick_axis,
+        explicit_direction_vector=ee_pick_direction_vector,
     )
     # pick_clearance 采用工具系语义：沿 ee_base_orientation 的局部 +Z 偏移到 close-in。
     cdx, cdy, cdz = rotate_vector_by_quat((0.0, 0.0, pick_clearance), ee_base_orientation)
@@ -475,9 +475,9 @@ def build_single_arm_place_sequence(
     When approach and insert poses coincide (e.g. both clearances ``0``), the explicit approach
     stage is omitted (3 stages: Place / Release / PostReleaseRetreat).
     """
-    local_axis = _resolve_grasp_direction_vec(
-        grasp_direction=place_axis,
-        grasp_direction_vector=None,
+    local_axis = _resolve_axis_direction_unit_vec(
+        axis_label=place_axis,
+        explicit_direction_vector=None,
     )
     target_pose = _make_pose(place_position, place_orientation)
     local_insert = (

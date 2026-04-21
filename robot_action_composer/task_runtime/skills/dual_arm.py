@@ -269,7 +269,7 @@ def _require_handover_sync(ctx: QueueRuntimeContext):
     h = ctx.handover_sync
     if h is None:
         raise TypeError(
-            "dual_arm.handover_sync requires handover_sync (merged from skill_defaults.dual_arm.handover; "
+            "dual_arm.handover requires handover_sync (merged from skill_defaults.dual_arm.handover; "
             "need handover_position + orientations). Pick side arm comes from common.arm / single_arm.pick."
         )
     return h
@@ -674,8 +674,13 @@ def skill_goto_cache_pose(
 def skill_handover_sync(
     ctx: QueueRuntimeContext, _params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
-    """双臂同步交接（``build_handover_sequence``）；抓取 / 放置由 ``single_arm.pick`` / ``place`` 承担。"""
+    """双臂同步交接（``build_handover_sequence``）；抓取 / 放置由 ``single_arm.pick`` / ``place`` 承担。
+
+    交接「给出」侧由 **抓取臂** 决定：与 ``single_arm.pick.arm`` 一致（合并进 ``QueueSingleArmSlice.common.arm``），
+    另一侧为接收臂；无需在 ``dual_arm.handover`` 里单独配置 source/receiver。
+    """
     hcfg = _require_handover_sync(ctx)
+    # 与 pick 块合并后的臂别（来自 single_arm.pick.arm）
     arm = ctx.task_cfg.common.arm.strip().lower()
     if arm not in ("left", "right"):
         raise ValueError(f"common.arm must be 'left' or 'right' for handover pick side, got {arm!r}")
@@ -700,7 +705,7 @@ def register_dual_arm_skills() -> None:
     register_skill("dual_arm.parallel_pick", skill_parallel_pick)
     register_skill("dual_arm.bimanual_align", skill_bimanual_align)
     register_skill("dual_arm.place", skill_place)
-    register_skill("dual_arm.handover_sync", skill_handover_sync)
+    register_skill("dual_arm.handover", skill_handover_sync)
     register_skill("dual_arm.goto_cache_pose", skill_goto_cache_pose)
 
 

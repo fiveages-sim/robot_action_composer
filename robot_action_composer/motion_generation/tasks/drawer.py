@@ -38,7 +38,7 @@ class DrawerGeometryConfig:
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     #: 拉手闭合段沿工具系 +Z 的位移（米），语义同 ``pick_clearance``；写入 ``skill_defaults.single_arm.drawer``。
     drawer_clearance: float = 0.01
-    #: 拉开抽屉时沿 grasp 方向末段行程（米），语义同 pick 的 ``retreat_direction_extra``；在 ``skill_defaults.single_arm.drawer`` 中配置。
+    #: 拉开抽屉时沿拉手拉出方向末段行程（米），语义同 pick 的 ``retreat_direction_extra``；在 ``skill_defaults.single_arm.drawer`` 中配置。
     pull_distance: float = 0.18
     #: 拉手预接近（工具系 ``[x,y,z]``，语义与 ``single_arm.pick.prepare_offset`` 相同，但**仅**用于 ``pull_open`` / ``close_push``）。省略或 ``None`` 时不生成预接近段（**不**读取 ``pick.prepare_offset``）。
     prepare_offset: tuple[float, float, float] | None = None
@@ -60,7 +60,7 @@ def format_drawer_task_cfg_summary(scene: str, drawer: DrawerGeometryConfig, sin
     return (
         f"[Drawer] scene={scene} object={p.object_prim_path} "
         f"object_prim_path={drawer.object_prim_path} | "
-        f"arm={c.arm}, grasp_dir={p.grasp_direction}, pull_distance={drawer.pull_distance}"
+        f"arm={c.arm}, ee_pick_axis={p.ee_pick_axis}, pull_distance={drawer.pull_distance}"
     )
 
 
@@ -129,7 +129,7 @@ def build_single_arm_pull_drawer_sequence(
     gripper_open: float,
     gripper_closed: float,
     ee_base_orientation: tuple[float, float, float, float],
-    grasp_direction_vector: tuple[float, float, float],
+    pull_direction_xyz: tuple[float, float, float],
     pull_distance: float,
 ) -> list[StageTarget]:
     prep = _effective_drawer_prepare_offset(drawer)
@@ -141,7 +141,7 @@ def build_single_arm_pull_drawer_sequence(
             ee_base_orientation=ee_base_orientation,
             prepare_offset=prep,
             pick_clearance=drawer.drawer_clearance,
-            grasp_direction_vector=grasp_direction_vector,
+            ee_pick_direction_vector=pull_direction_xyz,
             object_position_offset=(0.0, 0.0, 0.0),
             retreat_direction_extra=pull_distance,
             retreat_offset=(0.0, 0.0, 0.0),
@@ -169,7 +169,7 @@ def build_single_arm_close_drawer_sequence(
     gripper_open: float,
     gripper_closed: float,
     ee_base_orientation: tuple[float, float, float, float],
-    grasp_direction_vector: tuple[float, float, float],
+    pull_direction_xyz: tuple[float, float, float],
 ) -> list[StageTarget]:
     prep = _effective_drawer_prepare_offset(drawer)
     # 同上：``target_pose`` 已含 Prim 局部 ``object_position_offset`` 的旋转叠加。
@@ -179,7 +179,7 @@ def build_single_arm_close_drawer_sequence(
             ee_base_orientation=ee_base_orientation,
             prepare_offset=prep,
             pick_clearance=drawer.drawer_clearance,
-            grasp_direction_vector=grasp_direction_vector,
+            ee_pick_direction_vector=pull_direction_xyz,
             object_position_offset=(0.0, 0.0, 0.0),
             retreat_direction_extra=0,
             retreat_offset=(0.0, 0.0, 0.0),
