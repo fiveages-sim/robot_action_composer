@@ -79,7 +79,32 @@
   - 单臂缓存可直接用；
   - 双臂缓存必须指定 `side` 或依赖 `common.arm` 推断。
 
-### 1.4 抽屉（`single_arm.drawer.*`）
+### 1.4 发送笛卡尔目标（`single_arm.send_cartesian_goal`）
+
+- **效果**：将末端运动到指定笛卡尔位姿（单段 MoveL），可指定参考帧与工作臂。适合需要手动给定绝对坐标的场景，无 pick/place 的抓握与放置逻辑。
+- **参数**：
+  - **必填**
+    - `arm`：工作臂，`left` 或 `right`。
+    - `position`：目标位置，`[x, y, z]`（米）。
+    - `orientation`：目标姿态四元数，`[x, y, z, w]`。
+  - **可选**
+    - `frame_id`：位姿所在参考帧，默认 `ctx.frame_id`（通常为 `arm_base`）。
+    - `gripper`：目标夹爪值；**默认保持上一步结束时的夹爪状态**（`ctx.gripper_for_return_home`）。
+    - `stage_name`：阶段名，默认 `TaskQ-SendCartesianGoal`。
+- **YAML 示例**：
+  ```yaml
+  - skill: single_arm.send_cartesian_goal
+    params:
+      arm: right
+      frame_id: arm_base
+      position: [0.45, -0.15, 0.50]
+      orientation: [-0.7, 0.7, 0.0, 0.0]
+  ```
+- **备注**：
+  - 不依赖 Isaac Sim 物体 Prim，纯坐标驱动，适合固定目标点的运动。
+  - 若机器人基座会移动（导航场景），`frame_id` 建议用随基座变换的帧（如 `arm_base`）而非世界系 `map`。
+
+### 1.5 抽屉（`single_arm.drawer.*`）
 
 - **配置**：抽屉几何字段写在 **`single_arm.drawer`**，与 **`pull_open`** / **`close_push`** 共用。
 - **队列**：开关抽屉在 **`task_queue` 里是两条技能**（`single_arm.drawer.pull_open` 与 `single_arm.drawer.close_push`），中间通常插入抓取、放置等其他块。
