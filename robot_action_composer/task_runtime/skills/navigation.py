@@ -182,8 +182,7 @@ def skill_navigate_to_object(
     完成后自动刷新 ``ctx.base_world_pos/quat``。
 
     params:
-        object_prim_path (str): Isaac Sim 物体的 Prim 路径（世界坐标查询用）。
-            若未指定，则从 ``ctx.task_cfg.object_prim_path`` 读取。
+        object_prim_path (str): Isaac Sim 物体的 Prim 路径（世界坐标查询用，必填）。
         approach_offset_x (float, 可选): 导航目标相对物体世界 X 的偏移（米），默认 -0.20。
             负值表示机器人在物体 -X 方向（从 X 前方接近）。
         approach_offset_y (float, 可选): 导航目标相对物体世界 Y 的偏移（米），默认 0.0。
@@ -192,16 +191,9 @@ def skill_navigate_to_object(
         timeout (float, 可选): 最大等待时间（秒），默认 60.0。
         poll_period (float, 可选): 轮询间隔（秒），默认 0.1。
     """
-    object_path = str(
-        params.get("object_prim_path")
-        or getattr(ctx.task_cfg, "object_prim_path", None)
-        or ""
-    )
+    object_path = str(params.get("object_prim_path") or "")
     if not object_path:
-        raise ValueError(
-            "nav.navigate_to_object requires 'object_prim_path' param "
-            "or ctx.task_cfg.object_prim_path"
-        )
+        raise ValueError("nav.navigate_to_object requires 'object_prim_path' param")
 
     offset_x = float(params.get("approach_offset_x", -0.20))
     offset_y = float(params.get("approach_offset_y", 0.0))
@@ -241,28 +233,40 @@ def skill_navigate_to_object(
     return [], _default_meta(ctx)
 
 
-def skill_navigate_backup(
+def skill_navigate_relative(
     ctx: _NavContext, params: Mapping[str, Any]
 ) -> tuple[list[Any], ExecutionMeta]:
-    """沿基座 **base_link +X 反方向** 在水平面内平移 ``distance_m``，朝向与当前一致。
+    """按基座当前朝向做水平面内相对位移。
 
-    使用 Isaac 查询的基座世界位姿；后退目标为 ``pos - distance * normalize(forward_xy)``，
-    ``forward`` 为将 body +X 旋到世界系后的水平投影。
+    使用 Isaac 查询的基座世界位姿；以当前前向 ``forward``（body +X 投影到世界 XY）、
+    左向 ``left``（``(-forward_y, forward_x)``）构造目标：
+
+    ``goal = pos + dx * forward + dy * left``，``goal_yaw = current_yaw + dyaw``。
 
     params:
-        distance_m (float, 可选): 后退距离（米），默认 ``0.5``。
+        relative_position (list[float], 必填): 三元相对位移 ``[dx, dy, dyaw]``。
+            - ``dx``: 沿当前前向(+) / 后向(-)位移（米）
+            - ``dy``: 沿当前左向(+) / 右向(-)位移（米）
+            - ``dyaw``: 在当前偏航基础上叠加旋转（弧度）
         frame_id (str, 可选): Nav2 目标帧，默认 ``map``。
         timeout (float, 可选): 默认 ``60.0``。
         poll_period (float, 可选): 默认 ``0.1``。
     """
-    distance_m = float(params.get("distance_m", 0.5))
+    rel = params.get("relative_position", None)
+    if not isinstance(rel, (list, tuple)) or len(rel) != 3:
+        raise ValueError(
+            "nav.navigate_relative requires params.relative_position=[dx, dy, dyaw] (len=3)"
+        )
+    relative_x = float(rel[0])
+    relative_y = float(rel[1])
+    relative_yaw = float(rel[2])
     frame_id = str(params.get("frame_id", "map"))
     timeout = float(params.get("timeout", 60.0))
     poll_period = float(params.get("poll_period", 0.1))
 
     base_path = getattr(ctx, "base_link_entity_path", None) or ""
     if not base_path:
-        raise ValueError("nav.navigate_backup requires a resolved base_link_entity_path on context")
+        raise ValueError("nav.navigate_relative requires a resolved base_link_entity_path on context")
 
     (bx, by, _bz), quat = get_entity_pose_world_service(base_path)
     fx, fy, _fz = _quat_rotate_vector_xyzw(quat, (1.0, 0.0, 0.0))
@@ -271,17 +275,19 @@ def skill_navigate_backup(
         fx, fy = 1.0, 0.0
         horiz = 1.0
     fx, fy = fx / horiz, fy / horiz
-    gx = bx - distance_m * fx
-    gy = by - distance_m * fy
-    yaw = math.atan2(fy, fx)
+    lx, ly = -fy, fx
+    gx = bx + relative_x * fx + relative_y * lx
+    gy = by + relative_x * fy + relative_y * ly
+    current_yaw = math.atan2(fy, fx)
+    yaw = current_yaw + relative_yaw
 
     sim_time = getattr(ctx, "sim_time", None)
     time_now_fn = sim_time.now_seconds if sim_time is not None else None
     sleep_fn = sim_time.sleep if sim_time is not None else None
 
     print(
-        f"[Nav] Backup {distance_m:.2f} m from ({bx:.3f},{by:.3f}) "
-        f"→ ({gx:.3f},{gy:.3f}) yaw={yaw:.3f}"
+        f"[Nav] Relative move (dx={relative_x:.3f}, dy={relative_y:.3f}, dyaw={relative_yaw:.3f}) "
+        f"from ({bx:.3f},{by:.3f}) → ({gx:.3f},{gy:.3f}) yaw={yaw:.3f}"
     )
     success = ctx.interface.navigate_to_pose(
         gx,
@@ -295,9 +301,11 @@ def skill_navigate_backup(
     )
     if not success:
         raise RuntimeError(
-            f"nav.navigate_backup failed (target=({gx:.3f}, {gy:.3f}), distance_m={distance_m})"
+            "nav.navigate_relative failed "
+            f"(target=({gx:.3f}, {gy:.3f}), relative_x={relative_x}, relative_y={relative_y}, "
+            f"relative_yaw={relative_yaw})"
         )
-    print("[Nav] Backup complete — refreshing base world pose")
+    print("[Nav] Relative move complete — refreshing base world pose")
     _refresh_base_pose(ctx)
     return [], _default_meta(ctx)
 
@@ -307,7 +315,7 @@ def _register_navigation_skills() -> None:
     register_skill("nav.wait_nav_arrived", skill_wait_nav_arrived)
     register_skill("nav.navigate_to_pose", skill_navigate_to_pose)
     register_skill("nav.navigate_to_object", skill_navigate_to_object)
-    register_skill("nav.navigate_backup", skill_navigate_backup)
+    register_skill("nav.navigate_relative", skill_navigate_relative)
 
 
 _register_navigation_skills()
