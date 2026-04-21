@@ -359,8 +359,8 @@ def skill_send_cartesian_goal(
 
     params:
         arm (str): ``left`` 或 ``right``，必填。
-        position (dict): 目标位置，``{x, y, z}``（米），必填。
-        orientation (dict): 目标姿态四元数，``{x, y, z, w}``，必填。
+        position (dict | list): 目标位置，``{x, y, z}`` 或 ``[x, y, z]``（米），必填。
+        orientation (dict | list): 目标姿态四元数，``{x, y, z, w}`` 或 ``[x, y, z, w]``，必填。
         frame_id (str, 可选): 位姿所在的参考帧，默认 ``ctx.frame_id``（通常为 ``arm_base``）。
         gripper (float, 可选): 目标夹爪开合值，默认 ``ctx.gripper_for_return_home``（上一步结束时的夹爪状态）。
         stage_name (str, 可选): 阶段名称，默认 ``TaskQ-SendCartesianGoal``。
@@ -373,19 +373,35 @@ def skill_send_cartesian_goal(
 
     pos_raw = params.get("position")
     ori_raw = params.get("orientation")
-    if not isinstance(pos_raw, Mapping) or not isinstance(ori_raw, Mapping):
+    pose = Pose()
+    if isinstance(pos_raw, Mapping):
+        pose.position.x = float(pos_raw["x"])
+        pose.position.y = float(pos_raw["y"])
+        pose.position.z = float(pos_raw["z"])
+    elif isinstance(pos_raw, (list, tuple)) and len(pos_raw) == 3:
+        pose.position.x = float(pos_raw[0])
+        pose.position.y = float(pos_raw[1])
+        pose.position.z = float(pos_raw[2])
+    else:
         raise ValueError(
-            "single_arm.send_cartesian_goal: 'position' and 'orientation' must be dicts with x/y/z(/w)"
+            "single_arm.send_cartesian_goal: 'position' must be {x,y,z} or [x,y,z]"
         )
 
-    pose = Pose()
-    pose.position.x = float(pos_raw["x"])
-    pose.position.y = float(pos_raw["y"])
-    pose.position.z = float(pos_raw["z"])
-    pose.orientation.x = float(ori_raw["x"])
-    pose.orientation.y = float(ori_raw["y"])
-    pose.orientation.z = float(ori_raw["z"])
-    pose.orientation.w = float(ori_raw["w"])
+    if isinstance(ori_raw, Mapping):
+        pose.orientation.x = float(ori_raw["x"])
+        pose.orientation.y = float(ori_raw["y"])
+        pose.orientation.z = float(ori_raw["z"])
+        pose.orientation.w = float(ori_raw["w"])
+    elif isinstance(ori_raw, (list, tuple)) and len(ori_raw) == 4:
+        # Quaternion list order is [x, y, z, w].
+        pose.orientation.x = float(ori_raw[0])
+        pose.orientation.y = float(ori_raw[1])
+        pose.orientation.z = float(ori_raw[2])
+        pose.orientation.w = float(ori_raw[3])
+    else:
+        raise ValueError(
+            "single_arm.send_cartesian_goal: 'orientation' must be {x,y,z,w} or [x,y,z,w]"
+        )
 
     grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
     stage_name = str(params.get("stage_name", "TaskQ-SendCartesianGoal"))
