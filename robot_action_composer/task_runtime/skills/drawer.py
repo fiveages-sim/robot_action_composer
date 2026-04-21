@@ -2,16 +2,18 @@
 
 ``pull_open`` 计算把手参考系、执行拉开序列，并改写 ``ctx.task_cfg.place`` 的苹果中间放置提示。
 拉开末段距离由 :class:`~robot_action_composer.motion_generation.tasks.drawer.DrawerGeometryConfig`
-的 ``pull_distance``（``skill_defaults.single_arm.drawer``）决定；块级 ``params.pull_distance`` 可单次覆盖。
+的 ``pull_distance``（``single_arm.drawer``）决定。
+拉开序列末尾若配置了非零 ``single_arm.drawer.ee_retreat_offset``，会追加与 ``place`` 同构的松爪 + 撤出段。
 阶段状态在 ``ctx.drawer``（:class:`DrawerPhaseState`）；几何配置在 ``ctx.drawer_geometry``。
 """
 
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
+
+from geometry_msgs.msg import Pose  # pyright: ignore[reportMissingImports]
 
 from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
     pose_from_tuple,
@@ -37,7 +39,6 @@ from robot_action_composer.motion_generation.tasks.drawer import (  # pyright: i
 )
 from robot_action_composer.task_runtime.config.single_arm import (  # pyright: ignore[reportMissingImports]
     QueueSingleArmSlice,
-    overlay_queue_single_arm_from_params,
 )
 from robot_action_composer.task_runtime.context import (
     DrawerPhaseState,
@@ -58,7 +59,7 @@ def _require_drawer_geometry(ctx: QueueRuntimeContext) -> DrawerGeometryConfig:
     if d is None:
         raise TypeError(
             "single_arm.drawer.* skills require drawer_geometry "
-            "(set source_object_path_drawer and drawer fields in task YAML overlays)"
+            "(set single_arm.drawer.object_prim_path and drawer fields in task YAML overlays)"
         )
     return d
 
@@ -85,6 +86,72 @@ def _primary_arm_handler(ctx: QueueRuntimeContext) -> Any:
     )
 
 
+def _pose_shift_world(pose: Pose, delta_world: tuple[float, float, float]) -> Pose:
+    dx, dy, dz = delta_world
+    out = Pose()
+    out.orientation = pose.orientation
+    out.position.x = float(pose.position.x) + dx
+    out.position.y = float(pose.position.y) + dy
+    out.position.z = float(pose.position.z) + dz
+    return out
+
+
+def _close_push_release_and_tool_retreat(
+    ctx: QueueRuntimeContext,
+    *,
+    dcfg: DrawerGeometryConfig,
+    sequence: list[StageTarget],
+    arm_side: ArmSide,
+    handler: Any,
+    grasp_ori: tuple[float, float, float, float],
+) -> None:
+    """在关抽屉笛卡尔段与（可选）拉手参考到位之后执行：松爪 + ``single_arm.drawer.ee_retreat_offset`` 工具系撤出。"""
+    rt = dcfg.ee_retreat_offset
+    if rt is None or not any(abs(float(x)) > 1e-12 for x in rt):
+        return
+    rcfg = ctx.robot_cfg
+    gh = (
+        ctx.interface.right_gripper_handler
+        if queue_pick_arm_is_right(ctx)
+        else ctx.interface.left_gripper_handler
+    )
+    if gh:
+        gh.send_target_command(int(ctx.gripper_open))
+    ctx.sim_time.sleep(rcfg.gripper_action_wait)
+
+    world_d = _rotate_vector_by_quat(rt, grasp_ori)
+    last = sequence[-1]
+    arm_t = last.right if arm_side == ArmSide.RIGHT else last.left
+    if arm_t is None:
+        return
+    retreat_pose = _pose_shift_world(arm_t.pose, world_d)
+    if _stamped_mode(ctx) == SendMode.STAMPED:
+        handler.send_target_stamped(ctx.frame_id, retreat_pose)
+    else:
+        handler.send_target(retreat_pose)
+    _wait_pick_arm_arrive(ctx)
+
+
+def _wait_pick_arm_arrive(ctx: QueueRuntimeContext) -> None:
+    """与 :func:`execute_stage_sequence` 一致：粗定位下发后必须等到位再跑后续段（否则会先收到 Grasp）。"""
+    rcfg = ctx.robot_cfg
+    tc = ctx.task_cfg
+    pose_tol_pos = pose_tol_ori = None
+    if hasattr(tc, "common"):
+        pose_tol_pos = getattr(tc.common, "pose_tol_pos", None)
+        pose_tol_ori = getattr(tc.common, "pose_tol_ori", None)
+    part = "right_arm" if queue_pick_arm_is_right(ctx) else "left_arm"
+    ctx.interface.wait_until_arrive(
+        part=part,
+        timeout=rcfg.arrival_timeout,
+        poll_period=rcfg.arrival_poll,
+        time_now_fn=ctx.sim_time.now_seconds,
+        sleep_fn=ctx.sim_time.sleep,
+        arm_pose_threshold=pose_tol_pos,
+        arm_orient_threshold=pose_tol_ori,
+    )
+
+
 def _require_drawer_phase(ctx: QueueRuntimeContext) -> DrawerPhaseState:
     d = ctx.drawer
     if d is None:
@@ -93,12 +160,12 @@ def _require_drawer_phase(ctx: QueueRuntimeContext) -> DrawerPhaseState:
 
 
 def skill_drawer_pull_open(
-    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     dcfg = _require_drawer_geometry(ctx)
-    path_drawer = dcfg.source_object_path_drawer
+    path_drawer = dcfg.object_prim_path
     if not path_drawer:
-        raise ValueError("source_object_path_drawer is required for single_arm.drawer.pull_open")
+        raise ValueError("object_prim_path is required for single_arm.drawer.pull_open (single_arm.drawer)")
 
     source_target_pose_d = get_object_pose_from_service(
         ctx.base_world_pos,
@@ -106,11 +173,9 @@ def skill_drawer_pull_open(
         path_drawer,
         include_orientation=True,
     )
-    hx = (dcfg.handle_extent_max[0] + dcfg.handle_extent_min[0]) / 2 * dcfg.drawer_scale
-    hy = (dcfg.handle_extent_max[1] + dcfg.handle_extent_min[1]) / 2 * dcfg.drawer_scale
-    hz = (dcfg.handle_extent_max[2] + dcfg.handle_extent_min[2]) / 2 * dcfg.drawer_scale
+    # 拉手位：Prim 局部 ``object_position_offset``（通常离线填 (max+min)/2*scale 各轴）旋到世界系再累加
     handle_offset = _rotate_vector_by_quat(
-        (hx, hy, hz),
+        dcfg.object_position_offset,
         (
             float(source_target_pose_d.orientation.x),
             float(source_target_pose_d.orientation.y),
@@ -147,22 +212,17 @@ def skill_drawer_pull_open(
         place_pose_ref=place_pose_ref,
         ee_base_orientation_xyzw=grasp_ori_drawer,
         grasp_direction_vector=dir_drawer,
-        handle_offset_rotated=handle_offset,
     )
 
     tc = ctx.task_cfg
     if not isinstance(tc, QueueSingleArmSlice):
         raise TypeError(f"drawer pull_open expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
-    # 块级 params（如 pull_distance）只作用于本次拉抽屉，不写回 ctx.task_cfg，避免影响后续 pick
-    tc_pull = overlay_queue_single_arm_from_params(tc, params)
-
-    pull_dist = float(params.get("pull_distance", dcfg.pull_distance))
+    pull_dist = float(dcfg.pull_distance)
 
     gripper_open = ctx.gripper_open
     gripper_closed = ctx.gripper_closed
     sequence = build_single_arm_pull_drawer_sequence(
         target_pose=source_target_pose_d,
-        pick=tc_pull.pick,
         drawer=dcfg,
         arm_side=_pick_arm_side(ctx),
         gripper_open=gripper_open,
@@ -204,11 +264,10 @@ def skill_drawer_close_push(
     if not isinstance(tc, QueueSingleArmSlice):
         raise TypeError(f"drawer close_push expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
 
-    path_drawer = dcfg.source_object_path_drawer
+    path_drawer = dcfg.object_prim_path
     place_pose_ref = drw.place_pose_ref
     grasp_ori = drw.ee_base_orientation_xyzw
     dir_vec = drw.grasp_direction_vector
-    handle_off = drw.handle_offset_rotated
 
     source_target_pose_d = get_object_pose_from_service(
         ctx.base_world_pos,
@@ -219,35 +278,51 @@ def skill_drawer_close_push(
     grasp_ori = quat_multiply(grasp_ori, (0, -0.2164396, 0, 0.976296))
     drw.ee_base_orientation_xyzw = grasp_ori
 
+    handle_off = _rotate_vector_by_quat(
+        dcfg.object_position_offset,
+        (
+            float(source_target_pose_d.orientation.x),
+            float(source_target_pose_d.orientation.y),
+            float(source_target_pose_d.orientation.z),
+            float(source_target_pose_d.orientation.w),
+        ),
+    )
     _apply_target_pose_offset(source_target_pose_d, handle_off)
     handler = _primary_arm_handler(ctx)
     if handler is None:
         raise RuntimeError("No arm handler for drawer close staging move")
-    staging_pose = pose_from_tuple(
-        (
-            float(source_target_pose_d.position.x),
-            float(source_target_pose_d.position.y),
-            float(source_target_pose_d.position.z),
-        ),
-        grasp_ori,
-    )
-    handler.send_target_stamped("base_link", staging_pose)
-    time.sleep(3)
 
+    arm_side = _pick_arm_side(ctx)
     sequence = build_single_arm_close_drawer_sequence(
         target_pose=source_target_pose_d,
-        pick=tc.pick,
         drawer=dcfg,
-        arm_side=_pick_arm_side(ctx),
+        arm_side=arm_side,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
         ee_base_orientation=grasp_ori,
         grasp_direction_vector=dir_vec,
     )
+    if not sequence:
+        raise RuntimeError("close_push: empty close-drawer cartesian sequence")
+    st0 = sequence[0]
+    arm0 = st0.right if arm_side == ArmSide.RIGHT else st0.left
+    if arm0 is None:
+        raise RuntimeError("close_push: first stage has no target for the pick arm")
+    # 粗定位必须与笛卡尔首段一致；帧名需与序列执行一致，否则到位判定与后续段错位。
+    # 无 prepare 时 sequence[1:] 首段为 Grasp：若此处仅用 sleep、未到 Close-in 就会先闭合夹爪。
+    staging_frame = ctx.frame_id
+    if _stamped_mode(ctx) == SendMode.STAMPED:
+        handler.send_target_stamped(staging_frame, arm0.pose)
+    else:
+        handler.send_target(arm0.pose)
+    _wait_pick_arm_arrive(ctx)
+
     rcfg = ctx.robot_cfg
+    # 与 runner._execute_block 一致：必须传入 common 位姿阈值，否则 wait_until_arrive 用接口默认，
+    # Close-in 易被误判已到位，下一档 Grasp 会过早闭合。
     execute_stage_sequence(
         interface=ctx.interface,
-        sequence=sequence,
+        sequence=sequence[1:],
         send_mode=_stamped_mode(ctx),
         frame_id=ctx.frame_id,
         arrival_timeout=rcfg.arrival_timeout,
@@ -256,10 +331,26 @@ def skill_drawer_close_push(
         sleep_fn=ctx.sim_time.sleep,
         gripper_action_wait=rcfg.gripper_action_wait,
         warn_prefix="TaskQ drawer close sequence timeout",
+        pose_tol_pos=tc.common.pose_tol_pos,
+        pose_tol_ori=tc.common.pose_tol_ori,
     )
 
-    handler.send_target_stamped("base_link", pose_from_tuple(place_pose_ref, grasp_ori))
-    time.sleep(3)
+    # 先保持夹爪闭合移到 pull_open 记录的拉手参考位（与推关抽屉同一套 grasp_ori），再松爪 + ee_retreat_offset。
+    # 若先松爪后撤再「合上」，会在抽屉尚未离开拉手区间时显得像「关抽屉前就张开后退」。
+    if _stamped_mode(ctx) == SendMode.STAMPED:
+        handler.send_target_stamped(ctx.frame_id, pose_from_tuple(place_pose_ref, grasp_ori))
+    else:
+        handler.send_target(pose_from_tuple(place_pose_ref, grasp_ori))
+    _wait_pick_arm_arrive(ctx)
+
+    _close_push_release_and_tool_retreat(
+        ctx,
+        dcfg=dcfg,
+        sequence=sequence,
+        arm_side=arm_side,
+        handler=handler,
+        grasp_ori=grasp_ori,
+    )
 
     return [], ExecutionMeta(
         send_mode=_stamped_mode(ctx),

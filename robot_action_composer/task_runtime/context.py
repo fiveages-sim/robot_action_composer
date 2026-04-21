@@ -21,7 +21,6 @@ class DrawerPhaseState:
     place_pose_ref: tuple[float, float, float]
     ee_base_orientation_xyzw: tuple[float, float, float, float]
     grasp_direction_vector: tuple[float, float, float]
-    handle_offset_rotated: tuple[float, float, float]
 
 
 @dataclass

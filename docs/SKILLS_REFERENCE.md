@@ -17,7 +17,7 @@
 
 ## 1. 单臂技能（`single_arm.*`）
 
-### `single_arm.pick`
+### 1.1 抓取（`single_arm.pick`）
 
 - **效果**：执行单臂抓取序列（approach / close-in / grasp / retreat）。
 - **参数**（来自 `single_arm.pick` 切片）：
@@ -39,13 +39,7 @@
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **备注**：`object_prim_path` 必填。
 
-
-
-https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
-
-
-
-### `single_arm.place`
+### 1.2 放置（`single_arm.place`）
 
 - **效果**：执行单臂放置序列（在 `task_queue` 中出现即执行）；既支持放置到固定坐标（`place_position`），也支持基于参考物体坐标动态计算放置目标（`object_prim_path` + `object_position_offset`）。
 - **参数**（来自 `single_arm.place` 切片）：
@@ -70,7 +64,7 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
   - 未设置 `ee_base_orientation` 时，默认继承 `single_arm.pick.ee_base_orientation`；
   - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick` 的 `ee_pick_axis` 配置（其默认值为 `+z`）。
 
-### `single_arm.goto_cache_pose`
+### 1.3 回程缓存末端（`single_arm.goto_cache_pose`）
 
 - **效果**：回到 `robot.cache_ee_pose` 记录的缓存末端位姿。
 - **参数**：
@@ -84,23 +78,29 @@ https://github.com/user-attachments/assets/a45e8fd0-e159-4366-9336-c43e42dd0db8
   - 单臂缓存可直接用；
   - 双臂缓存必须指定 `side` 或依赖 `common.arm` 推断。
 
-### 1.1 抽屉操作（`single_arm.drawer.*`）
+### 1.4 抽屉（`single_arm.drawer.*`）
 
-#### `single_arm.drawer.pull_open`
-
-- **效果**：按抽屉几何与把手方向执行拉开序列；写入抽屉阶段状态，并刷新后续 place 提示位。
+- **配置**：抽屉几何字段写在 **`single_arm.drawer`**，与 **`pull_open`** / **`close_push`** 共用。
+- **队列**：开关抽屉在 **`task_queue` 里是两条技能**（`single_arm.drawer.pull_open` 与 `single_arm.drawer.close_push`），中间通常插入抓取、放置等其他块。
 - **参数**：
-  - **抽屉配置**
-    - `pull_distance`：本块覆盖拉开距离（默认取 `single_arm.drawer.pull_distance`）。
-  - **抓取复用参数**
-    - 可透传 `single_arm.pick` 相关参数用于本次拉开。
-- **备注**：依赖 `drawer_geometry`（例如 `source_object_path_drawer`、handle extent 等）。
+  - **Prim / 拉手**
+    - `object_prim_path`：抽屉分层 Prim（必填）。
+    - `object_position_offset`：拉手参考点在抽屉 Prim 局部系下的 `[x,y,z]`（米）。
+  - **几何**
+    - `drawer_clearance`：沿末端 **+Z** 的闭合段偏移（米）。
+    - `prepare_offset`：预接近（工具系）；全 0 / 省略则无 Approach 段。
+    - `pull_distance`：拉开末段沿 grasp 方向的行程（米）。
+    - `ee_retreat_offset`：松爪后工具系平移；非零时：`pull_open` 在拉开 Cartesian 末尾追加松爪与撤出段，`close_push` 在到位 **`place_pose_ref`**（夹爪仍闭合）后再松爪并撤出。省略或全 0 则无上述撤出段。
 
-#### `single_arm.drawer.close_push`
+#### 1.4.1 拉开抽屉（`single_arm.drawer.pull_open`）
 
-- **效果**：执行关抽屉推回段（含内联 staging / close 执行）。
-- **参数**：当前实现无块级专用参数。
-- **备注**：依赖前序 `pull_open` 写入的抽屉阶段状态。
+- **效果**：按几何生成拉开序列；写入 **`ctx.drawer`**，更新 **`ctx.task_cfg.place`** 放置提示；不改 **`ctx.task_cfg.pick`**。
+- **备注**：需有效 `object_prim_path` 与 `object_position_offset`；臂别由 **`common.arm`** 决定。
+
+#### 1.4.2 关上抽屉（`single_arm.drawer.close_push`）
+
+- **效果**：须队列中已有 **`pull_open`**。粗定位 → 关抽屉 Cartesian → 闭合到位 **`place_pose_ref`** → 按 **`ee_retreat_offset`** 配置松爪并撤出。
+- **备注**：必须排在 **`pull_open`** 之后。
 
 ---
 
@@ -245,7 +245,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
 
 ## 3. 导航技能（`nav.*`）
 
-### `nav.send_nav_goal`
+### 3.1 `nav.send_nav_goal`
 
 - **效果**：非阻塞发送导航目标。
 - **参数**：
@@ -255,7 +255,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `yaw`（`float`，默认 `0.0`）：目标偏航（弧度）。
     - `frame_id`（`str`，默认 `map`）：目标坐标系。
 
-### `nav.wait_nav_arrived`
+### 3.2 `nav.wait_nav_arrived`
 
 - **效果**：阻塞等待当前导航完成，并刷新 `ctx.base_world_pos/quat`。
 - **参数**：
@@ -263,7 +263,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `timeout`（`float`，默认 `60.0`）：最大等待时间（秒）。
     - `poll_period`（`float`，默认 `0.1`）：轮询周期（秒）。
 
-### `nav.navigate_to_pose`
+### 3.3 `nav.navigate_to_pose`
 
 - **效果**：发送并等待导航到固定目标（等价 send + wait）。
 - **参数**：
@@ -276,7 +276,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `timeout`（`float`，默认 `60.0`）：最大等待时间（秒）。
     - `poll_period`（`float`，默认 `0.1`）：轮询周期（秒）。
 
-### `nav.navigate_to_object`
+### 3.4 `nav.navigate_to_object`
 
 - **效果**：先查对象世界坐标，再按偏移导航到对象附近。
 - **参数**：
@@ -291,7 +291,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `timeout`（`float`，默认 `60.0`）：最大等待时间（秒）。
     - `poll_period`（`float`，默认 `0.1`）：轮询周期（秒）。
 
-### `nav.navigate_backup`
+### 3.5 `nav.navigate_backup`
 
 - **效果**：沿基座 +X 反方向后退指定距离。
 - **参数**：
@@ -306,7 +306,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
 
 ## 4. 关节空间技能（`joint.*`）
 
-### `joint.movej_to_config`
+### 4.1 `joint.movej_to_config`
 
 - **效果**：发送关节目标（躯干/左臂/右臂任意组合），等待到位，可选恢复 OCS2。
 - **参数**：
@@ -322,7 +322,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `body_movej_duration`（`float`）：动态设置 body 控制器 `movej_duration`。
 - **备注**：`resume_ocs2=true` 常用于后续紧接笛卡尔技能。
 
-### `joint.goto_cached_joints`
+### 4.2 `joint.goto_cached_joints`
 
 - **效果**：回到 `robot.cache_joint_state` 缓存的关节角。
 - **参数**：
@@ -335,7 +335,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
 
 ## 5. 会话与机器人状态技能（`session.*` / `robot.*`）
 
-### `session.scratch_put`
+### 5.1 `session.scratch_put`
 
 - **效果**：写入会话暂存字典 `ctx.scratch`。
 - **参数**：
@@ -343,14 +343,14 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `key`（`str`，必填）：写入键。
     - `value`（`any`，必填）：写入值。
 
-### `session.scratch_clear`
+### 5.2 `session.scratch_clear`
 
 - **效果**：清空 scratch，或按前缀删除。
 - **参数**：
   - **键值配置**
     - `prefix`（`str`）：前缀删除；为空时清空全部。
 
-### `robot.cache_ee_pose`
+### 5.3 `robot.cache_ee_pose`
 
 - **效果**：缓存末端位姿与夹爪目标，供 `goto_cache_pose` 使用。
 - **参数**：
@@ -364,7 +364,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
   - `which=both` 写入 `{left,right}` 结构；
   - 单臂缓存写入 `{pose,gripper}` 结构。
 
-### `robot.cache_joint_state`
+### 5.4 `robot.cache_joint_state`
 
 - **效果**：缓存当前关节角，供 `joint.goto_cached_joints` 使用。
 - **参数**：
@@ -375,7 +375,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `poll_period`（`float`，默认 `0.05`）：采样轮询周期（秒）。
 - **备注**：写入结构为 `{left,right,body}`（值为列表或 null）。
 
-### `robot.snapshot_state`
+### 5.5 `robot.snapshot_state`
 
 - **效果**：抓取关节状态、末端位姿、body target、fsm 等快照写入 scratch。
 - **参数**：

@@ -140,7 +140,8 @@ def _resolve_place_config(
 
 
 def _try_drawer(values: Mapping[str, Any]) -> Any | None:
-    if not values.get("source_object_path_drawer"):
+    raw = values.get("object_prim_path")
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
         return None
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 

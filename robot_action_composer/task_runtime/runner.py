@@ -18,10 +18,7 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     get_entity_pose_world_service,
     randomize_object_xyz_after_reset,
     reset_simulation_state,
-    set_prim_orientation_local,
 )
-
-from ros2_robot_interface.utils.quat_pose import euler_rpy_to_quat_wxyz  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import (  # pyright: ignore[reportMissingImports]
@@ -230,23 +227,16 @@ def reset_queue_task_environment(
         dcfg = runtime.drawer
         reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
         apple_path = reset_source_path
-        drawer_prim = dcfg.source_object_path_drawer
-        drawer_all = dcfg.source_object_path_drawer_all
-        if not apple_path or not drawer_prim or not drawer_all:
+        drawer_prim = dcfg.object_prim_path
+        if not apple_path or not drawer_prim:
             raise ValueError(
                 "drawer task queue requires object_prim_path (task_cfg or single_arm.pick params), "
-                "source_object_path_drawer, source_object_path_drawer_all"
+                "and single_arm.drawer.object_prim_path (drawer layer prim)"
             )
         reset_simulation_state(
             apple_path,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
-        )
-        rot_z = random.uniform(-0.1, 0.1)
-        set_prim_orientation_local(drawer_all, euler_rpy_to_quat_wxyz(0, 0, rot_z))
-        randomize_object_xyz_after_reset(
-            drawer_all,
-            xyz_offset=dcfg.object_xyz_random_offset_drawer,
         )
         sim_time.sleep(1)
         return
