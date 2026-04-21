@@ -241,6 +241,12 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
   - 给出侧 / 接收侧无需单独配置：由 `single_arm.pick.arm`（合并后与 `common.arm` 一致）自动推导；抓取臂为给出侧，另一臂为接收侧。
   - 交接段仅负责“交换物体”，不包含后续放置；通常后接 `single_arm.place` 或 `dual_arm.goto_cache_pose`。
 
+
+
+https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
+
+
+
 ### 2.6 回程
 
 #### `dual_arm.goto_cache_pose`
