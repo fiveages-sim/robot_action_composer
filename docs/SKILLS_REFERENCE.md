@@ -17,7 +17,29 @@
 
 ## 1. 单臂技能（`single_arm.*`）
 
-### 1.1 抓取（`single_arm.pick`）
+### 1.1 发送笛卡尔目标（`single_arm.send_cartesian_goal`）
+
+- **效果**：将末端运动到指定笛卡尔位姿（单段 MoveL），可指定参考帧与工作臂。
+- **参数**：
+  - **执行控制**
+    - `arm`：`left|right`，必填。
+  - **运动系配置**
+    - `position`：目标位置 `[x, y, z]`（米），必填。
+    - `orientation`：目标姿态四元数 `[x, y, z, w]`，必填。
+    - `frame_id`：位姿参考帧，默认 `arm_base`。
+  - **末端系配置**
+    - `gripper`：目标夹爪值，默认保持上一步结束时的状态。
+- **YAML 示例**：
+  ```yaml
+  - skill: single_arm.send_cartesian_goal
+    params:
+      arm: right
+      frame_id: arm_base
+      position: [0.45, -0.15, 0.50]
+      orientation: [-0.7, 0.7, 0.0, 0.0]
+  ```
+
+### 1.2 抓取（`single_arm.pick`）
 
 - **效果**：执行单臂抓取序列（approach / close-in / grasp / retreat）。
 - **参数**（来自 `single_arm.pick` 切片）：
@@ -40,7 +62,7 @@
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **备注**：`object_prim_path` 必填。
 
-### 1.2 放置（`single_arm.place`）
+### 1.3 放置（`single_arm.place`）
 
 - **效果**：执行单臂放置序列（在 `task_queue` 中出现即执行）；既支持放置到固定坐标（`place_position`），也支持基于参考物体坐标动态计算放置目标（`object_prim_path` + `object_position_offset`）。
 - **参数**（来自 `single_arm.place` 切片）：
@@ -65,7 +87,7 @@
   - 未设置 `ee_base_orientation` 时，默认继承 `single_arm.pick.ee_base_orientation`；
   - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick.ee_pick_axis`（默认 `+z`）。
 
-### 1.3 回程缓存末端（`single_arm.goto_cache_pose`）
+### 1.4 回程缓存末端（`single_arm.goto_cache_pose`）
 
 - **效果**：回到 `robot.cache_ee_pose` 记录的缓存末端位姿。
 - **参数**：
@@ -79,32 +101,8 @@
   - 单臂缓存可直接用；
   - 双臂缓存必须指定 `side` 或依赖 `common.arm` 推断。
 
-### 1.4 发送笛卡尔目标（`single_arm.send_cartesian_goal`）
-
-- **效果**：将末端运动到指定笛卡尔位姿（单段 MoveL），可指定参考帧与工作臂。适合需要手动给定绝对坐标的场景，无 pick/place 的抓握与放置逻辑。
-- **参数**：
-  - **必填**
-    - `arm`：工作臂，`left` 或 `right`。
-    - `position`：目标位置，`[x, y, z]`（米）。
-    - `orientation`：目标姿态四元数，`[x, y, z, w]`。
-  - **可选**
-    - `frame_id`：位姿所在参考帧，默认 `ctx.frame_id`（通常为 `arm_base`）。
-    - `gripper`：目标夹爪值；**默认保持上一步结束时的夹爪状态**（`ctx.gripper_for_return_home`）。
-    - `stage_name`：阶段名，默认 `TaskQ-SendCartesianGoal`。
-- **YAML 示例**：
-  ```yaml
-  - skill: single_arm.send_cartesian_goal
-    params:
-      arm: right
-      frame_id: arm_base
-      position: [0.45, -0.15, 0.50]
-      orientation: [-0.7, 0.7, 0.0, 0.0]
-  ```
-- **备注**：
-  - 不依赖 Isaac Sim 物体 Prim，纯坐标驱动，适合固定目标点的运动。
-  - 若机器人基座会移动（导航场景），`frame_id` 建议用随基座变换的帧（如 `arm_base`）而非世界系 `map`。
-
 ### 1.5 抽屉（`single_arm.drawer.*`）
+
 
 - **配置**：抽屉几何字段写在 **`single_arm.drawer`**，与 **`pull_open`** / **`close_push`** 共用。
 - **队列**：开关抽屉在 **`task_queue` 里是两条技能**（`single_arm.drawer.pull_open` 与 `single_arm.drawer.close_push`），中间通常插入抓取、放置等其他块。
@@ -118,12 +116,12 @@
     - `pull_distance`：拉开末段沿拉手拉出方向的行程（米）。
     - `ee_retreat_offset`：松爪后工具系平移；非零时：`pull_open` 在拉开 Cartesian 末尾追加松爪与撤出段，`close_push` 在到位 **`place_pose_ref`**（夹爪仍闭合）后再松爪并撤出。省略或全 0 则无上述撤出段。
 
-#### 1.4.1 拉开抽屉（`single_arm.drawer.pull_open`）
+#### 1.5.1 拉开抽屉（`single_arm.drawer.pull_open`）
 
 - **效果**：按几何生成拉开序列；写入 **`ctx.drawer`**，更新 **`ctx.task_cfg.place`** 放置提示；不改 **`ctx.task_cfg.pick`**。
 - **备注**：需有效 `object_prim_path` 与 `object_position_offset`；臂别由 **`common.arm`** 决定。
 
-#### 1.4.2 关上抽屉（`single_arm.drawer.close_push`）
+#### 1.5.2 关上抽屉（`single_arm.drawer.close_push`）
 
 - **效果**：须队列中已有 **`pull_open`**。粗定位 → 关抽屉 Cartesian → 闭合到位 **`place_pose_ref`** → 按 **`ee_retreat_offset`** 配置松爪并撤出。
 - **备注**：必须排在 **`pull_open`** 之后。
