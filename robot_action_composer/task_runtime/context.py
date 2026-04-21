@@ -20,7 +20,7 @@ class DrawerPhaseState:
 
     place_pose_ref: tuple[float, float, float]
     ee_base_orientation_xyzw: tuple[float, float, float, float]
-    grasp_direction_vector: tuple[float, float, float]
+    pull_direction_xyz: tuple[float, float, float]
 
 
 @dataclass

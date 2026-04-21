@@ -30,18 +30,20 @@ class HandoverSyncConfig:
 
     抓取 / 放置 / 环境重置 / 臂别等由 ``QueueSingleArmSlice`` 与 ``skill_defaults.single_arm.*`` 提供，
     勿在此重复 ``QueueSlicePick`` / ``QueueSlicePlace`` 已有字段。
+    交接点左、右臂姿态由 ``left_handover_orientation`` / ``right_handover_orientation`` 给出；
+    运行时按 **抓取臂**（``single_arm.pick.arm``，即 ``common.arm``）选定给出侧 / 接收侧，无需单独配置 source、receiver。
     """
 
     handover_position: tuple[float, float, float]
-    source_handover_orientation: tuple[float, float, float, float]
-    receiver_handover_orientation: tuple[float, float, float, float]
+    left_handover_orientation: tuple[float, float, float, float]
+    right_handover_orientation: tuple[float, float, float, float]
     receiver_handover_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 def format_handover_sync_summary(scene: str, sync: HandoverSyncConfig) -> str:
     return (
         f"[Handover sync] {scene} pos={sync.handover_position}, "
-        f"src_ori={sync.source_handover_orientation}, rcv_ori={sync.receiver_handover_orientation}, "
+        f"L_ori={sync.left_handover_orientation}, R_ori={sync.right_handover_orientation}, "
         f"rcv_off={sync.receiver_handover_offset}"
     )
 
@@ -56,18 +58,18 @@ def build_handover_sync_sequence(
 ) -> list[StageTarget]:
     """双臂同步交接段（``build_handover_sequence``），不含单臂 pick / place。
 
-    与 ``single_arm.pick`` + ``dual_arm.handover_sync`` + ``single_arm.place`` 组合使用；
+    与 ``single_arm.pick`` + ``dual_arm.handover`` + ``single_arm.place`` 组合使用；
     ``source_is_right`` 须与 ``QueueSliceCommon.arm``（抓取侧）一致。
     """
     source_arm = ArmSide.RIGHT if source_is_right else ArmSide.LEFT
-    source_handover_pose = _pose_from_tuple(
-        sync_cfg.handover_position,
-        sync_cfg.source_handover_orientation,
-    )
-    receiver_handover_pose = _pose_from_tuple(
-        sync_cfg.handover_position,
-        sync_cfg.receiver_handover_orientation,
-    )
+    if source_is_right:
+        src_ori = sync_cfg.right_handover_orientation
+        rcv_ori = sync_cfg.left_handover_orientation
+    else:
+        src_ori = sync_cfg.left_handover_orientation
+        rcv_ori = sync_cfg.right_handover_orientation
+    source_handover_pose = _pose_from_tuple(sync_cfg.handover_position, src_ori)
+    receiver_handover_pose = _pose_from_tuple(sync_cfg.handover_position, rcv_ori)
     rx, ry, rz = sync_cfg.receiver_handover_offset
     receiver_handover_pose.position.x += rx
     receiver_handover_pose.position.y += ry

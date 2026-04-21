@@ -103,7 +103,7 @@ def _close_push_release_and_tool_retreat(
     sequence: list[StageTarget],
     arm_side: ArmSide,
     handler: Any,
-    grasp_ori: tuple[float, float, float, float],
+    ee_base_orientation: tuple[float, float, float, float],
 ) -> None:
     """在关抽屉笛卡尔段与（可选）拉手参考到位之后执行：松爪 + ``single_arm.drawer.ee_retreat_offset`` 工具系撤出。"""
     rt = dcfg.ee_retreat_offset
@@ -119,7 +119,7 @@ def _close_push_release_and_tool_retreat(
         gh.send_target_command(int(ctx.gripper_open))
     ctx.sim_time.sleep(rcfg.gripper_action_wait)
 
-    world_d = _rotate_vector_by_quat(rt, grasp_ori)
+    world_d = _rotate_vector_by_quat(rt, ee_base_orientation)
     last = sequence[-1]
     arm_t = last.right if arm_side == ArmSide.RIGHT else last.left
     if arm_t is None:
@@ -189,7 +189,7 @@ def skill_drawer_pull_open(
         float(source_target_pose_d.position.y),
         float(source_target_pose_d.position.z),
     )
-    grasp_ori_drawer = quat_multiply(
+    ee_base_ori_drawer = quat_multiply(
         (
             float(source_target_pose_d.orientation.x),
             float(source_target_pose_d.orientation.y),
@@ -210,8 +210,8 @@ def skill_drawer_pull_open(
 
     ctx.drawer = DrawerPhaseState(
         place_pose_ref=place_pose_ref,
-        ee_base_orientation_xyzw=grasp_ori_drawer,
-        grasp_direction_vector=dir_drawer,
+        ee_base_orientation_xyzw=ee_base_ori_drawer,
+        pull_direction_xyz=dir_drawer,
     )
 
     tc = ctx.task_cfg
@@ -227,8 +227,8 @@ def skill_drawer_pull_open(
         arm_side=_pick_arm_side(ctx),
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
-        ee_base_orientation=grasp_ori_drawer,
-        grasp_direction_vector=dir_drawer,
+        ee_base_orientation=ee_base_ori_drawer,
+        pull_direction_xyz=dir_drawer,
         pull_distance=pull_dist,
     )
 
@@ -266,8 +266,8 @@ def skill_drawer_close_push(
 
     path_drawer = dcfg.object_prim_path
     place_pose_ref = drw.place_pose_ref
-    grasp_ori = drw.ee_base_orientation_xyzw
-    dir_vec = drw.grasp_direction_vector
+    ee_base_ori = drw.ee_base_orientation_xyzw
+    dir_vec = drw.pull_direction_xyz
 
     source_target_pose_d = get_object_pose_from_service(
         ctx.base_world_pos,
@@ -275,8 +275,8 @@ def skill_drawer_close_push(
         path_drawer,
         include_orientation=True,
     )
-    grasp_ori = quat_multiply(grasp_ori, (0, -0.2164396, 0, 0.976296))
-    drw.ee_base_orientation_xyzw = grasp_ori
+    ee_base_ori = quat_multiply(ee_base_ori, (0, -0.2164396, 0, 0.976296))
+    drw.ee_base_orientation_xyzw = ee_base_ori
 
     handle_off = _rotate_vector_by_quat(
         dcfg.object_position_offset,
@@ -299,8 +299,8 @@ def skill_drawer_close_push(
         arm_side=arm_side,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
-        ee_base_orientation=grasp_ori,
-        grasp_direction_vector=dir_vec,
+        ee_base_orientation=ee_base_ori,
+        pull_direction_xyz=dir_vec,
     )
     if not sequence:
         raise RuntimeError("close_push: empty close-drawer cartesian sequence")
@@ -335,12 +335,12 @@ def skill_drawer_close_push(
         pose_tol_ori=tc.common.pose_tol_ori,
     )
 
-    # 先保持夹爪闭合移到 pull_open 记录的拉手参考位（与推关抽屉同一套 grasp_ori），再松爪 + ee_retreat_offset。
+    # 先保持夹爪闭合移到 pull_open 记录的拉手参考位（与推关抽屉同一套末端姿态），再松爪 + ee_retreat_offset。
     # 若先松爪后撤再「合上」，会在抽屉尚未离开拉手区间时显得像「关抽屉前就张开后退」。
     if _stamped_mode(ctx) == SendMode.STAMPED:
-        handler.send_target_stamped(ctx.frame_id, pose_from_tuple(place_pose_ref, grasp_ori))
+        handler.send_target_stamped(ctx.frame_id, pose_from_tuple(place_pose_ref, ee_base_ori))
     else:
-        handler.send_target(pose_from_tuple(place_pose_ref, grasp_ori))
+        handler.send_target(pose_from_tuple(place_pose_ref, ee_base_ori))
     _wait_pick_arm_arrive(ctx)
 
     _close_push_release_and_tool_retreat(
@@ -349,7 +349,7 @@ def skill_drawer_close_push(
         sequence=sequence,
         arm_side=arm_side,
         handler=handler,
-        grasp_ori=grasp_ori,
+        ee_base_orientation=ee_base_ori,
     )
 
     return [], ExecutionMeta(

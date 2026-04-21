@@ -16,7 +16,6 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ex
 from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
     SimTimeHelper,
     get_entity_pose_world_service,
-    randomize_object_xyz_after_reset,
     reset_simulation_state,
 )
 
@@ -267,18 +266,10 @@ def reset_queue_task_environment(
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
         )
-        randomize_object_xyz_after_reset(
-            parallel_pick_cfg.left_pick.object_prim_path,
-            xyz_offset=parallel_pick_cfg.left_pick.object_xyz_random_offset,
-        )
         reset_simulation_state(
             parallel_pick_cfg.right_pick.object_prim_path,
             post_reset_wait=robot_cfg.post_reset_wait,
             sleep_fn=sim_time.sleep,
-        )
-        randomize_object_xyz_after_reset(
-            parallel_pick_cfg.right_pick.object_prim_path,
-            xyz_offset=parallel_pick_cfg.right_pick.object_xyz_random_offset,
         )
         return
     reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)

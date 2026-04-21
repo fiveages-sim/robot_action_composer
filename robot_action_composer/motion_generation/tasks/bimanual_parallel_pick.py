@@ -39,13 +39,11 @@ class ParallelPickArmConfig:
     ee_lift_offset: tuple[float, float, float] | None = None
     ee_retreat_offset: tuple[float, float, float] | None = None
     ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
-    grasp_direction: str = "+z"
-    grasp_direction_vector: tuple[float, float, float] | None = None
+    ee_pick_axis: str = "+z"
+    ee_pick_direction_vector: tuple[float, float, float] | None = None
     motion_frame_id: str | None = None
     tf_lookup_timeout: float | None = None
     arm_movel_duration: float | None = None
-    # reset / 仿真随机化用（不参与笛卡尔序列构建）
-    object_xyz_random_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -61,8 +59,8 @@ def parallel_pick_cfg_from_params(params: Mapping[str, Any]) -> BimanualParallel
         raise ValueError(
             "dual_arm.parallel_pick* requires params.left_pick and params.right_pick mappings"
         )
-    left = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, dict(left_raw)))
-    right = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, dict(right_raw)))
+    left = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, left_raw))
+    right = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, right_raw))
     if not left.object_prim_path or not right.object_prim_path:
         raise ValueError("left_pick.object_prim_path and right_pick.object_prim_path are required")
     return BimanualParallelPickTaskConfig(left_pick=left, right_pick=right)
@@ -109,8 +107,8 @@ def build_bimanual_parallel_pick_record_sequence(
         ee_base_orientation=left.ee_base_orientation,
         prepare_offset=left.prepare_offset,
         pick_clearance=left.pick_clearance,
-        grasp_direction=left.grasp_direction,
-        grasp_direction_vector=left.grasp_direction_vector,
+        ee_pick_axis=left.ee_pick_axis,
+        ee_pick_direction_vector=left.ee_pick_direction_vector,
         object_position_offset=(0.0, 0.0, 0.0),
         retreat_offset=lo,
         retreat_xyz=lz,
@@ -123,8 +121,8 @@ def build_bimanual_parallel_pick_record_sequence(
         ee_base_orientation=right.ee_base_orientation,
         prepare_offset=right.prepare_offset,
         pick_clearance=right.pick_clearance,
-        grasp_direction=right.grasp_direction,
-        grasp_direction_vector=right.grasp_direction_vector,
+        ee_pick_axis=right.ee_pick_axis,
+        ee_pick_direction_vector=right.ee_pick_direction_vector,
         object_position_offset=(0.0, 0.0, 0.0),
         retreat_offset=ro,
         retreat_xyz=rz,

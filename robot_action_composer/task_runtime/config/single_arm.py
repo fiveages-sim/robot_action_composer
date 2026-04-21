@@ -32,8 +32,8 @@ class QueueSlicePick:
     ee_retreat_offset: tuple[float, float, float] | None = None
     object_prim_path: str = ""
     ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
-    grasp_direction: str = "+z"
-    grasp_direction_vector: tuple[float, float, float] | None = None
+    ee_pick_axis: str = "+z"
+    ee_pick_direction_vector: tuple[float, float, float] | None = None
     motion_frame_id: str | None = None
     tf_lookup_timeout: float | None = None
     arm_movel_duration: float | None = None
@@ -96,7 +96,7 @@ def format_queue_single_arm_summary(scene: str, task: QueueSingleArmSlice) -> st
     p, pl, c = task.pick, task.place, task.common
     parts = [
         f"[Scene] {scene} -> {p.object_prim_path}",
-        f"arm={c.arm}, direction={p.grasp_direction}",
+        f"arm={c.arm}, ee_pick_axis={p.ee_pick_axis}",
         f"orientation={p.ee_base_orientation}",
         f"prepare_offset={p.prepare_offset}, pick_clearance={p.pick_clearance}",
         f"ee_lift_offset={p.ee_lift_offset}, ee_retreat_offset={p.ee_retreat_offset}",
