@@ -102,6 +102,12 @@
 - **效果**：须队列中已有 **`pull_open`**。粗定位 → 关抽屉 Cartesian → 闭合到位 **`place_pose_ref`** → 按 **`ee_retreat_offset`** 配置松爪并撤出。
 - **备注**：必须排在 **`pull_open`** 之后。
 
+
+
+https://github.com/user-attachments/assets/3ae2fb74-8933-49fc-972e-f9ab8237a53b
+
+
+
 ---
 
 ## 2. 双臂技能（`dual_arm.*`）
