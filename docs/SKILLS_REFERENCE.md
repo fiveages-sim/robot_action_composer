@@ -325,7 +325,7 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
 - **效果**：先查对象世界坐标，再按偏移导航到对象附近。
 - **参数**：
   - **目标物体配置**
-    - `object_prim_path`（`str`）：目标物体 Prim 路径；未给时尝试 `ctx.task_cfg.object_prim_path`。
+    - `object_prim_path`（`str`，必填）：目标物体 Prim 路径。
   - **目标位姿配置**
     - `approach_offset_x`（`float`，默认 `-0.20`）：导航点 X 偏移（米）。
     - `approach_offset_y`（`float`，默认 `0.0`）：导航点 Y 偏移（米）。
@@ -335,12 +335,15 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
     - `timeout`（`float`，默认 `60.0`）：最大等待时间（秒）。
     - `poll_period`（`float`，默认 `0.1`）：轮询周期（秒）。
 
-### 3.5 `nav.navigate_backup`
+### 3.5 `nav.navigate_relative`
 
-- **效果**：沿基座 +X 反方向后退指定距离。
+- **效果**：按基座当前朝向做相对导航位移。
 - **参数**：
   - **目标位姿配置**
-    - `distance_m`（`float`，默认 `0.5`）：后退距离（米）。
+    - `relative_position`（`[float,float,float]`，必填）：相对运动三元组 `[dx, dy, dyaw]`。
+      - `dx`：沿当前前向(+) / 后向(-)位移（米）。
+      - `dy`：沿当前左向(+) / 右向(-)位移（米）。
+      - `dyaw`：在当前偏航基础上叠加的旋转量（弧度）。
     - `frame_id`（`str`，默认 `map`）：目标坐标系。
   - **执行控制**
     - `timeout`（`float`，默认 `60.0`）：最大等待时间（秒）。
