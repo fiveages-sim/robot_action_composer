@@ -6,8 +6,10 @@
 2. 加载与合并规则是什么
 3. 写 `task_queue` 时最常用的模式有哪些
 
-技能参数明细请看：[`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md)
-架构与代码路径请看：[`ARCHITECTURE.md`](ARCHITECTURE.md)
+**与 [`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md) 的分工**：本文不写各 `skill` 的参数字段含义与默认值；**每个技能能填什么键、语义是什么**，以技能参考为准。
+
+技能参数明细请看：[`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md)  
+架构与代码路径请看：包根目录 [`README.md`](../README.md)（**架构与设计**）
 
 ---
 
@@ -154,7 +156,7 @@ scene_presets:
 ## 6) 常看文档
 
 - 技能库与参数入口：[`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md)
-- 运行时架构：[`ARCHITECTURE.md`](ARCHITECTURE.md)
+- 运行时架构：包根 [`README.md`](../README.md)（**架构与设计**）
 - 机器人配置约定：[`ROBOT_CONFIG.md`](ROBOT_CONFIG.md)
 
 ---

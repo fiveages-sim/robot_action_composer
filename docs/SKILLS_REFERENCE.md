@@ -1,5 +1,7 @@
 # 技能库与配置项说明（按技能）
 
+**与 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md) 的分工**：该文档说明 **YAML 文件长什么样、如何发现/合并、顶层字段与 `task_queue` 写法**；**本文只说明每个已注册 `skill` 的语义与参数**（效果、键名、必填与备注），不重复加载与合并算法。
+
 本文按技能名逐条说明：
 
 - 技能效果（做什么）
@@ -17,7 +19,7 @@
 
 ## 1. 单臂技能（`single_arm.*`）
 
-### 1.1 发送笛卡尔目标（`single_arm.send_cartesian_goal`）
+### 1.1 末端移动到指定位姿（`single_arm.move_to_pose`）
 
 - **效果**：将末端运动到指定笛卡尔位姿（单段 MoveL），可指定参考帧与工作臂。
 - **参数**：
@@ -26,20 +28,20 @@
   - **运动系配置**
     - `position`：目标位置 `[x, y, z]`（米），必填。
     - `orientation`：目标姿态四元数 `[x, y, z, w]`，必填。
-    - `frame_id`：位姿参考帧，默认 `arm_base`。
+    - `motion_frame_id`：位姿参考帧；不写则沿用任务级 `frame_id`（通常为 `arm_base`）。
   - **末端系配置**
     - `gripper`：目标夹爪值，默认保持上一步结束时的状态。
 - **YAML 示例**：
   ```yaml
-  - skill: single_arm.send_cartesian_goal
+  - skill: single_arm.move_to_pose
     params:
       arm: right
-      frame_id: arm_base
+      motion_frame_id: arm_base
       position: [0.45, -0.15, 0.50]
       orientation: [-0.7, 0.7, 0.0, 0.0]
   ```
 
-### 1.2 移动到目标物体相对位姿（`single_arm.move_to_object`）
+### 1.2 末端移动到目标物体相对位姿（`single_arm.move_to_object`）
 
 - **效果**：基于物体位姿 + 物体系偏移，生成单个笛卡尔目标并移动到位。
 - **参数**：
@@ -54,7 +56,6 @@
     - `arm`：`left|right`（不写则沿用 `common.arm`）。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
     - `gripper`：可选；默认保持当前 `gripper_for_return_home`。
-    - `stage_name`：可选；默认 `TaskQ-MoveToObject`。
 
 ### 1.3 抓取（`single_arm.pick`）
 
@@ -113,7 +114,6 @@
     - `side`：当缓存为 `which: both` 时选 `left|right`。
   - **末端系配置**
     - `gripper`：覆盖缓存中的夹爪目标。
-    - `stage_name`：阶段名覆盖。
 - **备注**：
   - 单臂缓存可直接用；
   - 双臂缓存必须指定 `side` 或依赖 `common.arm` 推断。
@@ -244,7 +244,6 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `tf_lookup_timeout`（`float`，默认 `2.0`）：TF 查询超时（秒）。
 
   - **末端系配置**
-    - `stage_prefix`（`str`，默认 `PlaceRel`）：阶段名前缀。
     - `arm_movel_duration`（`float`，默认取 `dual_arm.carry.arm_movel_duration`）：覆盖笛卡尔段 movel 时长。
 - **备注**：需要左右臂当前位姿可读；设置 `motion_frame_id` 时依赖 TF 变换；若未配置 `dual_arm.carry`，上述复用默认将回退到内置默认值。
 
@@ -260,7 +259,6 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
     - `motion_frame_id`（`str`）：对齐计算坐标系。
   - **执行控制**
     - `arm_movel_duration`（`float`）：覆盖笛卡尔段 movel 时长。
-    - `stage_name`（`str`）：阶段名。
 
 ### 2.5 双臂交接物体
 
@@ -298,8 +296,6 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
   - **末端系配置**
     - `gripper`：统一覆盖左右夹爪。
     - `left_gripper` / `right_gripper`：按侧覆盖。
-  - **执行控制**
-    - `stage_name`：阶段名。
 - **备注**：缓存必须是双臂结构 `{left,right}`。
 
 ---
@@ -453,11 +449,7 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
 
 ---
 
-## 6. 配置项放置建议（简）
+## 6. 配置项放在哪一层（速查）
 
-- 技能默认参数：`skill_defaults`
-- 场景差异参数：`scene_presets.<scene>.skill_params`
-- 单步临时覆盖：该块 `params`
-- 流程公共字段（非技能）：`base_task_overrides`
-
-详细结构与合并规则见：[`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md)
+与 § 开头「约定」一致：**默认** → `skill_defaults`；**按场景覆盖** → `scene_presets.<scene>.skill_params`；**仅本块** → `task_queue` 里该块的 `params`；**与具体技能无关、整任务共用** → `base_task_overrides`。  
+**合并顺序、禁止项与示例**以 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md) 为准（本节不展开）。

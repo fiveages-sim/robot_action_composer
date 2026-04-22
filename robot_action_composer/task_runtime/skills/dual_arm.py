@@ -356,7 +356,6 @@ def skill_place(
             若无则退回 ``ctx.frame_id``（Isaac 下常为 base prim 名如 ``base_link``）。与 ``motion_frame_id`` 不同时
             用 ``ROS2RobotInterface.transform_pose`` 变到 motion 系再算几何；``ExecutionMeta.frame_id`` 为 motion 系。
         tf_lookup_timeout: TF 查询超时（秒），默认 2.0。
-        stage_prefix: 阶段名前缀，默认 ``PlaceRel``。
         arm_movel_duration: 可选；本块优先，否则沿用 ``dual_arm.carry`` 的 ``arm_movel_duration``。
     """
     carry = ctx.carry_task_cfg
@@ -435,7 +434,6 @@ def skill_place(
 
     spread_half = float(params.get("spread_half", params.get("spread_y_half", default_spread)))
     ret = _param_vec3(params, "retreat_xyz", default_retreat)
-    prefix = str(params.get("stage_prefix", "PlaceRel")).strip() or "PlaceRel"
 
     stages = build_bimanual_place_relative_sequence(
         left_current=l0,
@@ -445,7 +443,7 @@ def skill_place(
         retreat_xyz=ret,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
-        stage_prefix=prefix,
+        stage_prefix="PlaceRel",
         output_frame_id=motion_frame,
     )
     return stages, ExecutionMeta(
@@ -467,7 +465,7 @@ def skill_bimanual_align(
     params:
         align_position: 必填 ``[x, y, z]``（米），双臂中心目标位置（``motion_frame_id`` 下）。
         orientation_delta_rpy, min_abs_orientation_rpy, motion_frame_id,
-        min_abs_delta_y / min_abs_delta_x / min_abs_delta_z, stage_name, arm_movel_duration: 同前。
+        min_abs_delta_y / min_abs_delta_x / min_abs_delta_z, arm_movel_duration: 同前。
     """
     label = "dual_arm.bimanual_align"
     iface = ctx.interface
@@ -554,11 +552,10 @@ def skill_bimanual_align(
 
     g_cmd = float(ctx.gripper_closed)
 
-    stage_name = str(params.get("stage_name", "BimanualAlign-1-Move")).strip() or "BimanualAlign-1-Move"
     fid = str(motion_frame).strip() or None
     stages = [
         StageTarget(
-            name=stage_name,
+            name="BimanualAlign-1-Move",
             left=ArmTarget(pose=l1, gripper=g_cmd),
             right=ArmTarget(pose=r1, gripper=g_cmd),
             frame_id=fid,
@@ -659,7 +656,7 @@ def skill_goto_cache_pose(
 
     stages = [
         StageTarget(
-            name=str(params.get("stage_name", "TaskQ-DualGotoCachePose")),
+            name="TaskQ-DualGotoCachePose",
             left=ArmTarget(pose=left_pose, gripper=gl),
             right=ArmTarget(pose=right_pose, gripper=gr),
         )

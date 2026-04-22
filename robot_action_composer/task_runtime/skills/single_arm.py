@@ -256,11 +256,10 @@ def skill_move_to_object(ctx: QueueRuntimeContext, params: Mapping[str, Any]) ->
     target.orientation.w = float(pk.ee_base_orientation[3])
 
     grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
-    stage_name = str(params.get("stage_name", "TaskQ-MoveToObject"))
     arm_seq = build_single_arm_return_home_sequence(
         home_pose=target,
         gripper=grip_v,
-        stage_name=stage_name,
+        stage_name="TaskQ-MoveToObject",
     )
     stages = assign_to_arm(arm_seq, arm_side)
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
@@ -391,11 +390,10 @@ def skill_goto_cache_pose(
         grip_v = float(gripper_override)
     else:
         grip_v = float(entry.get("gripper", ctx.gripper_for_return_home))
-    stage_name = str(params.get("stage_name", "TaskQ-GotoCachePose"))
     arm_seq = build_single_arm_return_home_sequence(
         home_pose=home_pose,
         gripper=grip_v,
-        stage_name=stage_name,
+        stage_name="TaskQ-GotoCachePose",
     )
     stages = assign_to_arm(arm_seq, arm_side)
     if ctx.use_stamped:
@@ -417,7 +415,7 @@ def skill_goto_cache_pose(
     )
 
 
-def skill_send_cartesian_goal(
+def skill_move_to_pose(
     ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     """笛卡尔空间运动到指定末端位姿。
@@ -426,14 +424,13 @@ def skill_send_cartesian_goal(
         arm (str): ``left`` 或 ``right``，必填。
         position (dict | list): 目标位置，``{x, y, z}`` 或 ``[x, y, z]``（米），必填。
         orientation (dict | list): 目标姿态四元数，``{x, y, z, w}`` 或 ``[x, y, z, w]``，必填。
-        frame_id (str, 可选): 位姿所在的参考帧，默认 ``ctx.frame_id``（通常为 ``arm_base``）。
+        motion_frame_id (str, 可选): 位姿所在的参考帧，默认 ``ctx.frame_id``（通常为 ``arm_base``）。
         gripper (float, 可选): 目标夹爪开合值，默认 ``ctx.gripper_for_return_home``（上一步结束时的夹爪状态）。
-        stage_name (str, 可选): 阶段名称，默认 ``TaskQ-SendCartesianGoal``。
     """
     arm = str(params.get("arm", "")).strip().lower()
     if arm not in ("left", "right"):
         raise ValueError(
-            f"single_arm.send_cartesian_goal: 'arm' must be 'left' or 'right', got {params.get('arm')!r}"
+            f"single_arm.move_to_pose: 'arm' must be 'left' or 'right', got {params.get('arm')!r}"
         )
 
     pos_raw = params.get("position")
@@ -449,7 +446,7 @@ def skill_send_cartesian_goal(
         pose.position.z = float(pos_raw[2])
     else:
         raise ValueError(
-            "single_arm.send_cartesian_goal: 'position' must be {x,y,z} or [x,y,z]"
+            "single_arm.move_to_pose: 'position' must be {x,y,z} or [x,y,z]"
         )
 
     if isinstance(ori_raw, Mapping):
@@ -465,33 +462,34 @@ def skill_send_cartesian_goal(
         pose.orientation.w = float(ori_raw[3])
     else:
         raise ValueError(
-            "single_arm.send_cartesian_goal: 'orientation' must be {x,y,z,w} or [x,y,z,w]"
+            "single_arm.move_to_pose: 'orientation' must be {x,y,z,w} or [x,y,z,w]"
         )
 
     grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
-    stage_name = str(params.get("stage_name", "TaskQ-SendCartesianGoal"))
-    frame_id = str(params.get("frame_id", ctx.frame_id) or ctx.frame_id).strip() or ctx.frame_id
+    motion_frame_id = str(
+        params.get("motion_frame_id", ctx.frame_id) or ctx.frame_id
+    ).strip() or ctx.frame_id
 
     arm_side = ArmSide.RIGHT if arm == "right" else ArmSide.LEFT
     arm_seq = build_single_arm_return_home_sequence(
         home_pose=pose,
         gripper=grip_v,
-        stage_name=stage_name,
+        stage_name="TaskQ-MoveToPose",
     )
     stages = assign_to_arm(arm_seq, arm_side)
     if ctx.use_stamped:
         for st in stages:
-            st.frame_id = frame_id
+            st.frame_id = motion_frame_id
     print(
-        f"[CartesianGoal] arm={arm} frame={frame_id} "
+        f"[MoveToPose] arm={arm} motion_frame_id={motion_frame_id} "
         f"pos=({pose.position.x:.3f},{pose.position.y:.3f},{pose.position.z:.3f}) "
         f"ori=({pose.orientation.x:.3f},{pose.orientation.y:.3f},"
         f"{pose.orientation.z:.3f},{pose.orientation.w:.3f})"
     )
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
-        frame_id=frame_id,
-        warn_prefix="TaskQ send_cartesian_goal timeout",
+        frame_id=motion_frame_id,
+        warn_prefix="TaskQ move_to_pose timeout",
     )
 
 
@@ -500,7 +498,7 @@ def register_single_arm_skills() -> None:
     register_skill("single_arm.move_to_object", skill_move_to_object)
     register_skill("single_arm.place", skill_place)
     register_skill("single_arm.goto_cache_pose", skill_goto_cache_pose)
-    register_skill("single_arm.send_cartesian_goal", skill_send_cartesian_goal)
+    register_skill("single_arm.move_to_pose", skill_move_to_pose)
 
 
 register_single_arm_skills()
