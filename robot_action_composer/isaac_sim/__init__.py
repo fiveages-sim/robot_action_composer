@@ -12,7 +12,8 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose
 from isaac_ros2_messages.srv import GetPrimAttribute, SetPrimAttribute
-from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+from lerobot_robot_ros2.utils.pose_utils import (  # pyright: ignore[reportMissingImports]
+    action_from_pose,
     quat_conjugate,
     quat_multiply,
     quat_normalize,
@@ -251,7 +252,7 @@ def set_prim_orientation_local(
     
 
 def randomize_object_xyz_after_reset(
-    object_prim_path: str,
+    object_entity_path: str,
     enabled: bool = True,
     xyz_offset: tuple[float, float, float] | float = 0.04,
     timeout: float = SERVICE_CALL_TIMEOUT,
@@ -274,7 +275,7 @@ def randomize_object_xyz_after_reset(
     else:
         off_x, off_y, off_z = float(xyz_offset), float(xyz_offset), 0.0
     cur_x, cur_y, cur_z = get_prim_translate_local(
-        object_prim_path,
+        object_entity_path,
         timeout=timeout,
         retries=retries,
         retry_delay=retry_delay,
@@ -284,7 +285,7 @@ def randomize_object_xyz_after_reset(
     new_y = cur_y + random.uniform(-off_y, off_y)
     new_z = cur_z + random.uniform(-off_z, off_z)
     set_prim_translate_local(
-        object_prim_path,
+        object_entity_path,
         (new_x, new_y, new_z),
         timeout=timeout,
         retries=retries,
@@ -296,26 +297,29 @@ def randomize_object_xyz_after_reset(
     )
 
 
-def reset_simulation_state(
-    settle_entity_path: str,
+def reset_simulation_and_randomize_object(
+    object_entity_path: str,
     *,
     sim_state_reset: int = 0,
     sim_state_playing: int = 1,
     sim_service_timeout: float = SERVICE_CALL_TIMEOUT,
+    enable_randomization: bool = True,
+    xyz_offset: tuple[float, float, float] | float = 0.04,
+    prim_attr_timeout: float = SERVICE_CALL_TIMEOUT,
     retries: int = SERVICE_CALL_RETRIES,
     retry_delay: float = SERVICE_RETRY_DELAY,
     post_reset_wait: float = 1.0,
     sleep_fn: Callable[[float], None] | None = None,
     enable_settle_wait: bool = True,
+    settle_entity_path: str | None = None,
     settle_max_wait: float = 2.0,
     settle_sample_interval: float = 0.05,
     settle_stable_samples: int = 3,
     settle_position_epsilon: float = 0.002,
 ) -> None:
-    """Reset/play Isaac sim，等待 ``post_reset_wait``，再可选对 ``settle_entity_path`` 做位姿稳定检测。
+    """Reset/play sim then optionally randomize object pose.
 
-    **不**修改任何物体 prim 的平移；需要随机化时在任务队列**第一个顺序块**使用技能
-    ``env.randomize_object_local_xyz``（或自行调用 ``randomize_object_xyz_after_reset``）。
+    Object position jitter uses :func:`randomize_object_xyz_after_reset` (uniform per axis).
     """
     set_simulation_state(
         sim_state_reset,
@@ -330,10 +334,19 @@ def reset_simulation_state(
         retry_delay=retry_delay,
     )
     print("[OK] Simulation reset completed")
+    randomize_object_xyz_after_reset(
+        object_entity_path,
+        enabled=enable_randomization,
+        xyz_offset=xyz_offset,
+        timeout=prim_attr_timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
     (sleep_fn or time.sleep)(post_reset_wait)
     if enable_settle_wait:
+        target_entity = settle_entity_path or object_entity_path
         wait_entity_position_stable(
-            settle_entity_path,
+            target_entity,
             max_wait=settle_max_wait,
             sample_interval=settle_sample_interval,
             stable_samples=settle_stable_samples,
@@ -443,7 +456,7 @@ def get_entity_pose_world_service(
 def get_object_pose_from_service(
     base_world_pos: tuple[float, float, float],
     base_world_quat: tuple[float, float, float, float],
-    object_prim_path: str,
+    object_entity_path: str,
     *,
     include_orientation: bool = False,
     entity_state_timeout: float = SERVICE_CALL_TIMEOUT,
@@ -453,7 +466,7 @@ def get_object_pose_from_service(
     base_wx, base_wy, base_wz = base_world_pos
     base_q = base_world_quat
     (obj_wx, obj_wy, obj_wz), obj_q = get_entity_pose_world_service(
-        object_prim_path,
+        object_entity_path,
         timeout=entity_state_timeout,
         retries=retries,
         retry_delay=retry_delay,

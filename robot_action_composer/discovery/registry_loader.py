@@ -48,13 +48,12 @@ def load_motion_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
         robot_label = getattr(robot_mod, "ROBOT_LABEL", robot_dir.name)
         robot_cfg = getattr(robot_mod, "ROBOT_CFG")
 
-        discovery = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
+        tasks = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
 
         entries[robot_key] = {
             "label": robot_label,
             "robot_cfg": robot_cfg,
-            "tasks": discovery.tasks,
-            "task_groups": discovery.task_groups,
+            "tasks": tasks,
         }
     return entries
 
@@ -62,10 +61,15 @@ def load_motion_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
 def load_robot_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
     _ensure_package_paths(isaac_dir)
 
-    from robot_action_composer.dataset_recording.runner import DEFAULT_RECORD_CFG, run_recording
+    from robot_action_composer.dataset_recording.runner import (
+        DEFAULT_RECORD_CFG,
+        SUPPORTED_RECORD_KINDS,
+        run_recording,
+    )
 
     motion_entries = load_motion_entries(isaac_dir)
     runner = run_recording
+    supported_kinds = set(SUPPORTED_RECORD_KINDS)
     base_record_cfg = DEFAULT_RECORD_CFG
     entries: dict[str, dict[str, Any]] = {}
     if not motion_entries:
@@ -78,6 +82,9 @@ def load_robot_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
         record_entry = None
         record_tasks: dict[str, dict[str, Any]] = {}
         for task_key, flow_cfg in flow_tasks.items():
+            task_kind = flow_cfg.get("kind")
+            if supported_kinds and task_kind not in supported_kinds:
+                continue
             record_cfg_section = flow_cfg.get("record", {})
             if not record_cfg_section:
                 continue
@@ -90,6 +97,7 @@ def load_robot_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
             record_tasks[task_key] = {
                 "label": flow_cfg.get("label", task_key),
                 "task_cfg": flow_cfg,
+                "task_kind": task_kind,
                 "use_stamped": flow_cfg.get("use_stamped", True),
                 "runner": runner,
                 "record_cfg": task_record_cfg,
@@ -102,6 +110,5 @@ def load_robot_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
             "label": robot_label,
             "robot_cfg": robot_cfg,
             "record": record_entry,
-            "task_groups": motion_entry.get("task_groups", {}),
         }
     return entries

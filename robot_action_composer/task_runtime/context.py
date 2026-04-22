@@ -1,13 +1,9 @@
-"""队列执行期上下文：在 ``task_queue`` 各 skill 之间传递。"""
+"""Runtime context passed between queue skills."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
-from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
-from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
-from robot_action_composer.motion_generation.tasks.bimanual_place import BimanualPlaceTaskConfig  # pyright: ignore[reportMissingImports]
 
 
 @dataclass
@@ -15,72 +11,81 @@ class DrawerPhaseState:
     """跨 ``single_arm.drawer.*`` 技能传递的会话状态（拉手 → 关抽屉 → 撤退）。
 
     与 **柜门、开关柜** 等同类任务：建议同样使用独立命名空间（例如未来的
-    :class:`DoorPhaseState` + ``ctx.door``），避免往通用上下文中平铺字段。
+    :class:`DoorPhaseState` + ``ctx.door``），避免往通用单臂上下文中平铺字段。
     """
 
     place_pose_ref: tuple[float, float, float]
-    ee_base_orientation_xyzw: tuple[float, float, float, float]
-    pull_direction_xyz: tuple[float, float, float]
+    grasp_orientation_xyzw: tuple[float, float, float, float]
+    grasp_direction_vector: tuple[float, float, float]
+    handle_offset_rotated: tuple[float, float, float]
 
 
 @dataclass
-class QueueRuntimeContext:
-    """一次 ``run_task_queue`` 的会话：接口快照 + :class:`QueueSingleArmSlice` + 可选子任务配置。
-
-    **scratch**：跨 skill 的通用键值暂存区（任务 YAML 可用 ``session.scratch_put``、``robot.cache_ee_pose`` 等写入；
-    自定义 skill 内用 :meth:`scratch_get` / :meth:`scratch_put` 或直接使用 ``ctx.scratch``）。
-    笛卡尔「回程」位姿由 ``robot.cache_ee_pose`` + ``goto_cache_pose`` 显式缓存，不再在 Runner 连接时写入 home。
-    """
+class SingleArmMotionContext:
+    """Mutable state for a single-arm Isaac queue run (any robot using ``single_arm.*`` skills)."""
 
     interface: Any  # ROS2RobotInterface
     robot_cfg: Any
     sim_time: Any
-    task_cfg: Any  # QueueSingleArmSlice
-    base_link_entity_path: str  # 已解析的 Isaac base prim（任务可覆盖 robot_cfg）
+    task_cfg: Any  # PickPlaceFlowTaskConfig once motion_generation.pick_place is loaded
     gripper_open: float
     gripper_closed: float
     use_stamped: bool
     frame_id: str
+    ee_frame_id: str
+    arm_side: Any  # ArmSide
+    source_is_right: bool
+    source_home_pose: Any
     base_world_pos: Any
     base_world_quat: Any
+    # Gripper value to use for the final return-home segment (open after place, closed after pick-only).
     gripper_for_return_home: float = 0.0
+    source_ee_prefix: str = "left_ee"
+    # 仅抽屉任务队列使用；柜门等后续用独立子对象（如 ``ctx.door``）。
     drawer: DrawerPhaseState | None = None
-    carry_task_cfg: Any | None = None
-    place_task_cfg: BimanualPlaceTaskConfig | None = None
-    carry_object_position: Any | None = None  # dual_arm.carry_approach 写入；后续搬运段复用
-    place_object_position: Any | None = None  # dual_arm.place_advance 写入；后续放置段复用
-    parallel_pick_target_poses: dict[str, Any] | None = None
-    handover_sync: HandoverSyncConfig | None = None
-    drawer_geometry: DrawerGeometryConfig | None = None
-    scratch: dict[str, Any] = field(default_factory=dict)
+    # 连接后由 Runner 写入，供 ``single_arm.movej_return_initial`` 使用。
+    left_initial_joint_positions: list[float] | None = None
+    right_initial_joint_positions: list[float] | None = None
+    body_initial_joint_positions: list[float] | None = None
 
     def __post_init__(self) -> None:
         if self.gripper_for_return_home == 0.0:
             self.gripper_for_return_home = float(self.gripper_closed)
 
-    def scratch_put(self, key: str, value: Any) -> None:
-        """写入暂存区（与 ``session.scratch_put`` skill 一致）。"""
-        self.scratch[str(key)] = value
 
-    def scratch_get(self, key: str, default: Any = None) -> Any:
-        """读取暂存区；缺省键返回 ``default``。"""
-        return self.scratch.get(str(key), default)
+@dataclass
+class BaseBimanualMotionContext:
+    """Shared mutable state for all bimanual Isaac task queue runs."""
+
+    interface: Any  # ROS2RobotInterface
+    robot_cfg: Any
+    sim_time: Any
+    task_cfg: Any
+    gripper_open: float
+    gripper_closed: float
+    use_stamped: bool
+    frame_id: str
+    ee_frame_id: str
+    base_world_pos: Any
+    base_world_quat: Any
+    left_initial_joint_positions: list[float] | None
+    right_initial_joint_positions: list[float] | None
 
 
-def queue_pick_arm_is_right(ctx: QueueRuntimeContext) -> bool:
-    """当前 ``task_cfg.common.arm`` 是否为右侧（抓取侧 / 主序列侧）。"""
-    a = ctx.task_cfg.common.arm.strip().lower()
-    if a not in {"left", "right"}:
-        raise ValueError(f"arm must be 'left' or 'right', got {ctx.task_cfg.common.arm!r}")
-    return a == "right"
+@dataclass
+class BimanualMotionContext(BaseBimanualMotionContext):
+    """Mutable state for bimanual carry task queue run."""
+
+    task_cfg: Any  # BimanualCarryTaskConfig once motion_generation.bimanual_carry is loaded
+    left_home_pose: Any
+    right_home_pose: Any
 
 
-def queue_primary_ee_frame_id(ctx: QueueRuntimeContext) -> str:
-    """抓取侧末端链路的 ``frame_id``（无 handler 时退回 ``ctx.frame_id``）。"""
-    h = (
-        ctx.interface.right_arm_handler
-        if queue_pick_arm_is_right(ctx)
-        else ctx.interface.left_arm_handler
-    )
-    fid = h.frame_id if h else None
-    return fid or ctx.frame_id
+@dataclass
+class HandoverMotionContext(BaseBimanualMotionContext):
+    """Mutable state for handover task queue run (a bimanual specialization)."""
+
+    task_cfg: Any  # HandoverTaskConfig once motion_generation.handover is loaded
+    source_is_right: bool
+    source_home_pose: Any
+    receiver_home_pose: Any

@@ -1,17 +1,16 @@
-"""可组合的任务队列运行时（``run_task_queue`` + 技能注册表）。
-
-- 执行入口：``from robot_action_composer.task_runtime.runner import run_task_queue``
-- 注册技能：``import robot_action_composer.task_runtime.skills``
-- 合并配置：:mod:`robot_action_composer.task_runtime.config`、:mod:`robot_action_composer.task_runtime.merge`
-"""
+"""Composable task queue runtime for IsaacSim (see ``docs/TASK_QUEUE_ARCHITECTURE.md``)."""
 
 from __future__ import annotations
 
-from robot_action_composer.task_runtime.context import (  # pyright: ignore[reportMissingImports]
-    DrawerPhaseState,
-    QueueRuntimeContext,
+import robot_action_composer.task_runtime.skills  # noqa: F401 - register built-in skills (e.g. single_arm.*)
+from robot_action_composer.task_runtime.runner import (
+    run_bimanual_task_queue,
+    run_drawer_pick_place_task_queue,
+    run_handover_task_queue,
+    run_single_arm_task_queue,
 )
-from robot_action_composer.task_runtime.types import (  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.context import BimanualMotionContext, DrawerPhaseState, HandoverMotionContext
+from robot_action_composer.task_runtime.types import (
     BlockSpec,
     ExecutionMeta,
     block_spec_from_mapping,
@@ -19,8 +18,13 @@ from robot_action_composer.task_runtime.types import (  # pyright: ignore[report
 
 __all__ = [
     "BlockSpec",
+    "BimanualMotionContext",
     "DrawerPhaseState",
     "ExecutionMeta",
-    "QueueRuntimeContext",
+    "HandoverMotionContext",
     "block_spec_from_mapping",
+    "run_bimanual_task_queue",
+    "run_drawer_pick_place_task_queue",
+    "run_handover_task_queue",
+    "run_single_arm_task_queue",
 ]
