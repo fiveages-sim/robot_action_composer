@@ -227,34 +227,36 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     )
 
 
-def skill_pregrasp(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
+def skill_move_to_object(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
     """Move one arm to an object-relative Cartesian target pose (no grasp sequence)."""
     if not isinstance(ctx.task_cfg, QueueSingleArmSlice):
-        raise TypeError(f"single_arm.pregrasp expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}")
+        raise TypeError(
+            f"single_arm.move_to_object expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}"
+        )
     qt = overlay_queue_single_arm_pick_from_params(ctx.task_cfg, params)
     arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
     pk = qt.pick
     if not pk.object_prim_path:
-        raise ValueError("object_prim_path is required for skill single_arm.pregrasp")
+        raise ValueError("object_prim_path is required for skill single_arm.move_to_object")
 
-    _apply_arm_movel_duration(ctx, duration=pk.arm_movel_duration, label="single_arm.pregrasp")
+    _apply_arm_movel_duration(ctx, duration=pk.arm_movel_duration, label="single_arm.move_to_object")
     target, exec_f = _resolve_object_target_pose_from_pick_like_params(
         ctx=ctx,
         object_prim_path=pk.object_prim_path,
         object_position_offset=pk.object_position_offset,
         motion_frame_id=pk.motion_frame_id,
         tf_lookup_timeout=pk.tf_lookup_timeout,
-        label="single_arm.pregrasp",
+        label="single_arm.move_to_object",
     )
 
-    # Pregrasp target orientation is explicitly driven by pick-like ee_base_orientation.
+    # Target orientation is explicitly driven by pick-like ee_base_orientation.
     target.orientation.x = float(pk.ee_base_orientation[0])
     target.orientation.y = float(pk.ee_base_orientation[1])
     target.orientation.z = float(pk.ee_base_orientation[2])
     target.orientation.w = float(pk.ee_base_orientation[3])
 
     grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
-    stage_name = str(params.get("stage_name", "TaskQ-Pregrasp"))
+    stage_name = str(params.get("stage_name", "TaskQ-MoveToObject"))
     arm_seq = build_single_arm_return_home_sequence(
         home_pose=target,
         gripper=grip_v,
@@ -265,7 +267,7 @@ def skill_pregrasp(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
-        warn_prefix="TaskQ pregrasp timeout",
+        warn_prefix="TaskQ move_to_object timeout",
     )
 
 
@@ -495,7 +497,7 @@ def skill_send_cartesian_goal(
 
 def register_single_arm_skills() -> None:
     register_skill("single_arm.pick", skill_pick)
-    register_skill("single_arm.pregrasp", skill_pregrasp)
+    register_skill("single_arm.move_to_object", skill_move_to_object)
     register_skill("single_arm.place", skill_place)
     register_skill("single_arm.goto_cache_pose", skill_goto_cache_pose)
     register_skill("single_arm.send_cartesian_goal", skill_send_cartesian_goal)

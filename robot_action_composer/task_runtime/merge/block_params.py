@@ -89,7 +89,7 @@ def _skill_defaults_for_param_key(param_key: str, skill_defaults: dict[str, Any]
 
 
 def _skill_defaults_for_block(skill: str, param_key: str, skill_defaults: dict[str, Any]) -> dict[str, Any]:
-    """带 ``id`` 的 ``single_arm.pick`` / ``place`` / ``pregrasp`` 先铺对应 ``single_arm.*`` 再叠 ``skill_defaults[id]``。"""
+    """带 ``id`` 的 ``single_arm.pick`` / ``place`` / ``move_to_object`` 先铺对应 ``single_arm.*`` 再叠 ``skill_defaults[id]``。"""
     if skill == "dual_arm.handover_sync":
         merged = dict(skill_defaults.get("dual_arm.handover") or {})
         if param_key != "dual_arm.handover_sync":
@@ -135,14 +135,14 @@ def _skill_defaults_for_block(skill: str, param_key: str, skill_defaults: dict[s
         if param_key != "single_arm.place":
             merged.update(skill_defaults.get(param_key) or {})
         return merged
-    if skill == "single_arm.pregrasp":
-        pick_sd = dict(skill_defaults.get("single_arm.pick") or {})
+    if skill == "single_arm.move_to_object":
+        pick_sd = dict(skill_defaults.get("single_arm.move_to_object") or {})
         merged: dict[str, Any] = {}
         arm_v = pick_sd.get("arm")
         if isinstance(arm_v, str) and arm_v.strip():
             merged["arm"] = arm_v.strip()
-        merged.update(dict(skill_defaults.get("single_arm.pregrasp") or {}))
-        if param_key != "single_arm.pregrasp":
+        merged.update(dict(skill_defaults.get("single_arm.move_to_object") or {}))
+        if param_key != "single_arm.move_to_object":
             merged.update(skill_defaults.get(param_key) or {})
         return merged
     return _skill_defaults_for_param_key(param_key, skill_defaults)
@@ -224,14 +224,14 @@ def _scene_params_for_block(skill: str, param_key: str, scene_skill_params: dict
         if param_key != "single_arm.place":
             merged.update(scene_skill_params.get(param_key) or {})
         return merged
-    if skill == "single_arm.pregrasp":
+    if skill == "single_arm.move_to_object":
         pick_sp = dict(scene_skill_params.get("single_arm.pick") or {})
         merged = {}
         arm_v = pick_sp.get("arm")
         if isinstance(arm_v, str) and arm_v.strip():
             merged["arm"] = arm_v.strip()
-        merged.update(dict(scene_skill_params.get("single_arm.pregrasp") or {}))
-        if param_key != "single_arm.pregrasp":
+        merged.update(dict(scene_skill_params.get("single_arm.move_to_object") or {}))
+        if param_key != "single_arm.move_to_object":
             merged.update(scene_skill_params.get(param_key) or {})
         return merged
     return _scene_params_for_param_key(param_key, scene_skill_params)
@@ -250,7 +250,7 @@ def merge_task_queue_skill_params(
          ``dual_arm.place_relative`` 先铺 ``dual_arm.carry`` 再铺 ``dual_arm.place_relative``；
          ``dual_arm.bimanual_align_mid_y`` 铺 ``dual_arm.bimanual_align_mid_y``（带 ``id`` 时再叠 ``skill_defaults[id]``）；
          ``env.*`` 仅铺同名 ``skill_defaults`` / 场景键；
-         ``single_arm.pick`` / ``place`` / ``pregrasp`` 带 ``id`` 时先铺对应 ``single_arm.*``；drawer 规则不变）
+         ``single_arm.pick`` / ``place`` / ``move_to_object`` 带 ``id`` 时先铺对应 ``single_arm.*``；drawer 规则不变）
       2. ``block.params``
       3. ``scene_skill_params``（与 1 对称）
 

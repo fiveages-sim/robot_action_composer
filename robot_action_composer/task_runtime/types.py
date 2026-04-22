@@ -71,7 +71,8 @@ class ParallelSpec:
           - parallel:
               - skill: nav.navigate_to_object
                 id: nav_to_pick
-              - skill: single_arm.pregrasp   # 导航期间同步运动到预备位
+              - skill: joint.movej_to_config   # 导航期间同步运动到预抓取位置
+                id: move_to_pre_grasp
           - skill: single_arm.pick
 
     子步骤中只允许 :class:`BlockSpec`（不支持嵌套 ``parallel:``）。
