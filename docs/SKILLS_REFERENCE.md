@@ -41,8 +41,8 @@
 
 ### 1.2 移动到目标物体相对位姿（`single_arm.move_to_object`）
 
-- **效果**：基于物体位姿 + 物体系偏移，生成单个笛卡尔目标并移动到位（不执行夹爪抓取序列）。
-- **参数**（与 `single_arm.pick` 同源，推荐沿用其默认层）：
+- **效果**：基于物体位姿 + 物体系偏移，生成单个笛卡尔目标并移动到位。
+- **参数**：
   - **目标物体配置**
     - `object_prim_path`：目标物体 Prim 路径（必填）。
     - `object_position_offset`：相对物体中心的偏移（物体局部坐标系；按物体当前姿态旋转后叠加）。
@@ -51,7 +51,7 @@
     - `motion_frame_id`：目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
   - **执行控制**
-    - `arm`：`left|right`（不写则沿用 `common.arm` / `single_arm.pick.arm` 叠层）。
+    - `arm`：`left|right`（不写则沿用 `common.arm`）。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
     - `gripper`：可选；默认保持当前 `gripper_for_return_home`。
     - `stage_name`：可选；默认 `TaskQ-MoveToObject`。
