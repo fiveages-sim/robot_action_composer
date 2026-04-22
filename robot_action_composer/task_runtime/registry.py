@@ -1,31 +1,20 @@
-"""Skill registry for task queue."""
+"""技能注册表：``task_queue`` 块中的 ``skill`` 字符串 → ``build_stages`` 可调用对象。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from robot_action_composer.task_runtime.types import ExecutionMeta
-
-SkillFn = Callable[[Any, Mapping[str, Any]], tuple[list[Any], ExecutionMeta]]
+SkillFn = Callable[[Any, Mapping[str, Any]], Any]
 
 _REGISTRY: dict[str, SkillFn] = {}
 
 
 def register_skill(name: str, fn: SkillFn) -> None:
-    if name in _REGISTRY:
-        if _REGISTRY[name] is fn:
-            return
-        raise ValueError(f"Skill already registered: {name}")
     _REGISTRY[name] = fn
 
 
 def get_skill(name: str) -> SkillFn:
     if name not in _REGISTRY:
-        known = ", ".join(sorted(_REGISTRY)) or "(none)"
-        raise KeyError(f"Unknown skill {name!r}. Registered: {known}")
+        raise KeyError(f"Unknown task_queue skill {name!r}; registered: {sorted(_REGISTRY)!r}")
     return _REGISTRY[name]
-
-
-def registered_skill_names() -> tuple[str, ...]:
-    return tuple(sorted(_REGISTRY))

@@ -16,18 +16,12 @@ from typing import Any, Optional
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Pose
 from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import CameraInfo, Image
 
 from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMissingImports]
 
-from robot_action_composer.cartesian_stages import (  # pyright: ignore[reportMissingImports]
-    ArmSide,
-    SendMode,
-    StageTarget,
-    execute_stage_sequence,
-)
+from robot_action_composer.motion_generation.sequence.cartesian_stages import StageTarget  # pyright: ignore[reportMissingImports]
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset  # pyright: ignore[reportMissingImports]
 from lerobot_robot_ros2 import (  # pyright: ignore[reportMissingImports]
@@ -35,23 +29,22 @@ from lerobot_robot_ros2 import (  # pyright: ignore[reportMissingImports]
     ROS2RobotConfig,
 )
 from robot_action_composer.dataset_recording.recorder import DatasetRecorder  # pyright: ignore[reportMissingImports]
-from robot_action_composer.motion_generation.handover import build_handover_record_sequence  # pyright: ignore[reportMissingImports]
-from robot_action_composer.motion_generation.movej_return import (  # pyright: ignore[reportMissingImports]
+import robot_action_composer.task_runtime.skills  # noqa: F401 - register skills
+
+from robot_action_composer.motion_generation.tasks.movej_return import (  # pyright: ignore[reportMissingImports]
     capture_initial_arm_joint_positions,
+    capture_initial_body_joint_positions,
     movej_return_to_initial_state,
 )
-from robot_action_composer.motion_generation.pick_place import (  # pyright: ignore[reportMissingImports]
-    build_single_arm_pick_place_sequence,
-    resolve_pick_place_place_from_entity,
+from robot_action_composer.isaac_sim import SimTimeHelper  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.runner import (  # pyright: ignore[reportMissingImports]
+    _execute_block,
+    _execute_parallel,
+    build_queue_runtime_context,
+    reset_queue_task_environment,
 )
-from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
-    SimTimeHelper,
-    get_entity_pose_world_service,
-    get_object_pose_from_service,
-    reset_simulation_and_randomize_object,
-)
-
-SUPPORTED_RECORD_KINDS: tuple[str, ...] = ("pick_place", "handover")
+from robot_action_composer.task_runtime.config.merged import MergedQueueConfig  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec, block_spec_from_mapping  # pyright: ignore[reportMissingImports]
 
 
 @dataclass(frozen=True)
@@ -133,12 +126,6 @@ class DepthCameraInfoListener:
         self._node.destroy_node()
 
 
-def _resolve_gripper_values(gripper_control_mode: str) -> tuple[float, float]:
-    if gripper_control_mode == "target_command":
-        return 1.0, 0.0
-    raise ValueError("record runner only supports gripper_control_mode='target_command'")
-
-
 def _build_robot_config(*, robot_cfg: Any, record_cfg: Any) -> ROS2RobotConfig:
     if not getattr(robot_cfg, "cameras", None):
         raise ValueError("robot_cfg.cameras must contain at least one camera definition")
@@ -152,50 +139,6 @@ def _build_robot_config(*, robot_cfg: Any, record_cfg: Any) -> ROS2RobotConfig:
         ros2_interface=robot_cfg.ros2_interface,
         gripper_control_mode=robot_cfg.gripper_control_mode,
     )
-
-
-def _pose_from_observation(obs: dict[str, float], *, ee_prefix: str = "left_ee") -> Pose:
-    pose = Pose()
-    pose.position.x = obs.get(f"{ee_prefix}.pos.x", 0.0)
-    pose.position.y = obs.get(f"{ee_prefix}.pos.y", 0.0)
-    pose.position.z = obs.get(f"{ee_prefix}.pos.z", 0.0)
-    pose.orientation.x = obs.get(f"{ee_prefix}.quat.x", 0.0)
-    pose.orientation.y = obs.get(f"{ee_prefix}.quat.y", 0.0)
-    pose.orientation.z = obs.get(f"{ee_prefix}.quat.z", 0.0)
-    pose.orientation.w = obs.get(f"{ee_prefix}.quat.w", 1.0)
-    return pose
-
-
-def _apply_target_pose_offset(pose: Pose, offset: tuple[float, float, float]) -> Pose:
-    ox, oy, oz = offset
-    pose.position.x += ox
-    pose.position.y += oy
-    pose.position.z += oz
-    return pose
-
-
-def _resolve_arm_grasp_config(
-    task_cfg: Any,
-    *,
-    is_right: bool,
-) -> tuple[tuple[float, float, float, float], str, tuple[float, float, float] | None]:
-    if is_right:
-        orientation = getattr(task_cfg, "right_grasp_orientation", None) or task_cfg.grasp_orientation
-        direction = getattr(task_cfg, "right_grasp_direction", None) or task_cfg.grasp_direction
-        direction_vector = (
-            getattr(task_cfg, "right_grasp_direction_vector", None)
-            if getattr(task_cfg, "right_grasp_direction_vector", None) is not None
-            else task_cfg.grasp_direction_vector
-        )
-    else:
-        orientation = getattr(task_cfg, "left_grasp_orientation", None) or task_cfg.grasp_orientation
-        direction = getattr(task_cfg, "left_grasp_direction", None) or task_cfg.grasp_direction
-        direction_vector = (
-            getattr(task_cfg, "left_grasp_direction_vector", None)
-            if getattr(task_cfg, "left_grasp_direction_vector", None) is not None
-            else task_cfg.grasp_direction_vector
-        )
-    return orientation, direction, direction_vector
 
 
 def _save_pointcloud_frame(
@@ -268,16 +211,11 @@ def run_recording(
     loops: int,
     enable_keypoint_pcd: bool,
     enable_manual_episode_check: bool,
-    task_kind: str = "pick_place",
     task_name: str | None = None,
     use_stamped: bool = True,
+    merged_task_queue: list[Any] | None = None,
 ) -> None:
-    if task_kind not in SUPPORTED_RECORD_KINDS:
-        raise NotImplementedError(f"Record runner does not support task kind: {task_kind}")
-
-    gripper_open, gripper_closed = _resolve_gripper_values(robot_cfg.gripper_control_mode)
-    resolved_task_name = str(task_name if task_name else getattr(record_cfg, "task_name", task_kind))
-    frame_id = robot_cfg.base_link_entity_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
+    resolved_task_name = str(task_name if task_name else getattr(record_cfg, "task_name", "queue_task"))
     robot = ROS2Robot(_build_robot_config(robot_cfg=robot_cfg, record_cfg=record_cfg))
     depth_required = bool(enable_keypoint_pcd)
     default_cam_name = next(iter(robot_cfg.cameras.keys()), "")
@@ -380,49 +318,24 @@ def run_recording(
             writer_thread = threading.Thread(target=_writer_loop, daemon=True)
             writer_thread.start()
 
-        initial_obs = robot.get_observation()
-        left_initial_joint_positions, right_initial_joint_positions = capture_initial_arm_joint_positions(robot.ros2_interface)
-        pick_source_is_right = False
-        pick_source_ee_prefix = "left_ee"
-        pick_source_home_pose: Pose | None = None
-        pick_source_ee_frame_id = frame_id
-        if task_kind == "pick_place":
-            pick_initial_arm = task_cfg.initial_grasp_arm.lower()
-            if pick_initial_arm not in {"left", "right"}:
-                raise ValueError("initial_grasp_arm must be 'left' or 'right'")
-            pick_source_is_right = pick_initial_arm == "right"
-            pick_source_ee_prefix = "right_ee" if pick_source_is_right else "left_ee"
-            pick_source_home_pose = _pose_from_observation(initial_obs, ee_prefix=pick_source_ee_prefix)
-            pick_source_handler = (
-                robot.ros2_interface.right_arm_handler
-                if pick_source_is_right
-                else robot.ros2_interface.left_arm_handler
+        if not merged_task_queue:
+            raise ValueError(
+                "Recording requires merged_task_queue (task_queue merged with skill_defaults / scene)"
             )
-            pick_source_ee_frame_id = (
-                (pick_source_handler.frame_id if pick_source_handler else None) or frame_id
+        if not isinstance(task_cfg, MergedQueueConfig):
+            raise TypeError(
+                "Recording expects task_cfg: MergedQueueConfig "
+                f"(from build_merged_queue_from_flat), got {type(task_cfg).__name__}"
             )
+        task_runtime: MergedQueueConfig = task_cfg
+        pick_specs: list[BlockSpec | ParallelSpec] = [
+            block_spec_from_mapping(b) if isinstance(b, dict) else b for b in merged_task_queue
+        ]
 
-        source_is_right = False
-        source_home_pose: Pose | None = None
-        receiver_home_pose: Pose | None = None
-        handover_source_ee_frame_id = frame_id
-        if task_kind == "handover":
-            initial_arm = task_cfg.initial_grasp_arm.lower()
-            if initial_arm not in {"left", "right"}:
-                raise ValueError("initial_grasp_arm must be 'left' or 'right'")
-            source_is_right = initial_arm == "right"
-            source_ee_prefix = "right_ee" if source_is_right else "left_ee"
-            receiver_ee_prefix = "left_ee" if source_is_right else "right_ee"
-            source_home_pose = _pose_from_observation(initial_obs, ee_prefix=source_ee_prefix)
-            receiver_home_pose = _pose_from_observation(initial_obs, ee_prefix=receiver_ee_prefix)
-            source_handler = (
-                robot.ros2_interface.right_arm_handler
-                if source_is_right
-                else robot.ros2_interface.left_arm_handler
-            )
-            handover_source_ee_frame_id = (
-                (source_handler.frame_id if source_handler else None) or frame_id
-            )
+        left_initial_joint_positions, right_initial_joint_positions = capture_initial_arm_joint_positions(
+            robot.ros2_interface
+        )
+        body_initial_joint_positions = capture_initial_body_joint_positions(robot.ros2_interface)
 
         kept_episode = 0
         while kept_episode < loops:
@@ -433,85 +346,24 @@ def run_recording(
                 sim_time.sleep(robot_cfg.fsm_switch_delay)
                 in_ocs2 = True
             episode_index = kept_episode
-            reset_simulation_and_randomize_object(
-                task_cfg.source_object_entity_path,
-                xyz_offset=task_cfg.object_xyz_random_offset,
-                post_reset_wait=robot_cfg.post_reset_wait,
-                sleep_fn=sim_time.sleep,
-            )
-            base_world_pos, base_world_quat = get_entity_pose_world_service(robot_cfg.base_link_entity_path)
-            target_pose = get_object_pose_from_service(
-                base_world_pos,
-                base_world_quat,
-                task_cfg.source_object_entity_path,
-                include_orientation=getattr(task_cfg, "use_object_orientation", False),
-            )
 
-            if task_kind == "pick_place":
-                current_obs = robot.get_observation()
-                task_cfg = resolve_pick_place_place_from_entity(
-                    task_cfg,
-                    base_world_pos=base_world_pos,
-                    base_world_quat=base_world_quat,
-                    current_obs=current_obs,
-                    ee_prefix_for_orientation_fallback=pick_source_ee_prefix,
-                )
-                target_pose = _apply_target_pose_offset(
-                    target_pose,
-                    getattr(task_cfg, "target_pose_offset", (0.0, 0.0, 0.0)),
-                )
-                orientation_vec = np.array(
-                    [target_pose.orientation.x, target_pose.orientation.y, target_pose.orientation.z, target_pose.orientation.w]
-                )
-                if not getattr(task_cfg, "use_object_orientation", False) or np.linalg.norm(orientation_vec) < 1e-3:
-                    target_pose.orientation.x = current_obs[f"{pick_source_ee_prefix}.quat.x"]
-                    target_pose.orientation.y = current_obs[f"{pick_source_ee_prefix}.quat.y"]
-                    target_pose.orientation.z = current_obs[f"{pick_source_ee_prefix}.quat.z"]
-                    target_pose.orientation.w = current_obs[f"{pick_source_ee_prefix}.quat.w"]
-                source_grasp_orientation, source_grasp_direction, source_grasp_direction_vector = (
-                    _resolve_arm_grasp_config(task_cfg, is_right=pick_source_is_right)
-                )
-                sequence = build_single_arm_pick_place_sequence(
-                    target_pose=target_pose,
-                    task_cfg=task_cfg,
-                    home_pose=(
-                        pick_source_home_pose
-                        if pick_source_home_pose is not None
-                        else _pose_from_observation(initial_obs, ee_prefix=pick_source_ee_prefix)
-                    ),
-                    arm_side=ArmSide.RIGHT if pick_source_is_right else ArmSide.LEFT,
-                    gripper_open=gripper_open,
-                    gripper_closed=gripper_closed,
-                    grasp_orientation=source_grasp_orientation,
-                    grasp_direction=source_grasp_direction,
-                    grasp_direction_vector=source_grasp_direction_vector,
-                )
-                if use_stamped:
-                    for stage in sequence:
-                        if "ReturnHome" in stage.name:
-                            stage.frame_id = pick_source_ee_frame_id
-            elif task_kind == "handover":
-                if source_home_pose is None or receiver_home_pose is None:
-                    raise RuntimeError("Failed to initialize handover home poses")
-                sequence = build_handover_record_sequence(
-                    handover_task_cfg=task_cfg,
-                    source_target_pose=target_pose,
-                    source_home_pose=source_home_pose,
-                    receiver_home_pose=receiver_home_pose,
-                    source_is_right=source_is_right,
-                    gripper_open=gripper_open,
-                    gripper_closed=gripper_closed,
-                )
-                if use_stamped:
-                    for stage in sequence:
-                        if "ReturnHome" in stage.name:
-                            stage.frame_id = handover_source_ee_frame_id
-            else:
-                raise NotImplementedError(f"Unsupported task kind: {task_kind}")
+            reset_queue_task_environment(
+                specs=pick_specs,
+                runtime=task_runtime,
+                robot_cfg=robot_cfg,
+                sim_time=sim_time,
+            )
+            ctx = build_queue_runtime_context(
+                interface=robot.ros2_interface,
+                robot_cfg=robot_cfg,
+                sim_time=sim_time,
+                runtime=task_runtime,
+                use_stamped=use_stamped,
+            )
             recorder = DatasetRecorder(
                 robot=robot,
                 sim_time=sim_time,
-                task_cfg=task_cfg,
+                task_cfg=task_runtime.single_arm,
                 dataset_features=features,
                 dataset_root=out_root,
                 episode_index=episode_index,
@@ -524,38 +376,28 @@ def run_recording(
             )
             recorder.start_sequence()
             stage_start_bridge = _make_recorder_stage_start_bridge(recorder)
-
-            if task_kind == "pick_place":
-                execute_stage_sequence(
-                    interface=robot.ros2_interface,
-                    sequence=sequence,
-                    send_mode=SendMode.STAMPED if use_stamped else SendMode.UNSTAMPED,
-                    frame_id=frame_id,
-                    arrival_timeout=robot_cfg.arrival_timeout,
-                    arrival_poll=robot_cfg.arrival_poll,
-                    time_now_fn=sim_time.now_seconds,
-                    sleep_fn=sim_time.sleep,
-                    gripper_action_wait=robot_cfg.gripper_action_wait,
-                    warn_prefix="PickPlace stage timeout",
-                    on_stage_start=stage_start_bridge,
-                    on_stage_poll=recorder.on_stage_poll,
-                )
-            elif task_kind == "handover":
-                execute_stage_sequence(
-                    interface=robot.ros2_interface,
-                    sequence=sequence,
-                    send_mode=SendMode.DUAL_ARM_STAMPED if use_stamped else SendMode.UNSTAMPED,
-                    frame_id=frame_id,
-                    arrival_timeout=robot_cfg.arrival_timeout,
-                    arrival_poll=robot_cfg.arrival_poll,
-                    time_now_fn=sim_time.now_seconds,
-                    sleep_fn=sim_time.sleep,
-                    gripper_action_wait=robot_cfg.gripper_action_wait,
-                    left_arrival_guard_stage="Handover-1-SyncMove" if source_is_right else None,
-                    warn_prefix="Handover stage timeout",
-                    on_stage_start=stage_start_bridge,
-                    on_stage_poll=recorder.on_stage_poll,
-                )
+            exec_extras = {
+                "on_stage_start": stage_start_bridge,
+                "on_stage_poll": recorder.on_stage_poll,
+            }
+            for idx, spec in enumerate(pick_specs):
+                lbl = f"block {idx + 1}/{len(pick_specs)}"
+                if isinstance(spec, ParallelSpec):
+                    _execute_parallel(
+                        ctx,
+                        spec,
+                        runner_prefix="RecordQ",
+                        idx_label=lbl,
+                        execute_stage_kwargs=exec_extras,
+                    )
+                else:
+                    _execute_block(
+                        ctx,
+                        spec,
+                        runner_prefix="RecordQ",
+                        idx_label=lbl,
+                        execute_stage_kwargs=exec_extras,
+                    )
             episode_records = recorder.finish_sequence()
             if not episode_records:
                 raise RuntimeError("No frames captured during sequence.")
@@ -566,6 +408,7 @@ def run_recording(
                         interface=robot.ros2_interface,
                         left_initial_positions=left_initial_joint_positions,
                         right_initial_positions=right_initial_joint_positions,
+                        body_initial_positions=body_initial_joint_positions,
                         arrival_timeout=robot_cfg.arrival_timeout,
                         arrival_poll=robot_cfg.arrival_poll,
                         sim_time=sim_time,

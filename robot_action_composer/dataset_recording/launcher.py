@@ -37,7 +37,8 @@ def select_option(*, title: str, options: dict[str, dict[str, Any]], default_key
     for idx, key in enumerate(keys, start=1):
         label = options[key].get("label", key)
         suffix = " (default)" if key == default_key else ""
-        print(f"  {idx}. {label} [{key}]{suffix}")
+        bracket = key if key else "top-level"
+        print(f"  {idx}. {label} [{bracket}]{suffix}")
     raw = input("Select option (press Enter for default): ").strip()
     if raw == "":
         return default_key
@@ -49,6 +50,62 @@ def select_option(*, title: str, options: dict[str, dict[str, Any]], default_key
         return raw
     print(f"[info] Invalid option '{raw}', using default '{default_key}'.")
     return default_key
+
+
+def task_group_menu_label(group_id: str) -> str:
+    """Human label for a ``task_groups`` key (``\"\"`` = YAML directly under ``task_configs/``)."""
+    return "Top level" if group_id == "" else group_id
+
+
+def select_task_with_optional_group(
+    *,
+    title_group: str,
+    title_task: str,
+    tasks: dict[str, dict[str, Any]],
+    task_groups: dict[str, list[str]],
+    default_task_key: str,
+) -> str:
+    """If tasks span multiple first-level folders, prompt for folder then task; else one menu."""
+    if not tasks:
+        raise ValueError("select_task_with_optional_group: empty tasks")
+
+    filtered: dict[str, list[str]] = {}
+    for gid in sorted(task_groups.keys(), key=lambda g: (g != "", g)):
+        present = [k for k in task_groups[gid] if k in tasks]
+        if present:
+            filtered[gid] = present
+
+    assigned: set[str] = set()
+    for keys in filtered.values():
+        assigned.update(keys)
+    missing = [k for k in tasks if k not in assigned]
+    if missing:
+        bucket = filtered.setdefault("", [])
+        bucket.extend(missing)
+        filtered[""] = sorted(set(bucket))
+
+    if not filtered:
+        raise ValueError("select_task_with_optional_group: no task keys overlap task_groups and tasks")
+
+    if len(filtered) <= 1:
+        options = {k: {"label": str(tasks[k].get("label", k))} for k in tasks}
+        default = default_task_key if default_task_key in options else next(iter(options))
+        return select_option(title=title_task, options=options, default_key=default)
+
+    default_group = next(iter(sorted(filtered.keys(), key=lambda g: (g != "", g))))
+    for gid, keys in filtered.items():
+        if default_task_key in keys:
+            default_group = gid
+            break
+
+    group_options = {gid: {"label": task_group_menu_label(gid)} for gid in sorted(filtered.keys(), key=lambda g: (g != "", g))}
+    chosen_group = select_option(title=title_group, options=group_options, default_key=default_group)
+
+    subset = filtered[chosen_group]
+    sub = {k: tasks[k] for k in subset}
+    options = {k: {"label": str(sub[k].get("label", k))} for k in subset}
+    sub_default = default_task_key if default_task_key in subset else subset[0]
+    return select_option(title=title_task, options=options, default_key=sub_default)
 
 
 def collect_runtime_options(

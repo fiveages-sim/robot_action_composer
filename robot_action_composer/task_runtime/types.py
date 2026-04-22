@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Union
 
-from robot_action_composer.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.sequence.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
 
 
 @dataclass(frozen=True)
@@ -27,13 +27,13 @@ class BlockSpec:
     ``id`` is an optional logical name used as the parameter lookup key in
     ``skill_defaults`` and ``scene_presets.skill_params``.  This allows the
     same skill to appear multiple times in the queue with different
-    configurations — e.g. two ``robot.navigate_to_object`` steps where one
+    configurations — e.g. two ``nav.navigate_to_object`` steps where one
     navigates to the pick location and another to the place location::
 
         task_queue:
-          - skill: robot.navigate_to_object
+          - skill: nav.navigate_to_object
             id: nav_to_pick
-          - skill: robot.navigate_to_object
+          - skill: nav.navigate_to_object
             id: nav_to_place
 
         skill_defaults:
@@ -69,9 +69,10 @@ class ParallelSpec:
 
         task_queue:
           - parallel:
-              - skill: robot.navigate_to_object
+              - skill: nav.navigate_to_object
                 id: nav_to_pick
-              - skill: single_arm.pregrasp   # 导航期间同步运动到预备位
+              - skill: joint.movej_to_config   # 导航期间同步运动到预抓取位置
+                id: move_to_pre_grasp
           - skill: single_arm.pick
 
     子步骤中只允许 :class:`BlockSpec`（不支持嵌套 ``parallel:``）。
