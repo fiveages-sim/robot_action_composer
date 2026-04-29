@@ -96,7 +96,7 @@ scene_presets:
 
 ### 顶层常见字段
 
-- `task_key` / `label` / `robot_id` / `default_scene`
+- `task_key` / `label` / `default_scene`
 - `use_stamped`
 - `runtime_defaults`
 - `skill_defaults`

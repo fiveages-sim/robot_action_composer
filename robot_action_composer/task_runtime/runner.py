@@ -294,7 +294,6 @@ def run_task_queue(
     *,
     robot_cfg: Any,
     runtime: MergedQueueConfig,
-    robot_id: str,
     blocks: Sequence[BlockSpec | dict[str, Any]],
     reset_env: bool = True,
     use_stamped: bool = True,
@@ -377,7 +376,6 @@ def run_task_queue_on_connected_interface(
     sim_time: SimTimeHelper,
     robot_cfg: Any,
     runtime: MergedQueueConfig,
-    robot_id: str,  # noqa: ARG001
     blocks: Sequence[BlockSpec | dict[str, Any]],
     reset_env: bool = True,
     use_stamped: bool = True,

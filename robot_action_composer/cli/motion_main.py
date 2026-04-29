@@ -598,7 +598,6 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                         sim_time=sim_time,
                         robot_cfg=robot_entry["robot_cfg"],
                         runtime=runtime,
-                        robot_id=task_entry_seg["robot_id"],
                         blocks=merged_queue,
                         reset_env=should_reset_env,
                         use_stamped=use_stamped_seg,
@@ -640,7 +639,6 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                         sim_time=sim_time,
                         robot_cfg=robot_entry["robot_cfg"],
                         runtime=runtime,
-                        robot_id=task_entry["robot_id"],
                         blocks=merged_queue,
                         reset_env=should_reset_env,
                         use_stamped=use_stamped,
@@ -661,7 +659,6 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
             run_task_queue(
                 robot_cfg=robot_entry["robot_cfg"],
                 runtime=runtime,
-                robot_id=task_entry["robot_id"],
                 blocks=merged_queue,
                 reset_env=reset_env,
                 use_stamped=use_stamped,
