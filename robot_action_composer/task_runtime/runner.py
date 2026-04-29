@@ -136,7 +136,7 @@ def effective_base_link_entity_path(*, robot_cfg: Any, runtime: MergedQueueConfi
             return ps
     raise ValueError(
         "Isaac base prim path is required: set robot_cfg.base_link_entity_path "
-        "or task base_task_overrides.base_link_entity_path"
+        "or task runtime_defaults.base_link_entity_path"
     )
 
 

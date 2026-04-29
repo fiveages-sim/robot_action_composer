@@ -460,5 +460,5 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
 
 ## 6. 配置项放在哪一层（速查）
 
-与 § 开头「约定」一致：**默认** → `skill_defaults`；**按场景覆盖** → `scene_presets.<scene>.skill_params`；**仅本块** → `task_queue` 里该块的 `params`；**与具体技能无关、整任务共用** → `base_task_overrides`。  
+与 § 开头「约定」一致：**默认** → `skill_defaults`；**按场景覆盖** → `scene_presets.<scene>.skill_params`；**仅本块** → `task_queue` 里该块的 `params`；**与具体技能无关、整任务共用** → `runtime_defaults`（仅 `base_link_entity_path` / `max_stage_duration` / `pose_tol_pos` / `pose_tol_ori`）。  
 **合并顺序、禁止项与示例**以 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md) 为准（本节不展开）。

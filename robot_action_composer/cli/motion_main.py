@@ -246,7 +246,7 @@ def _build_runtime_for_scene(
     scene: str,
     allowed: frozenset[str],
 ) -> tuple[Any, list[Any]]:
-    from robot_action_composer.task_config_io import queue_root_overrides
+    from robot_action_composer.task_config_io import queue_root_overrides, validate_runtime_defaults_keys
     from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
         merge_task_queue_skill_params,
     )
@@ -257,8 +257,14 @@ def _build_runtime_for_scene(
     scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
     scene_sd = scene_presets.get(scene, {})
 
-    base_root = queue_root_overrides(task_entry["base_task_overrides"])
-    scene_root = queue_root_overrides(scene_sd)
+    base_root = validate_runtime_defaults_keys(
+        task_entry["runtime_defaults"],
+        context="task.runtime_defaults",
+    )
+    scene_root = validate_runtime_defaults_keys(
+        scene_sd,
+        context=f"scene_presets.{scene}",
+    )
     unknown_scene = [k for k in scene_root if k not in allowed]
     if unknown_scene:
         raise ValueError(f"Unknown scene preset keys for queue task: {unknown_scene}")
@@ -266,7 +272,7 @@ def _build_runtime_for_scene(
     skill_defaults = dict(task_entry.get("skill_defaults") or {})
     scene_skill_params = dict(scene_sd.get("skill_params") or {})
     runtime = build_merged_queue_config(
-        base_task_overrides=base_root,
+        runtime_defaults=base_root,
         skill_defaults=skill_defaults,
         scene_preset=scene_sd,
     )

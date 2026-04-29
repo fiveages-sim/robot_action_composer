@@ -28,7 +28,9 @@ task_key: pick_place
 label: Pick Place
 default_scene: scene_a
 
-base_task_overrides:
+runtime_defaults:
+  base_link_entity_path: /World/robot/base_link
+  max_stage_duration: 2.0
   pose_tol_pos: 0.025
   pose_tol_ori: 0.08
 
@@ -96,14 +98,29 @@ scene_presets:
 
 - `task_key` / `label` / `robot_id` / `default_scene`
 - `use_stamped`
-- `base_task_overrides`
+- `runtime_defaults`
 - `skill_defaults`
 - `task_queue`
 - `scene_presets`
 
+### `runtime_defaults` 允许键（严格）
+
+`runtime_defaults`（以及 `scene_presets.<scene>` 根层）仅允许以下 4 个键：
+
+- `base_link_entity_path`
+- `max_stage_duration`
+- `pose_tol_pos`
+- `pose_tol_ori`
+
+其他字段（抓取/放置几何、双臂参数、drawer/handover 参数等）必须写在：
+
+- `skill_defaults.<skill_or_id>`
+- `scene_presets.<scene>.skill_params.<skill_or_id>`
+- 对应 block 的 `params`
+
 ### 合并优先级（低 -> 高）
 
-1. `base_task_overrides`
+1. `runtime_defaults`（仅 4 个基础键）
 2. `skill_defaults`
 3. `scene_presets.<scene>.skill_params`
 4. 当前块 `params`
@@ -120,8 +137,8 @@ scene_presets:
 ### 关键补充规则
 
 - pick/place 都有 `arm` 时：全局主臂以 pick 为准；place 的 `arm` 只作用于其块执行。
-- `base_link_entity_path` 可在 `base_task_overrides` 或场景根覆盖机器人默认 base prim。
-- `pose_tol_pos` / `pose_tol_ori` 可在 `base_task_overrides` 或场景根配置，作用于笛卡尔到达判定。
+- `base_link_entity_path` 可在 `runtime_defaults` 或场景根覆盖机器人默认 base prim。
+- `pose_tol_pos` / `pose_tol_ori` / `max_stage_duration` 可在 `runtime_defaults` 或场景根配置，作用于流程级判定。
 
 ---
 
