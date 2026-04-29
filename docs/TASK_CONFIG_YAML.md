@@ -137,6 +137,24 @@ scene_presets:
 
 并行导航时如需避免 HOLD 打断 Nav2，可设：`skip_fsm_hold: true`
 
+并行子步骤支持可选延迟（仿真时钟秒）：
+
+```yaml
+task_queue:
+  - parallel:
+      - skill: nav.navigate_to_object
+        id: nav_to_carry
+      - skill: joint.movej_to_config
+        id: navigate_gesture
+        start_delay_s: 2.0   # 延后 2 秒再派发该子技能
+```
+
+说明：
+
+- `start_delay_s` 写在 **block 顶层**（与 `skill` / `id` 同级），不是 `params`。
+- 该延迟使用 `sim_time.sleep(...)`，按仿真时钟推进。
+- 可用于顺序块与并行子块；并行场景中通常最有用。
+
 ### 缓存回程
 
 - 笛卡尔：`robot.cache_ee_pose` + `single_arm.goto_cache_pose` / `dual_arm.goto_cache_pose`

@@ -107,6 +107,7 @@ def _try_place(
         "place_prepare_offset": carry.carry_prepare_offset,
         "place_left_orientation": carry.left_base_orientation,
         "place_right_orientation": carry.right_base_orientation,
+        "place_pregrasp_lower_xyz": carry.ee_pregrasp_lift_offset,
         "place_lift_xyz": carry.ee_lift_offset,
         "place_retreat_xyz": carry.ee_retreat_offset,
         "place_approach_clearance_y": carry.arm_merge_distance_y,

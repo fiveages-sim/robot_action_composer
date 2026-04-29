@@ -8,7 +8,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 def _load_module(module_name: str, file_path: Path) -> Any:
@@ -53,16 +53,37 @@ def _discover_task_registry(isaac_dir: Path) -> dict[str, dict[str, Any]]:
     return registry
 
 
-def _select_option(*, title: str, options: list[str], default_value: str) -> str:
+def _select_option(
+    *,
+    title: str,
+    options: list[str],
+    default_value: str,
+    allow_back: bool = False,
+) -> str:
+    """List-based menu. With ``allow_back=True``, ``0`` / ``b`` / ``back`` returns ``\"__back__\"``."""
     print(f"\n{title}")
+    if allow_back:
+        print("  0. « Back (previous menu)")
     for idx, name in enumerate(options, start=1):
         suffix = " (default)" if name == default_value else ""
         print(f"  {idx}. {name}{suffix}")
-    raw = input("Select option (press Enter for default): ").strip()
+    prompt = (
+        "Select option (0/b/back = previous, Enter = default): "
+        if allow_back
+        else "Select option (press Enter for default): "
+    )
+    raw = input(prompt).strip()
     if raw == "":
         return default_value
+    if allow_back:
+        rl = raw.lower()
+        if raw == "0" or rl in ("b", "back"):
+            return "__back__"
     if raw.isdigit():
-        index = int(raw) - 1
+        n = int(raw)
+        if allow_back and n == 0:
+            return "__back__"
+        index = n - 1
         if 0 <= index < len(options):
             return options[index]
     if raw in options:
@@ -71,11 +92,20 @@ def _select_option(*, title: str, options: list[str], default_value: str) -> str
     return default_value
 
 
+class _ChainSegmentDict(TypedDict):
+    task_key: str
+    scene: str
+
+
 class _MotionLastDict(TypedDict, total=False):
     isaac_dir: str
     robot_key: str
+    """Single-task mode (default when ``mode`` is absent or ``single``)."""
     task_key: str
     scene: str
+    """``chain``: multi-segment run; ``single`` or omitted: one task + scene."""
+    mode: Literal["single", "chain"]
+    chain_segments: list[_ChainSegmentDict]
     num_runs: int
     reset_env: bool
 
@@ -101,25 +131,48 @@ def _save_motion_last(
     *,
     isaac_dir: Path,
     robot_key: str,
-    task_key: str,
-    scene: str,
     num_runs: int,
     reset_env: bool,
+    task_key: str | None = None,
+    scene: str | None = None,
+    mode: Literal["single", "chain"] = "single",
+    chain_segments: list[_ChainSegmentDict] | None = None,
 ) -> None:
     path = _motion_last_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data: _MotionLastDict = {
+        data: dict[str, Any] = {
             "isaac_dir": str(isaac_dir.resolve()),
             "robot_key": robot_key,
-            "task_key": task_key,
-            "scene": scene,
             "num_runs": int(num_runs),
             "reset_env": bool(reset_env),
+            "mode": mode,
         }
+        if mode == "chain" and chain_segments:
+            data["chain_segments"] = list(chain_segments)
+        else:
+            if task_key is not None:
+                data["task_key"] = task_key
+            if scene is not None:
+                data["scene"] = scene
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     except OSError:
         pass
+
+
+def _segment_valid_for_robot(
+    robot_entry: dict[str, Any],
+    *,
+    task_key: str,
+    scene: str,
+) -> bool:
+    tasks_map = robot_entry.get("tasks") or {}
+    if task_key not in tasks_map:
+        return False
+    scene_presets = tasks_map[task_key].get("scene_presets") or {}
+    if scene == "__all__":
+        return bool(scene_presets)
+    return scene in scene_presets
 
 
 def _motion_last_applies(
@@ -131,21 +184,34 @@ def _motion_last_applies(
     if str(isaac_dir.resolve()) != last.get("isaac_dir"):
         return False
     rk = last.get("robot_key")
-    tk = last.get("task_key")
-    sc = last.get("scene")
-    if not isinstance(rk, str) or not isinstance(tk, str) or not isinstance(sc, str):
+    if not isinstance(rk, str):
         return False
     robot_entry = registry.get(rk)
     if not robot_entry:
         return False
-    tasks_map = robot_entry.get("tasks") or {}
-    if tk not in tasks_map:
-        return False
-    scene_presets = tasks_map[tk].get("scene_presets") or {}
-    if sc != "__all__" and sc not in scene_presets:
-        return False
-    if sc == "__all__" and not scene_presets:
-        return False
+
+    mode = last.get("mode", "single")
+    if mode == "chain":
+        segs = last.get("chain_segments")
+        if not isinstance(segs, list) or len(segs) < 1:
+            return False
+        for item in segs:
+            if not isinstance(item, dict):
+                return False
+            tk = item.get("task_key")
+            sc = item.get("scene")
+            if not isinstance(tk, str) or not isinstance(sc, str):
+                return False
+            if not _segment_valid_for_robot(robot_entry, task_key=tk, scene=sc):
+                return False
+    else:
+        tk = last.get("task_key")
+        sc = last.get("scene")
+        if not isinstance(tk, str) or not isinstance(sc, str):
+            return False
+        if not _segment_valid_for_robot(robot_entry, task_key=tk, scene=sc):
+            return False
+
     n = last.get("num_runs", 1)
     if not isinstance(n, int) or n < 1:
         return False
@@ -154,11 +220,22 @@ def _motion_last_applies(
 
 def _format_motion_last_line(last: _MotionLastDict) -> str:
     rk = last.get("robot_key", "?")
-    tk = last.get("task_key", "?")
-    sc = last.get("scene", "?")
     n = last.get("num_runs", 1)
     re_ = last.get("reset_env", True)
     reset_s = "yes" if re_ else "no"
+    mode = last.get("mode", "single")
+    if mode == "chain":
+        segs = last.get("chain_segments") or []
+        parts: list[str] = []
+        for s in segs:
+            if isinstance(s, dict):
+                tk = s.get("task_key", "?")
+                sc = s.get("scene", "?")
+                parts.append(f"{tk}@{sc}")
+        chain_s = " + ".join(parts) if parts else "?"
+        return f"robot={rk}  mode=chain  segments=[{chain_s}]  runs={n}  reset_env={reset_s}"
+    tk = last.get("task_key", "?")
+    sc = last.get("scene", "?")
     scene_s = "ALL_SCENES" if sc == "__all__" else str(sc)
     return f"robot={rk}  task={tk}  scene={scene_s}  runs={n}  reset_env={reset_s}"
 
@@ -227,6 +304,76 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
     return frozenset(names)
 
 
+def _prompt_chain_segments(*, robot_entry: dict[str, Any]) -> list[_ChainSegmentDict]:
+    """Interactive: append segments until user stops (same robot)."""
+    from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
+        select_task_with_optional_group,
+    )
+
+    tasks_map: dict[str, Any] = robot_entry["tasks"]
+    task_options = {key: {"label": str(meta.get("label", key))} for key, meta in tasks_map.items()}
+    default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
+    segments: list[_ChainSegmentDict] = []
+    while True:
+        while True:
+            task_key = select_task_with_optional_group(
+                title_group="Select task folder (segment)",
+                title_task="Select task for this segment",
+                tasks=task_options,
+                task_groups=robot_entry.get("task_groups", {}),
+                default_task_key=default_task_key,
+            )
+            task_entry_one = tasks_map[task_key]
+            scene_presets: dict[str, dict[str, object]] = task_entry_one["scene_presets"]
+            scene_names = list(scene_presets.keys())
+            if not scene_names:
+                raise ValueError(f"Task {task_key!r} has no scene_presets")
+
+            used_pairs = {(s["task_key"], s["scene"]) for s in segments}
+            available_scenes = [sn for sn in scene_names if (task_key, sn) not in used_pairs]
+            if not available_scenes:
+                print(
+                    "[info] This task has no unused scene presets left in the chain "
+                    "(each task+scene pair can appear at most once). Pick another task, or Back."
+                )
+                continue
+
+            preferred = str(task_entry_one.get("default_scene") or available_scenes[0])
+            default_scene = preferred if preferred in available_scenes else available_scenes[0]
+
+            scene_options: list[str] = list(available_scenes)
+            if len(available_scenes) > 1:
+                scene_options.append("__all__")
+
+            scene = _select_option(
+                title="Select config (scene) for this segment (unused presets only)",
+                options=scene_options,
+                default_value=default_scene,
+                allow_back=True,
+            )
+            if scene == "__back__":
+                continue
+            break
+        if scene == "__all__":
+            print(
+                f"[info] Segment uses ALL_SCENES — expanding to {len(available_scenes)} "
+                f"sub-segment(s): {', '.join(available_scenes)}"
+            )
+            for sn in available_scenes:
+                segments.append({"task_key": task_key, "scene": sn})
+        else:
+            segments.append({"task_key": task_key, "scene": scene})
+        if len(segments) >= 30:
+            print("[info] Reached 30 segments; finishing chain.")
+            break
+        more = input("Add another segment to the chain? [y/N]: ").strip().lower()
+        if more not in {"y", "yes"}:
+            break
+    if not segments:
+        raise ValueError("Chain has no segments")
+    return segments
+
+
 def run_motion_generation(*, isaac_dir: Path) -> None:
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         format_merged_queue_summary,
@@ -246,17 +393,40 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
     print("=" * 70)
 
     last = _load_motion_last()
-    use_last = False
+    entry_kind: Literal["last_single", "last_chain", "interactive_single", "interactive_chain"] = (
+        "interactive_single"
+    )
     if last and _motion_last_applies(last, isaac_dir=isaac_dir, registry=registry):
         line = _format_motion_last_line(last)
         print("\nHow to run?")
         print(f"  1. Last selection — {line}")
-        print("  2. Interactive (choose robot / task / scene / …)")
-        raw_mode = input("Select [1/2] (Enter = 1): ").strip().lower()
+        print("  2. Interactive — single task")
+        print("  3. Interactive — multi-segment chain")
+        raw_mode = input("Select [1/2/3] (Enter = 1): ").strip().lower()
         if raw_mode in ("", "1"):
-            use_last = True
+            lm = last.get("mode", "single")
+            entry_kind = "last_chain" if lm == "chain" else "last_single"
+        elif raw_mode == "3":
+            entry_kind = "interactive_chain"
+        else:
+            entry_kind = "interactive_single"
+    else:
+        print("\nConfigure motion generation:")
+        print("  1. Single task")
+        print("  2. Multi-segment chain")
+        raw_cfg = input("Select [1/2] (Enter = 1): ").strip().lower()
+        entry_kind = "interactive_chain" if raw_cfg == "2" else "interactive_single"
 
-    if use_last and last:
+    robot_key: str
+    num_runs: int
+    reset_env: bool
+    robot_entry: dict[str, Any]
+    task_key: str = ""
+    scene: str = ""
+    task_entry: dict[str, Any] | None = None
+    chain_segments: list[_ChainSegmentDict] = []
+
+    if entry_kind == "last_single" and last:
         robot_key = str(last["robot_key"])
         task_key = str(last["task_key"])
         scene = str(last["scene"])
@@ -265,67 +435,118 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
         robot_entry = registry[robot_key]
         task_entry = robot_entry["tasks"][task_key]
         print(f"\n[info] Using last selection: {_format_motion_last_line(last)}")
+    elif entry_kind == "last_chain" and last:
+        robot_key = str(last["robot_key"])
+        num_runs = int(last.get("num_runs", 1))
+        reset_env = bool(last.get("reset_env", True))
+        robot_entry = registry[robot_key]
+        raw_segs = last.get("chain_segments")
+        if not isinstance(raw_segs, list):
+            raise RuntimeError("Last chain selection is invalid (missing chain_segments)")
+        chain_segments = [
+            {"task_key": str(s["task_key"]), "scene": str(s["scene"])}
+            for s in raw_segs
+            if isinstance(s, dict) and "task_key" in s and "scene" in s
+        ]
+        if not chain_segments:
+            raise RuntimeError("Last chain selection is empty")
+        print(f"\n[info] Using last selection: {_format_motion_last_line(last)}")
     else:
         robot_keys = list(registry.keys())
         default_robot = "dobot_cr5" if "dobot_cr5" in registry else robot_keys[0]
         robot_key = _select_option(title="Select robot", options=robot_keys, default_value=default_robot)
         robot_entry = registry[robot_key]
 
-        tasks_map = robot_entry["tasks"]
-        task_options = {
-            key: {"label": str(meta.get("label", key))}
-            for key, meta in tasks_map.items()
-        }
-        default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
-        task_key = select_task_with_optional_group(
-            title_group="Select task folder",
-            title_task="Select task",
-            tasks=task_options,
-            task_groups=robot_entry.get("task_groups", {}),
-            default_task_key=default_task_key,
-        )
-        task_entry = robot_entry["tasks"][task_key]
-
-        scene_presets = task_entry["scene_presets"]
-        scene_names = list(scene_presets.keys())
-        default_scene = task_entry["default_scene"]
-        scene = _select_option(
-            title="Select config",
-            options=(scene_names + ["__all__"]),
-            default_value=default_scene,
-        )
-
-        num_runs = prompt_positive_int(
-            "How many motion runs? (Enter = 1): ",
-            default=1,
-            min_value=1,
-        )
-
-        run_all_scenes = scene == "__all__"
-        if num_runs > 1:
-            reset_env = True
-            print(
-                "[info] Multiple motion runs: each run will reset the environment "
-                "& randomize the object (same as record episodes)."
+        if entry_kind == "interactive_chain":
+            chain_segments = _prompt_chain_segments(robot_entry=robot_entry)
+            num_runs = prompt_positive_int(
+                "How many full-chain motion runs? (Enter = 1): ",
+                default=1,
+                min_value=1,
             )
+            if num_runs > 1:
+                reset_env = True
+                print(
+                    "[info] Multiple chain runs: each run resets on the first segment only "
+                    "(same pattern as multi-scene motion)."
+                )
+            else:
+                reset_env = _select_option(
+                    title="Reset environment on first segment only?",
+                    options=["yes", "no"],
+                    default_value="yes",
+                ) == "yes"
         else:
-            reset_env = _select_option(
-                title="Reset environment & randomize object?",
-                options=["yes", "no"],
-                default_value="yes",
-            ) == "yes"
-    _save_motion_last(
-        isaac_dir=isaac_dir,
-        robot_key=robot_key,
-        task_key=task_key,
-        scene=scene,
-        num_runs=num_runs,
-        reset_env=reset_env,
-    )
+            tasks_map = robot_entry["tasks"]
+            task_options = {
+                key: {"label": str(meta.get("label", key))}
+                for key, meta in tasks_map.items()
+            }
+            default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
+            while True:
+                task_key = select_task_with_optional_group(
+                    title_group="Select task folder",
+                    title_task="Select task",
+                    tasks=task_options,
+                    task_groups=robot_entry.get("task_groups", {}),
+                    default_task_key=default_task_key,
+                )
+                task_entry = robot_entry["tasks"][task_key]
 
-    scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
-    use_stamped = task_entry.get("use_stamped", True)
-    scenes_to_run = list(scene_presets.keys()) if scene == "__all__" else [scene]
+                scene_presets = task_entry["scene_presets"]
+                scene_names = list(scene_presets.keys())
+                default_scene = task_entry["default_scene"]
+                if default_scene not in scene_names and scene_names:
+                    default_scene = scene_names[0]
+                scene = _select_option(
+                    title="Select config",
+                    options=(scene_names + ["__all__"]),
+                    default_value=default_scene,
+                    allow_back=True,
+                )
+                if scene == "__back__":
+                    continue
+                break
+
+            num_runs = prompt_positive_int(
+                "How many motion runs? (Enter = 1): ",
+                default=1,
+                min_value=1,
+            )
+
+            if num_runs > 1:
+                reset_env = True
+                print(
+                    "[info] Multiple motion runs: each run will reset the environment "
+                    "& randomize the object (same as record episodes)."
+                )
+            else:
+                reset_env = _select_option(
+                    title="Reset environment & randomize object?",
+                    options=["yes", "no"],
+                    default_value="yes",
+                ) == "yes"
+
+    if entry_kind in ("last_chain", "interactive_chain"):
+        _save_motion_last(
+            isaac_dir=isaac_dir,
+            robot_key=robot_key,
+            num_runs=num_runs,
+            reset_env=reset_env,
+            mode="chain",
+            chain_segments=chain_segments,
+        )
+    else:
+        assert task_entry is not None
+        _save_motion_last(
+            isaac_dir=isaac_dir,
+            robot_key=robot_key,
+            task_key=task_key,
+            scene=scene,
+            num_runs=num_runs,
+            reset_env=reset_env,
+            mode="single",
+        )
 
     allowed = _merged_queue_allowed_keys()
     import robot_action_composer.task_runtime.skills  # noqa: F401 - register built-in skills
@@ -334,6 +555,59 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
         run_task_queue,
         run_task_queue_on_connected_interface,
     )
+
+    if entry_kind in ("last_chain", "interactive_chain"):
+        for run_idx in range(num_runs):
+            interface = build_ros2_interface_from_robot_cfg(robot_entry["robot_cfg"])
+            sim_time = SimTimeHelper()
+            connected = False
+            try:
+                interface.connect()
+                connected = True
+                print("[OK] Robot connected (multi-segment chain)")
+                for seg_idx, seg in enumerate(chain_segments):
+                    tk = seg["task_key"]
+                    task_entry_seg = robot_entry["tasks"][tk]
+                    use_stamped_seg = task_entry_seg.get("use_stamped", True)
+                    scene_name = seg["scene"]
+                    runtime, merged_queue = _build_runtime_for_scene(
+                        task_entry=task_entry_seg,
+                        scene=scene_name,
+                        allowed=allowed,
+                    )
+                    print(format_merged_queue_summary(scene_name, runtime))
+                    should_reset_env = reset_env and (seg_idx == 0)
+                    print(
+                        f"\n{'=' * 70}\nChain run {run_idx + 1}/{num_runs} — "
+                        f"segment {seg_idx + 1}/{len(chain_segments)}  "
+                        f"task={tk!r}  scene={scene_name}\n{'=' * 70}"
+                    )
+                    if seg_idx > 0 and reset_env:
+                        print(
+                            "[info] Chain: skipping env reset for segments after the first "
+                            "(robot state continues across segments)."
+                        )
+                    run_task_queue_on_connected_interface(
+                        interface=interface,
+                        sim_time=sim_time,
+                        robot_cfg=robot_entry["robot_cfg"],
+                        runtime=runtime,
+                        robot_id=task_entry_seg["robot_id"],
+                        blocks=merged_queue,
+                        reset_env=should_reset_env,
+                        use_stamped=use_stamped_seg,
+                    )
+            finally:
+                sim_time.shutdown()
+                if connected:
+                    interface.disconnect()
+                    print("[OK] Robot disconnected")
+        return
+
+    assert task_entry is not None
+    scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
+    use_stamped = task_entry.get("use_stamped", True)
+    scenes_to_run = list(scene_presets.keys()) if scene == "__all__" else [scene]
 
     run_all_scenes = len(scenes_to_run) > 1
     for run_idx in range(num_runs):

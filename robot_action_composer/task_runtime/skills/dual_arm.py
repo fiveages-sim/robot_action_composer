@@ -346,6 +346,10 @@ def skill_place(
 
     params:
         translation_xyz: 平移 [x,y,z]（米），在 **motion 坐标系** 下同加；默认 [0,0,0]。
+        post_release_lower_xyz: 可选。在松爪后、外张前对左右同加的位移 [x,y,z]（motion 系）。
+            未显式给出时，若 ``carry.ee_pregrasp_lift_offset`` 存在，则默认取其相反数（用于先抬后抓的对称放置下降）。
+            且在 place 未显式配置下降分段时，若 ``carry.ee_lift_offset`` 存在，闭爪段优先映射为其相反数，
+            开爪段自动改为“到目标平移的剩余量”（保证两段合计仍到参考 offset）。
         spread_half: 单侧沿「右→左」在 motion 系 XY 平面的外张距离（米）；默认取 carry 的 ``arm_merge_distance_y`` 或 0.04。
         retreat_xyz: 外张后左右再同加的位移 [x,y,z]（motion 系）；默认取 carry 的 ``ee_retreat_offset`` 或 [-0.2,0,0]。
         reference_object_prim_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为放置参考点。
@@ -434,12 +438,39 @@ def skill_place(
 
     spread_half = float(params.get("spread_half", params.get("spread_y_half", default_spread)))
     ret = _param_vec3(params, "retreat_xyz", default_retreat)
+    post_release_lower = None
+    if "post_release_lower_xyz" in params:
+        post_release_lower = _param_vec3(params, "post_release_lower_xyz", (0.0, 0.0, 0.0))
+    elif carry is not None and getattr(carry, "ee_pregrasp_lift_offset", None) is not None:
+        pr = tuple(float(x) for x in carry.ee_pregrasp_lift_offset)
+        # 对称于 carry 的 pregrasp-lift：place 在开爪后默认下移同等位移。
+        post_release_lower = (-pr[0], -pr[1], -pr[2])
+    # place 未显式配置下降分段时，优先将 carry.ee_lift_offset 映射到闭爪下降段。
+    # 当前序列的闭爪段位移 = translation_xyz - post_release_lower_xyz，
+    # 因此这里把开爪段改成剩余量，确保闭爪段等于 -carry.ee_lift_offset，
+    # 同时两段合计仍精确到 reference offset。
+    if (
+        post_release_lower is not None
+        and "post_release_lower_xyz" not in params
+        and carry is not None
+        and getattr(carry, "ee_lift_offset", None) is not None
+    ):
+        cl = tuple(float(x) for x in carry.ee_lift_offset)
+        closed_lower = (-cl[0], -cl[1], -cl[2])
+        post_release_lower = (
+            tr[0] - closed_lower[0],
+            tr[1] - closed_lower[1],
+            tr[2] - closed_lower[2],
+        )
+    if post_release_lower is not None and max(abs(post_release_lower[0]), abs(post_release_lower[1]), abs(post_release_lower[2])) < 1e-12:
+        post_release_lower = None
 
     stages = build_bimanual_place_relative_sequence(
         left_current=l0,
         right_current=r0,
         translation_xyz=tr,
         spread_half=spread_half,
+        post_release_lower_xyz=post_release_lower,
         retreat_xyz=ret,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,

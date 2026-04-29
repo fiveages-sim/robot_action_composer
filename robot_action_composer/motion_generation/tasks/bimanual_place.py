@@ -17,10 +17,10 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
     carry_prepare_offset_is_active,
 )
 
-# ``build_bimanual_place_sequence``：0～2 段逆 retreat/lift + 松爪 + Y 张开 + 可选末段后撤（共 3～5 段）
+# ``build_bimanual_place_sequence``：0～2 段逆 retreat/lift + 松爪 +（可选释放后下降）+ Y 张开 + 可选末段后撤（共 3～6 段）
 PLACE_ADVANCE_STAGE_COUNT_MAX = 2
-# 逆序尾部：Release(1) + SpreadY(1) + 可选 RetreatOpen(1)；无 prepare 偏移时为 2
-PLACE_TRAILING_AFTER_ADVANCE_MAX = 3
+# 逆序尾部：Release(1) + 可选 PostReleaseLower(1) + SpreadY(1) + 可选 RetreatOpen(1)
+PLACE_TRAILING_AFTER_ADVANCE_MAX = 4
 PLACE_TOTAL_STAGES_MAX = PLACE_ADVANCE_STAGE_COUNT_MAX + PLACE_TRAILING_AFTER_ADVANCE_MAX
 
 
@@ -39,6 +39,7 @@ class BimanualPlaceTaskConfig:
     place_prepare_offset: tuple[float, float, float] | None = None
     place_approach_clearance_y: float = 0.0
     place_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    place_pregrasp_lower_xyz: tuple[float, float, float] | None = None
     place_lift_xyz: tuple[float, float, float] | None = None
     place_retreat_xyz: tuple[float, float, float] | None = None
 
@@ -48,13 +49,18 @@ def format_bimanual_place_task_cfg_summary(scene: str, task_cfg: BimanualPlaceTa
         f"[Scene] {scene} place -> {task_cfg.place_object_prim_path}, "
         f"place_half_span_y={task_cfg.place_half_span_y}, "
         f"place_prepare_offset={task_cfg.place_prepare_offset}, "
+        f"place_pregrasp_lower_xyz={task_cfg.place_pregrasp_lower_xyz!r}, "
         f"place_lift_xyz={task_cfg.place_lift_xyz!r}, place_retreat_xyz={task_cfg.place_retreat_xyz!r}"
     )
 
 
 def place_trailing_after_advance_stage_count(cfg: BimanualPlaceTaskConfig) -> int:
-    """Release 之后：SpreadY + 可选 RetreatOpen；与 carry 一致，无 prepare 偏移时少末段。"""
-    return 3 if carry_prepare_offset_is_active(cfg.place_prepare_offset) else 2
+    """Release 之后：可选 PostReleaseLower + SpreadY + 可选 RetreatOpen。"""
+    return (
+        2
+        + (1 if carry_prepare_offset_is_active(cfg.place_pregrasp_lower_xyz) else 0)
+        + (1 if carry_prepare_offset_is_active(cfg.place_prepare_offset) else 0)
+    )
 
 
 def slice_place_stages_for_queue(
@@ -62,9 +68,9 @@ def slice_place_stages_for_queue(
     *,
     trailing_after_advance: int,
 ) -> tuple[list[StageTarget], list[StageTarget], list[StageTarget]]:
-    """前 0～2 段为逆 carry 的 advance；接着 ``trailing_after_advance`` 段为 release + spread（+ 可选 retreat）。"""
-    if trailing_after_advance not in (2, 3):
-        raise ValueError(f"trailing_after_advance must be 2 or 3, got {trailing_after_advance}")
+    """前 0～2 段为逆 carry 的 advance；接着 ``trailing_after_advance`` 段为 release +（可选 lower）+ spread（+ 可选 retreat）。"""
+    if trailing_after_advance not in (2, 3, 4):
+        raise ValueError(f"trailing_after_advance must be 2, 3 or 4, got {trailing_after_advance}")
     if len(full) < trailing_after_advance:
         raise ValueError(
             f"place sequence too short: need >= {trailing_after_advance} stages, got {len(full)}",
@@ -94,6 +100,7 @@ def build_bimanual_place_record_sequence(
         object_position_offset=place_task_cfg.place_xyz,
         carry_left_orientation=place_task_cfg.place_left_orientation,
         carry_right_orientation=place_task_cfg.place_right_orientation,
+        ee_pregrasp_lift_offset=place_task_cfg.place_pregrasp_lower_xyz,
         ee_lift_offset=place_task_cfg.place_lift_xyz,
         ee_retreat_offset=place_task_cfg.place_retreat_xyz,
         gripper_open=gripper_open,

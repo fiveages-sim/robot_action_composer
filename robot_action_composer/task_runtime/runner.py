@@ -39,6 +39,11 @@ def _execute_block(
     idx_label: str,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
 ) -> None:
+    if spec.start_delay_s > 0.0:
+        print(
+            f"[{runner_prefix}] {idx_label} {spec.skill!r} delaying {spec.start_delay_s:.3f}s before dispatch",
+        )
+        ctx.sim_time.sleep(spec.start_delay_s)
     skill_fn = get_skill(spec.skill)
     stages, meta = skill_fn(ctx, spec.params)
     label = f"{spec.skill!r}" if spec.id is None else f"{spec.skill!r} (id={spec.id!r})"

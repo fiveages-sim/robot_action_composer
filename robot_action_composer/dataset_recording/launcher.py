@@ -31,19 +31,40 @@ def prompt_positive_int(
         return default
 
 
-def select_option(*, title: str, options: dict[str, dict[str, Any]], default_key: str) -> str:
+def select_option(
+    *,
+    title: str,
+    options: dict[str, dict[str, Any]],
+    default_key: str,
+    allow_back: bool = False,
+) -> str:
+    """Prompt for a dict key. With ``allow_back=True``, ``0`` / ``b`` / ``back`` returns ``\"__back__\"``."""
     keys = list(options.keys())
     print(f"\n{title}")
+    if allow_back:
+        print("  0. « Back (previous menu)")
     for idx, key in enumerate(keys, start=1):
         label = options[key].get("label", key)
         suffix = " (default)" if key == default_key else ""
         bracket = key if key else "top-level"
         print(f"  {idx}. {label} [{bracket}]{suffix}")
-    raw = input("Select option (press Enter for default): ").strip()
+    prompt = (
+        "Select option (0/b/back = previous, Enter = default): "
+        if allow_back
+        else "Select option (press Enter for default): "
+    )
+    raw = input(prompt).strip()
     if raw == "":
         return default_key
+    if allow_back:
+        rl = raw.lower()
+        if raw == "0" or rl in ("b", "back"):
+            return "__back__"
     if raw.isdigit():
-        idx = int(raw) - 1
+        n = int(raw)
+        if allow_back and n == 0:
+            return "__back__"
+        idx = n - 1
         if 0 <= idx < len(keys):
             return keys[idx]
     if raw in options:
@@ -90,7 +111,7 @@ def select_task_with_optional_group(
     if len(filtered) <= 1:
         options = {k: {"label": str(tasks[k].get("label", k))} for k in tasks}
         default = default_task_key if default_task_key in options else next(iter(options))
-        return select_option(title=title_task, options=options, default_key=default)
+        return select_option(title=title_task, options=options, default_key=default, allow_back=False)
 
     default_group = next(iter(sorted(filtered.keys(), key=lambda g: (g != "", g))))
     for gid, keys in filtered.items():
@@ -98,14 +119,32 @@ def select_task_with_optional_group(
             default_group = gid
             break
 
-    group_options = {gid: {"label": task_group_menu_label(gid)} for gid in sorted(filtered.keys(), key=lambda g: (g != "", g))}
-    chosen_group = select_option(title=title_group, options=group_options, default_key=default_group)
+    while True:
+        group_options = {
+            gid: {"label": task_group_menu_label(gid)}
+            for gid in sorted(filtered.keys(), key=lambda g: (g != "", g))
+        }
+        chosen_group = select_option(
+            title=title_group,
+            options=group_options,
+            default_key=default_group,
+            allow_back=False,
+        )
 
-    subset = filtered[chosen_group]
-    sub = {k: tasks[k] for k in subset}
-    options = {k: {"label": str(sub[k].get("label", k))} for k in subset}
-    sub_default = default_task_key if default_task_key in subset else subset[0]
-    return select_option(title=title_task, options=options, default_key=sub_default)
+        subset = filtered[chosen_group]
+        sub = {k: tasks[k] for k in subset}
+        options = {k: {"label": str(sub[k].get("label", k))} for k in subset}
+        sub_default = default_task_key if default_task_key in subset else subset[0]
+        while True:
+            task_key = select_option(
+                title=title_task,
+                options=options,
+                default_key=sub_default,
+                allow_back=True,
+            )
+            if task_key == "__back__":
+                break
+            return task_key
 
 
 def collect_runtime_options(
