@@ -30,6 +30,7 @@ class QueueSlicePick:
     pick_clearance: float = 0.01
     ee_lift_offset: tuple[float, float, float] | None = None
     ee_retreat_offset: tuple[float, float, float] | None = None
+    retreat_open_gripper: bool = False
     object_prim_path: str = ""
     ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
     ee_pick_axis: str = "+z"

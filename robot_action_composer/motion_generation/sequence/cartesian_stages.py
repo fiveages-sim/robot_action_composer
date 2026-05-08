@@ -222,6 +222,7 @@ class ArmStage:
     name: str
     target: ArmTarget
     wait_gripper_settle: bool = False
+    skip_arrival_check: bool = False
 
 
 @dataclass
@@ -236,6 +237,9 @@ class StageTarget:
     wait_gripper_settle: bool = False
     #: 为 True 时跳过本段夹爪命令下发（仅发送左右臂 pose）。
     skip_gripper_command: bool = False
+    #: 为 True 时跳过 ``wait_until_arrive`` 位姿到位检查，仅靠 ``wait_gripper_settle`` 的固定等待。
+    #: 用于 Grasp 阶段：夹爪夹到物体后接触力会把 TCP 顶离目标，基于位姿的到位判断会持续超时。
+    skip_arrival_check: bool = False
 
     def to_action_dict(
         self,
@@ -367,6 +371,7 @@ def build_single_arm_pick_sequence(
     retreat_direction_extra: float = 0.0,
     retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
     retreat_xyz: tuple[float, float, float] | None = None,
+    retreat_open_gripper: bool = False,
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Pickup",
@@ -438,6 +443,7 @@ def build_single_arm_pick_sequence(
             _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[2]),
             ArmTarget(pose=close_in_pose, gripper=gripper_closed),
             wait_gripper_settle=True,
+            skip_arrival_check=True,
         )
     )
     i += 1
@@ -451,7 +457,7 @@ def build_single_arm_pick_sequence(
     stages.append(
         ArmStage(
             _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[4]),
-            ArmTarget(pose=retreat_pose, gripper=gripper_closed),
+            ArmTarget(pose=retreat_pose, gripper=gripper_open if retreat_open_gripper else gripper_closed),
         )
     )
     return stages
@@ -590,6 +596,7 @@ def assign_to_arm(
                     name=spec.name,
                     left=spec.target,
                     wait_gripper_settle=spec.wait_gripper_settle,
+                    skip_arrival_check=spec.skip_arrival_check,
                 ),
             )
         else:
@@ -598,6 +605,7 @@ def assign_to_arm(
                     name=spec.name,
                     right=spec.target,
                     wait_gripper_settle=spec.wait_gripper_settle,
+                    skip_arrival_check=spec.skip_arrival_check,
                 ),
             )
     return result
@@ -1310,36 +1318,37 @@ def execute_stage_sequence(
 
         arrive_results: dict[str, dict[str, Any]] = {}
 
-        if stage.left:
-            arrive_results["left_arm"] = interface.wait_until_arrive(
-                part="left_arm",
-                timeout=arrival_timeout,
-                poll_period=arrival_poll,
-                time_now_fn=time_now_fn,
-                sleep_fn=sleep_fn,
-                arm_pose_threshold=pose_tol_pos,
-                arm_orient_threshold=pose_tol_ori,
-                on_poll=(
-                    (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "left_arm", _r, _e))
-                    if on_stage_poll is not None
-                    else None
-                ),
-            )
-        if stage.right:
-            arrive_results["right_arm"] = interface.wait_until_arrive(
-                part="right_arm",
-                timeout=arrival_timeout,
-                poll_period=arrival_poll,
-                time_now_fn=time_now_fn,
-                sleep_fn=sleep_fn,
-                arm_pose_threshold=pose_tol_pos,
-                arm_orient_threshold=pose_tol_ori,
-                on_poll=(
-                    (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "right_arm", _r, _e))
-                    if on_stage_poll is not None
-                    else None
-                ),
-            )
+        if not stage.skip_arrival_check:
+            if stage.left:
+                arrive_results["left_arm"] = interface.wait_until_arrive(
+                    part="left_arm",
+                    timeout=arrival_timeout,
+                    poll_period=arrival_poll,
+                    time_now_fn=time_now_fn,
+                    sleep_fn=sleep_fn,
+                    arm_pose_threshold=pose_tol_pos,
+                    arm_orient_threshold=pose_tol_ori,
+                    on_poll=(
+                        (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "left_arm", _r, _e))
+                        if on_stage_poll is not None
+                        else None
+                    ),
+                )
+            if stage.right:
+                arrive_results["right_arm"] = interface.wait_until_arrive(
+                    part="right_arm",
+                    timeout=arrival_timeout,
+                    poll_period=arrival_poll,
+                    time_now_fn=time_now_fn,
+                    sleep_fn=sleep_fn,
+                    arm_pose_threshold=pose_tol_pos,
+                    arm_orient_threshold=pose_tol_ori,
+                    on_poll=(
+                        (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "right_arm", _r, _e))
+                        if on_stage_poll is not None
+                        else None
+                    ),
+                )
 
         if stage.wait_gripper_settle:
             sleep_fn(gripper_action_wait)

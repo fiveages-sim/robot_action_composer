@@ -213,13 +213,14 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         ee_pick_direction_vector=ee_pick_direction_vector,
         retreat_offset=retreat_offset,
         retreat_xyz=retreat_xyz,
+        retreat_open_gripper=pk.retreat_open_gripper,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
         stage_prefix="TaskQ-Pick",
     )
     stages = assign_to_arm(arm_seq, arm_side)
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
-    ctx.gripper_for_return_home = ctx.gripper_closed
+    ctx.gripper_for_return_home = ctx.gripper_open if pk.retreat_open_gripper else ctx.gripper_closed
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
