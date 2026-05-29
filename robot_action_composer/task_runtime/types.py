@@ -53,7 +53,7 @@ class BlockSpec:
     params: Mapping[str, Any] = field(default_factory=dict)
     id: str | None = None
     start_delay_s: float = 0.0
-    #: 为 True 时，在批量执行的非首段跳过本块（``__all__`` 第 2+ scene；chain 连续同名 scene）。
+    #: 为 True 时，在批量执行的非首段跳过本块（``__all__`` 第 2+ scene；chain 连续同 task_key）。
     skip_when_not_first_scene: bool = False
 
     @property

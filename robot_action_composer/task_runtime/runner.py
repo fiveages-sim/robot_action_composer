@@ -35,8 +35,8 @@ def _skip_repeat_reason(ctx: Any) -> str | None:
     """Return a short reason string if flagged blocks should be skipped in this run."""
     if bool(getattr(ctx, "not_first_scene_in_batch", False)):
         return "not first scene in __all__ batch"
-    if bool(getattr(ctx, "consecutive_same_scene", False)):
-        return "consecutive same scene in chain"
+    if bool(getattr(ctx, "consecutive_same_task_in_chain", False)):
+        return "consecutive same task in chain"
     return None
 
 
@@ -225,7 +225,7 @@ def build_queue_runtime_context(
     runtime: MergedQueueConfig,
     use_stamped: bool,
     not_first_scene_in_batch: bool = False,
-    consecutive_same_scene: bool = False,
+    consecutive_same_task_in_chain: bool = False,
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
     queue_task = runtime.single_arm
@@ -256,7 +256,7 @@ def build_queue_runtime_context(
         handover_sync=runtime.handover,
         drawer_geometry=runtime.drawer,
         not_first_scene_in_batch=not_first_scene_in_batch,
-        consecutive_same_scene=consecutive_same_scene,
+        consecutive_same_task_in_chain=consecutive_same_task_in_chain,
     )
 
 
@@ -344,7 +344,7 @@ def run_task_queue(
     use_stamped: bool = True,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
     not_first_scene_in_batch: bool = False,
-    consecutive_same_scene: bool = False,
+    consecutive_same_task_in_chain: bool = False,
 ) -> None:
     """Single entry: connect → FSM → execute ``task_queue`` blocks (and parallel groups)."""
     queue_tc = runtime.single_arm
@@ -385,7 +385,7 @@ def run_task_queue(
             runtime=runtime,
             use_stamped=use_stamped,
             not_first_scene_in_batch=not_first_scene_in_batch,
-            consecutive_same_scene=consecutive_same_scene,
+            consecutive_same_task_in_chain=consecutive_same_task_in_chain,
         )
 
         for idx, spec in enumerate(specs):
@@ -430,7 +430,7 @@ def run_task_queue_on_connected_interface(
     use_stamped: bool = True,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
     not_first_scene_in_batch: bool = False,
-    consecutive_same_scene: bool = False,
+    consecutive_same_task_in_chain: bool = False,
 ) -> None:
     """Execute one task_queue on an already-connected interface (no connect/disconnect)."""
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
@@ -451,7 +451,7 @@ def run_task_queue_on_connected_interface(
         runtime=runtime,
         use_stamped=use_stamped,
         not_first_scene_in_batch=not_first_scene_in_batch,
-        consecutive_same_scene=consecutive_same_scene,
+        consecutive_same_task_in_chain=consecutive_same_task_in_chain,
     )
 
     for idx, spec in enumerate(specs):

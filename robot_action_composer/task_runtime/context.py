@@ -55,8 +55,8 @@ class QueueRuntimeContext:
     scratch: dict[str, Any] = field(default_factory=dict)
     #: 单任务 ``__all__`` 批量中，本段不是第一个 scene preset 时为 True。
     not_first_scene_in_batch: bool = False
-    #: 多段 chain 中，本段与前一段**连续**且 scene preset 名相同时为 True。
-    consecutive_same_scene: bool = False
+    #: 多段 chain 中，本段与前一段**连续**且 task_key 相同时为 True（含 __all__ 展开的 default→box2）。
+    consecutive_same_task_in_chain: bool = False
 
     def __post_init__(self) -> None:
         if self.gripper_for_return_home == 0.0:

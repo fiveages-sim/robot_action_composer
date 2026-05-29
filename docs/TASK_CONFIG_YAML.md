@@ -189,7 +189,7 @@ task_queue:
 
 - `skip_when_not_first_scene`（`bool`，默认 `false`）：写在 block 顶层，与 `skill` / `id` 同级。
 - **单任务 + `__all__`**：同一会话内从第 2 个 scene preset 起跳过（如 `default` → `box2`，`box2` 会跳过带 flag 的块）。
-- **多段 chain**：仅当本 segment 与前一段**连续且 scene preset 名相同**时跳过；中间夹了不同 scene 再回来则不跳过。
+- **多段 chain**：先选 **task folder**（整链锁定同一目录），再逐段选 task + scene；某段可选 ``__all__`` 展开该任务尚未用过的 scene（如 ``black_box_pick/__all__`` → ``default``、``box2``）。仅当本 segment 与前一段**连续且 task_key 相同**时跳过预备块；**不同 task**（搬运 → 黑盒）不跳过。同 task+scene 可重复加入（如首尾各一段搬运）。
 - 单 scene、单段首次执行时照常运行；并行块中可对子步骤分别设置。
 
 ### 缓存回程

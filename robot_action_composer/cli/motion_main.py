@@ -310,65 +310,128 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
     return frozenset(names)
 
 
+def _group_display_name(group_key: str) -> str:
+    return "Top level" if group_key == "" else group_key
+
+
+def _group_task_keys(robot_entry: dict[str, Any], group_key: str) -> list[str]:
+    task_groups: dict[str, list[str]] = robot_entry.get("task_groups") or {}
+    return list(task_groups.get(group_key, []))
+
+
+def _prompt_chain_group(*, robot_entry: dict[str, Any]) -> str:
+    """Pick one task folder (``task_groups`` key) for the entire chain."""
+    task_groups: dict[str, list[str]] = robot_entry.get("task_groups") or {}
+    group_keys = sorted((gk for gk, keys in task_groups.items() if keys), key=lambda gk: (gk == "", gk))
+    if not group_keys:
+        raise ValueError("Robot has no task_groups with tasks")
+    if len(group_keys) == 1:
+        only = group_keys[0]
+        print(f"[info] Chain locked to folder {_group_display_name(only)!r}.")
+        return only
+    labels = [_group_display_name(gk) for gk in group_keys]
+    preferred = "siemens" if "siemens" in group_keys else group_keys[0]
+    default_label = _group_display_name(preferred)
+    picked = _select_option(
+        title="Select task folder for entire chain",
+        options=labels,
+        default_value=default_label,
+        allow_back=False,
+    )
+    return group_keys[labels.index(picked)]
+
+
+def _scenes_for_chain_segment(
+    *,
+    task_key: str,
+    task_entry: dict[str, Any],
+    used_pairs: set[tuple[str, str]],
+) -> list[str]:
+    """Pick one scene or ``__all__`` (expands to unused task+scene pairs)."""
+    scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
+    scene_names = list(scene_presets.keys())
+    if not scene_names:
+        raise ValueError(f"Task {task_key!r} has no scene_presets")
+
+    preferred = str(task_entry.get("default_scene") or scene_names[0])
+    default_scene = preferred if preferred in scene_names else scene_names[0]
+    unused_for_all = [sn for sn in scene_names if (task_key, sn) not in used_pairs]
+
+    scene_options: list[str] = list(scene_names)
+    if len(unused_for_all) > 1:
+        scene_options.append("__all__")
+
+    scene = _select_option(
+        title=f"Select scene for {task_key!r} (Enter = default; __all__ = all unused presets)",
+        options=scene_options,
+        default_value=default_scene,
+        allow_back=True,
+    )
+    if scene == "__back__":
+        return []
+    if scene == "__all__":
+        if not unused_for_all:
+            print(
+                f"[info] All scenes for {task_key!r} are already in the chain; "
+                "pick a single scene instead."
+            )
+            return []
+        print(
+            f"[info] Segment uses ALL_SCENES — expanding to {len(unused_for_all)} "
+            f"sub-segment(s): {', '.join(unused_for_all)}"
+        )
+        return unused_for_all
+    return [scene]
+
+
 def _prompt_chain_segments(*, robot_entry: dict[str, Any]) -> list[_ChainSegmentDict]:
-    """Interactive: append segments until user stops (same robot)."""
+    """Interactive: one folder for the chain; per segment pick task + scene (or ``__all__``)."""
     from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
         select_task_with_optional_group,
     )
 
+    chain_group = _prompt_chain_group(robot_entry=robot_entry)
     tasks_map: dict[str, Any] = robot_entry["tasks"]
-    task_options = {key: {"label": str(meta.get("label", key))} for key, meta in tasks_map.items()}
-    default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
+    group_keys = _group_task_keys(robot_entry, chain_group)
+    if not group_keys:
+        raise ValueError(f"Folder {_group_display_name(chain_group)!r} has no tasks")
+
+    folder = _group_display_name(chain_group)
+    filtered_tasks = {tk: tasks_map[tk] for tk in group_keys if tk in tasks_map}
+    filtered_groups = {chain_group: list(filtered_tasks.keys())}
+    task_options = {key: {"label": str(meta.get("label", key))} for key, meta in filtered_tasks.items()}
+    default_task_key = (
+        "siemens_box_carry"
+        if "siemens_box_carry" in task_options
+        else ("black_box_pick" if "black_box_pick" in task_options else next(iter(task_options)))
+    )
+
     segments: list[_ChainSegmentDict] = []
+    used_pairs: set[tuple[str, str]] = set()
     while True:
         while True:
             task_key = select_task_with_optional_group(
-                title_group="Select task folder (segment)",
+                title_group=f"Select task (folder {folder!r}, locked)",
                 title_task="Select task for this segment",
                 tasks=task_options,
-                task_groups=robot_entry.get("task_groups", {}),
+                task_groups=filtered_groups,
                 default_task_key=default_task_key,
             )
-            task_entry_one = tasks_map[task_key]
-            scene_presets: dict[str, dict[str, object]] = task_entry_one["scene_presets"]
-            scene_names = list(scene_presets.keys())
-            if not scene_names:
-                raise ValueError(f"Task {task_key!r} has no scene_presets")
-
-            used_pairs = {(s["task_key"], s["scene"]) for s in segments}
-            available_scenes = [sn for sn in scene_names if (task_key, sn) not in used_pairs]
-            if not available_scenes:
-                print(
-                    "[info] This task has no unused scene presets left in the chain "
-                    "(each task+scene pair can appear at most once). Pick another task, or Back."
-                )
+            if task_key not in filtered_tasks:
+                print(f"[info] Task {task_key!r} is not in folder {folder!r}. Pick again.")
                 continue
-
-            preferred = str(task_entry_one.get("default_scene") or available_scenes[0])
-            default_scene = preferred if preferred in available_scenes else available_scenes[0]
-
-            scene_options: list[str] = list(available_scenes)
-            if len(available_scenes) > 1:
-                scene_options.append("__all__")
-
-            scene = _select_option(
-                title="Select config (scene) for this segment (unused presets only)",
-                options=scene_options,
-                default_value=default_scene,
-                allow_back=True,
+            scene_names = _scenes_for_chain_segment(
+                task_key=task_key,
+                task_entry=filtered_tasks[task_key],
+                used_pairs=used_pairs,
             )
-            if scene == "__back__":
+            if not scene_names:
                 continue
             break
-        if scene == "__all__":
-            print(
-                f"[info] Segment uses ALL_SCENES — expanding to {len(available_scenes)} "
-                f"sub-segment(s): {', '.join(available_scenes)}"
-            )
-            for sn in available_scenes:
-                segments.append({"task_key": task_key, "scene": sn})
-        else:
-            segments.append({"task_key": task_key, "scene": scene})
+        for sn in scene_names:
+            segments.append({"task_key": task_key, "scene": sn})
+            used_pairs.add((task_key, sn))
+        default_task_key = task_key
         if len(segments) >= 30:
             print("[info] Reached 30 segments; finishing chain.")
             break
@@ -571,14 +634,14 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                 interface.connect()
                 connected = True
                 print("[OK] Robot connected (multi-segment chain)")
-                prev_chain_scene: str | None = None
+                prev_chain_task_key: str | None = None
                 for seg_idx, seg in enumerate(chain_segments):
                     tk = seg["task_key"]
                     task_entry_seg = robot_entry["tasks"][tk]
                     use_stamped_seg = task_entry_seg.get("use_stamped", True)
                     scene_name = seg["scene"]
-                    consecutive_same_scene = (
-                        prev_chain_scene is not None and scene_name == prev_chain_scene
+                    consecutive_same_task_in_chain = (
+                        prev_chain_task_key is not None and tk == prev_chain_task_key
                     )
                     runtime, merged_queue = _build_runtime_for_scene(
                         task_entry=task_entry_seg,
@@ -597,10 +660,10 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                             "[info] Chain: skipping env reset for segments after the first "
                             "(robot state continues across segments)."
                         )
-                    if consecutive_same_scene:
+                    if consecutive_same_task_in_chain:
                         print(
-                            "[info] Chain: consecutive same scene "
-                            f"{scene_name!r} — skip_when_not_first_scene blocks will be skipped."
+                            "[info] Chain: consecutive same task "
+                            f"{tk!r} (scene {scene_name!r}) — skip_when_not_first_scene blocks will be skipped."
                         )
                     run_task_queue_on_connected_interface(
                         interface=interface,
@@ -610,9 +673,9 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                         blocks=merged_queue,
                         reset_env=should_reset_env,
                         use_stamped=use_stamped_seg,
-                        consecutive_same_scene=consecutive_same_scene,
+                        consecutive_same_task_in_chain=consecutive_same_task_in_chain,
                     )
-                    prev_chain_scene = scene_name
+                    prev_chain_task_key = tk
             finally:
                 sim_time.shutdown()
                 if connected:
