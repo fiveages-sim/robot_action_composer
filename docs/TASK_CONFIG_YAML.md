@@ -172,6 +172,26 @@ task_queue:
 - 该延迟使用 `sim_time.sleep(...)`，按仿真时钟推进。
 - 可用于顺序块与并行子块；并行场景中通常最有用。
 
+### 批量执行时跳过重复步骤（`skip_when_not_first_scene`）
+
+在**同一会话**内连续跑多个 scene 或 chain segment 时，机器人状态可延续。若某些步骤只需在批量**首段**执行（例如开头 ``nav + movej``），可在块顶层设置：
+
+```yaml
+task_queue:
+  - parallel:
+      - skill: nav.navigate_to_object
+        id: nav_to_box1
+        skip_when_not_first_scene: true
+      - skill: joint.movej_to_config
+        id: pre_pick_movej
+        skip_when_not_first_scene: true
+```
+
+- `skip_when_not_first_scene`（`bool`，默认 `false`）：写在 block 顶层，与 `skill` / `id` 同级。
+- **单任务 + `__all__`**：同一会话内从第 2 个 scene preset 起跳过（如 `default` → `box2`，`box2` 会跳过带 flag 的块）。
+- **多段 chain**：仅当本 segment 与前一段**连续且 scene preset 名相同**时跳过；中间夹了不同 scene 再回来则不跳过。
+- 单 scene、单段首次执行时照常运行；并行块中可对子步骤分别设置。
+
 ### 缓存回程
 
 - 笛卡尔：`robot.cache_ee_pose` + `single_arm.goto_cache_pose` / `dual_arm.goto_cache_pose`

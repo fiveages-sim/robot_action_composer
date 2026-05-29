@@ -571,11 +571,15 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                 interface.connect()
                 connected = True
                 print("[OK] Robot connected (multi-segment chain)")
+                prev_chain_scene: str | None = None
                 for seg_idx, seg in enumerate(chain_segments):
                     tk = seg["task_key"]
                     task_entry_seg = robot_entry["tasks"][tk]
                     use_stamped_seg = task_entry_seg.get("use_stamped", True)
                     scene_name = seg["scene"]
+                    consecutive_same_scene = (
+                        prev_chain_scene is not None and scene_name == prev_chain_scene
+                    )
                     runtime, merged_queue = _build_runtime_for_scene(
                         task_entry=task_entry_seg,
                         scene=scene_name,
@@ -593,6 +597,11 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                             "[info] Chain: skipping env reset for segments after the first "
                             "(robot state continues across segments)."
                         )
+                    if consecutive_same_scene:
+                        print(
+                            "[info] Chain: consecutive same scene "
+                            f"{scene_name!r} — skip_when_not_first_scene blocks will be skipped."
+                        )
                     run_task_queue_on_connected_interface(
                         interface=interface,
                         sim_time=sim_time,
@@ -601,7 +610,9 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                         blocks=merged_queue,
                         reset_env=should_reset_env,
                         use_stamped=use_stamped_seg,
+                        consecutive_same_scene=consecutive_same_scene,
                     )
+                    prev_chain_scene = scene_name
             finally:
                 sim_time.shutdown()
                 if connected:
@@ -628,12 +639,18 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                     runtime, merged_queue = _build_runtime_for_scene(task_entry=task_entry, scene=scene_name, allowed=allowed)
                     print(format_merged_queue_summary(scene_name, runtime))
                     should_reset_env = reset_env and (scene_idx == 0)
+                    not_first_scene_in_batch = scene_idx > 0
                     print(
                         f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} "
                         f"(scene {scene_idx + 1}/{len(scenes_to_run)}: {scene_name})\n{'=' * 70}"
                     )
                     if scene_idx > 0 and reset_env:
                         print("[info] ALL_SCENES mode: skip env reset for sub-scenes after the first one.")
+                    if not_first_scene_in_batch:
+                        print(
+                            "[info] ALL_SCENES: not first scene in batch — "
+                            "skip_when_not_first_scene blocks will be skipped."
+                        )
                     run_task_queue_on_connected_interface(
                         interface=interface,
                         sim_time=sim_time,
@@ -642,6 +659,7 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                         blocks=merged_queue,
                         reset_env=should_reset_env,
                         use_stamped=use_stamped,
+                        not_first_scene_in_batch=not_first_scene_in_batch,
                     )
             finally:
                 sim_time.shutdown()

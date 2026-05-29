@@ -53,6 +53,10 @@ class QueueRuntimeContext:
     handover_sync: HandoverSyncConfig | None = None
     drawer_geometry: DrawerGeometryConfig | None = None
     scratch: dict[str, Any] = field(default_factory=dict)
+    #: 单任务 ``__all__`` 批量中，本段不是第一个 scene preset 时为 True。
+    not_first_scene_in_batch: bool = False
+    #: 多段 chain 中，本段与前一段**连续**且 scene preset 名相同时为 True。
+    consecutive_same_scene: bool = False
 
     def __post_init__(self) -> None:
         if self.gripper_for_return_home == 0.0:

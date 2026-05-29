@@ -31,6 +31,25 @@ from robot_action_composer.task_runtime.config.merged import MergedQueueConfig
 from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec, QueueBlock, block_spec_from_mapping
 
 
+def _skip_repeat_reason(ctx: Any) -> str | None:
+    """Return a short reason string if flagged blocks should be skipped in this run."""
+    if bool(getattr(ctx, "not_first_scene_in_batch", False)):
+        return "not first scene in __all__ batch"
+    if bool(getattr(ctx, "consecutive_same_scene", False)):
+        return "consecutive same scene in chain"
+    return None
+
+
+def _should_skip_repeat_block(ctx: Any, spec: BlockSpec) -> bool:
+    if not spec.skip_when_not_first_scene:
+        return False
+    return _skip_repeat_reason(ctx) is not None
+
+
+def _block_label(spec: BlockSpec) -> str:
+    return f"{spec.skill!r}" if spec.id is None else f"{spec.skill!r} (id={spec.id!r})"
+
+
 def _execute_block(
     ctx: Any,
     spec: BlockSpec,
@@ -39,6 +58,14 @@ def _execute_block(
     idx_label: str,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
 ) -> None:
+    label = _block_label(spec)
+    skip_reason = _skip_repeat_reason(ctx)
+    if skip_reason is not None and spec.skip_when_not_first_scene:
+        print(
+            f"[{runner_prefix}] {idx_label} {label} -> skipped "
+            f"(skip_when_not_first_scene, {skip_reason})",
+        )
+        return
     if spec.start_delay_s > 0.0:
         print(
             f"[{runner_prefix}] {idx_label} {spec.skill!r} delaying {spec.start_delay_s:.3f}s before dispatch",
@@ -46,7 +73,6 @@ def _execute_block(
         ctx.sim_time.sleep(spec.start_delay_s)
     skill_fn = get_skill(spec.skill)
     stages, meta = skill_fn(ctx, spec.params)
-    label = f"{spec.skill!r}" if spec.id is None else f"{spec.skill!r} (id={spec.id!r})"
     if not stages:
         print(f"[{runner_prefix}] {idx_label} {label} -> (no stages / inline-only)")
         return
@@ -82,7 +108,22 @@ def _execute_parallel(
     idx_label: str,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
 ) -> None:
-    n = len(par_spec.skills)
+    active: list[tuple[int, BlockSpec]] = [
+        (i, sub) for i, sub in enumerate(par_spec.skills) if not _should_skip_repeat_block(ctx, sub)
+    ]
+    skipped = len(par_spec.skills) - len(active)
+    if skipped:
+        for i, sub in enumerate(par_spec.skills):
+            if _should_skip_repeat_block(ctx, sub):
+                reason = _skip_repeat_reason(ctx) or "repeat batch"
+                print(
+                    f"[{runner_prefix}] {idx_label}[{i}] {_block_label(sub)} -> skipped "
+                    f"(skip_when_not_first_scene, {reason})",
+                )
+    if not active:
+        print(f"[{runner_prefix}] {idx_label} parallel({len(par_spec.skills)}) -> all sub-steps skipped")
+        return
+    n = len(active)
     print(f"[{runner_prefix}] {idx_label} parallel({n}) -> dispatching {n} skill(s)")
     errors: list[BaseException] = []
     lock = threading.Lock()
@@ -103,10 +144,10 @@ def _execute_parallel(
     threads = [
         threading.Thread(
             target=worker,
-            args=(sub_spec, f"{idx_label}[{i}]"),
+            args=(sub_spec, f"{idx_label}[{orig_i}]"),
             daemon=True,
         )
-        for i, sub_spec in enumerate(par_spec.skills)
+        for orig_i, sub_spec in active
     ]
     for t in threads:
         t.start()
@@ -183,6 +224,8 @@ def build_queue_runtime_context(
     sim_time: Any,
     runtime: MergedQueueConfig,
     use_stamped: bool,
+    not_first_scene_in_batch: bool = False,
+    consecutive_same_scene: bool = False,
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
     queue_task = runtime.single_arm
@@ -212,6 +255,8 @@ def build_queue_runtime_context(
         place_task_cfg=runtime.place,
         handover_sync=runtime.handover,
         drawer_geometry=runtime.drawer,
+        not_first_scene_in_batch=not_first_scene_in_batch,
+        consecutive_same_scene=consecutive_same_scene,
     )
 
 
@@ -298,6 +343,8 @@ def run_task_queue(
     reset_env: bool = True,
     use_stamped: bool = True,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
+    not_first_scene_in_batch: bool = False,
+    consecutive_same_scene: bool = False,
 ) -> None:
     """Single entry: connect → FSM → execute ``task_queue`` blocks (and parallel groups)."""
     queue_tc = runtime.single_arm
@@ -337,6 +384,8 @@ def run_task_queue(
             sim_time=sim_time,
             runtime=runtime,
             use_stamped=use_stamped,
+            not_first_scene_in_batch=not_first_scene_in_batch,
+            consecutive_same_scene=consecutive_same_scene,
         )
 
         for idx, spec in enumerate(specs):
@@ -380,6 +429,8 @@ def run_task_queue_on_connected_interface(
     reset_env: bool = True,
     use_stamped: bool = True,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
+    not_first_scene_in_batch: bool = False,
+    consecutive_same_scene: bool = False,
 ) -> None:
     """Execute one task_queue on an already-connected interface (no connect/disconnect)."""
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
@@ -399,6 +450,8 @@ def run_task_queue_on_connected_interface(
         sim_time=sim_time,
         runtime=runtime,
         use_stamped=use_stamped,
+        not_first_scene_in_batch=not_first_scene_in_batch,
+        consecutive_same_scene=consecutive_same_scene,
     )
 
     for idx, spec in enumerate(specs):
