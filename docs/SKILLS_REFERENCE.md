@@ -31,14 +31,31 @@
     - `motion_frame_id`：位姿参考帧；不写则沿用任务级 `frame_id`（通常为 `arm_base`）。
   - **末端系配置**
     - `gripper`：目标夹爪值，默认保持上一步结束时的状态。
+- **备注**：位姿在 ``motion_frame_id`` 下给出绝对目标，非相对当前末端。
+
+### 1.1b 相对当前末端平移旋转（`single_arm.move_relative`）
+
+- **效果**：读取当前末端位姿，在 ``motion_frame_id`` 下叠加位置增量并左乘姿态增量（单段 MoveL）。
+- **参数**：
+  - **执行控制**
+    - `arm`：`left|right`，必填。
+  - **运动系配置**
+    - `position_delta`：`[dx, dy, dz]`（米），默认 `[0,0,0]`。
+    - `orientation_delta_rpy`：`[roll, pitch, yaw]`（弧度），在 ``motion_frame_id`` 下定义，左乘当前四元数；例如绕 Y 轴 +90° 为 `[0, 1.5708, 0]`。
+    - `motion_frame_id`：增量解释坐标系，默认与末端反馈 frame 一致（常为 `arm_base`）。
+    - `tf_lookup_timeout`：与任务 frame 不一致时的 TF 超时（秒）。
+  - **执行控制**
+    - `gripper`：目标夹爪值，默认 ``gripper_for_return_home``。
+    - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **YAML 示例**：
   ```yaml
-  - skill: single_arm.move_to_pose
+  - skill: single_arm.move_relative
     params:
       arm: right
       motion_frame_id: arm_base
-      position: [0.45, -0.15, 0.50]
-      orientation: [-0.7, 0.7, 0.0, 0.0]
+      position_delta: [0.05, 0.0, 0.05]
+      orientation_delta_rpy: [0.0, 1.5708, 0.0]
+      gripper: 0.0
   ```
 
 ### 1.2 末端移动到目标物体相对位姿（`single_arm.move_to_object`）
