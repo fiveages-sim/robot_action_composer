@@ -14,6 +14,7 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     SERVICE_CALL_RETRIES,
     SERVICE_CALL_TIMEOUT,
     SERVICE_RETRY_DELAY,
+    get_entity_pose_world_service,
     get_object_pose_from_service,
 )
 from robot_action_composer.task_runtime.context import (  # pyright: ignore[reportMissingImports]
@@ -24,6 +25,7 @@ from robot_action_composer.task_runtime.context import (  # pyright: ignore[repo
 
 ObjectResolutionKey = tuple[str, str, str, str, str]
 _record_file_lock = threading.Lock()
+_NAV_WORLD_FRAMES = {"map", "world"}
 
 
 def make_resolution_key(
@@ -67,6 +69,31 @@ def pose_from_dict(raw: Mapping[str, Any]) -> Pose:
     pose.orientation.z = float(ori["z"])
     pose.orientation.w = float(ori["w"])
     return pose
+
+
+def pose_from_world_tuple(
+    position: tuple[float, float, float],
+    orientation: tuple[float, float, float, float],
+) -> Pose:
+    pose = Pose()
+    pose.position.x = float(position[0])
+    pose.position.y = float(position[1])
+    pose.position.z = float(position[2])
+    pose.orientation.x = float(orientation[0])
+    pose.orientation.y = float(orientation[1])
+    pose.orientation.z = float(orientation[2])
+    pose.orientation.w = float(orientation[3])
+    return pose
+
+
+def _nav_world_frame_id(frame_id: str) -> str:
+    nav_frame = str(frame_id).strip() or "map"
+    if nav_frame not in _NAV_WORLD_FRAMES:
+        raise ValueError(
+            "navigation object resolution only supports frame_id 'map' or 'world' "
+            f"because Isaac entity state returns world coordinates, got {nav_frame!r}"
+        )
+    return nav_frame
 
 
 def _record_scene(record: Mapping[str, Any], *, path: Path, idx: int) -> str:
@@ -169,6 +196,107 @@ def build_object_resolution_session(
             raise ValueError("replay mode requires replay_json_path")
         session.replay_index = load_json_index(replay_json_path)
     return session
+
+
+def resolve_nav_object_pose_for_task(
+    ctx: QueueRuntimeContext,
+    *,
+    object_prim_path: str,
+    frame_id: str = "map",
+    object_role: str = "nav_target",
+    entity_state_timeout: float = SERVICE_CALL_TIMEOUT,
+    retries: int = SERVICE_CALL_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> Pose:
+    """Resolve a navigation target object's pose in the navigation frame.
+
+    Unlike ``resolve_object_pose_for_task``, this function does not convert the
+    object pose into ``ctx.frame_id`` / robot base frame. It records and replays
+    the pose used by navigation, normally ``frame_id='map'``. In Isaac GT setups
+    the service returns world coordinates and ``map`` is configured to coincide
+    with ``world``.
+    """
+    session = ctx.object_resolution
+    block = get_effective_block_meta(ctx)
+    path = str(object_prim_path).strip()
+    if not path:
+        role_for_error = str(object_role).strip() or "nav_target"
+        raise ValueError(f"{role_for_error} requires non-empty object_prim_path")
+
+    # Preserve the current non-recording behavior: ordinary navigation tasks
+    # should still query Isaac directly when no object-resolution session is active.
+    if session is None or block is None:
+        position, orientation = get_entity_pose_world_service(
+            path,
+            timeout=entity_state_timeout,
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+        return pose_from_world_tuple(position, orientation)
+
+    scene = str(block.scene or ctx.scene).strip()
+    if not scene:
+        raise RuntimeError("navigation object resolution requires current scene")
+
+    role = str(object_role).strip() or "nav_target"
+    nav_frame = _nav_world_frame_id(frame_id)
+    key = make_resolution_key(
+        task_key=ctx.task_key,
+        scene=scene,
+        block_key=block.block_key,
+        arm_side="none",
+        object_role=role,
+    )
+
+    if session.mode == "replay":
+        record = session.replay_index.get(key)
+        if record is None:
+            raise KeyError(
+                "navigation object resolution replay miss: "
+                f"task_key={ctx.task_key!r} scene={scene!r} block_key={block.block_key!r} "
+                f"arm_side='none' object_role={role!r}"
+            )
+        record_frame = str(record.get("frame_id", "")).strip()
+        if record_frame and record_frame != nav_frame:
+            raise ValueError(
+                "navigation object resolution frame mismatch: "
+                f"record frame_id={record_frame!r}, requested frame_id={nav_frame!r}"
+            )
+        pose_raw = record.get("pose")
+        if not isinstance(pose_raw, Mapping):
+            raise ValueError(f"navigation object resolution replay record missing pose for key {key!r}")
+        return pose_from_dict(pose_raw)
+
+    if session.mode != "live":
+        raise ValueError(f"unsupported object resolution mode: {session.mode!r}")
+
+    position, orientation = get_entity_pose_world_service(
+        path,
+        timeout=entity_state_timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    pose = pose_from_world_tuple(position, orientation)
+
+    if session.record_json_path:
+        append_json_record(
+            session.record_json_path,
+            {
+                "task_key": ctx.task_key,
+                "scene": scene,
+                "block_key": block.block_key,
+                "skill": block.skill,
+                "block_index": block.block_index,
+                "parallel_index": block.parallel_index,
+                "arm_side": "none",
+                "object_role": role,
+                "object_prim_path": path,
+                "include_orientation": True,
+                "frame_id": nav_frame,
+                "pose": pose_to_dict(pose),
+            },
+        )
+    return pose
 
 
 def resolve_object_pose_for_task(
