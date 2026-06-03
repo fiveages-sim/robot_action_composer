@@ -245,3 +245,13 @@ python examples/IsaacSim/motion_generation.py \
 - 回放仅替代 Isaac object pose service 查询，不替代 `object_position_offset` 与 TF 变换。
 - 真机回放按交互式习惯，每个 block 前按 Enter 继续，输入 `q` 则 `FSM_HOLD` 并退出。
 - `dual_arm.parallel_pick` 分别记录 `left_pick` 与 `right_pick`。
+
+Object-resolution replay key now includes scene:
+
+```text
+(task_key, scene, block_key, arm_side, object_role)
+```
+
+When sim runs with `scene="__all__"`, the generated filename may contain `__all__`, but every JSON record stores the concrete scene, such as `two_box1` or `two_box2`.
+
+Real replay also accepts `scene="__all__"` for a single task. It loads one `*.object_resolution.json`, expands the task's `scene_presets` in order, and replays each concrete scene interactively. JSON records must contain `scene`; old object-resolution JSON without `scene` is not supported and must be re-recorded.

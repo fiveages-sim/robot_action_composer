@@ -64,11 +64,13 @@ def _set_current_block(
     spec: BlockSpec,
     *,
     task_key: str,
+    scene: str,
     block_index: int,
     parallel_index: int | None,
 ) -> None:
     meta = CurrentBlockMeta(
         task_key=task_key,
+        scene=scene,
         skill=spec.skill,
         block_key=_block_param_key(spec),
         block_index=block_index,
@@ -86,6 +88,7 @@ def _execute_block(
     idx_label: str,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
     task_key: str = "",
+    scene: str = "",
     block_index: int = 0,
     parallel_index: int | None = None,
 ) -> None:
@@ -94,6 +97,7 @@ def _execute_block(
             ctx,
             spec,
             task_key=task_key,
+            scene=scene,
             block_index=block_index,
             parallel_index=parallel_index,
         )
@@ -147,6 +151,7 @@ def _execute_parallel(
     idx_label: str,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
     task_key: str = "",
+    scene: str = "",
     block_index: int = 0,
 ) -> None:
     active: list[tuple[int, BlockSpec]] = [
@@ -178,6 +183,7 @@ def _execute_parallel(
                 idx_label=sub_label,
                 execute_stage_kwargs=execute_stage_kwargs,
                 task_key=task_key,
+                scene=scene,
                 block_index=block_index,
                 parallel_index=parallel_index,
             )
@@ -274,6 +280,7 @@ def build_queue_runtime_context(
     consecutive_same_task_in_chain: bool = False,
     use_isaac_base_pose: bool = True,
     task_key: str = "",
+    scene: str = "",
     object_resolution: Any | None = None,
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
@@ -311,6 +318,7 @@ def build_queue_runtime_context(
         not_first_scene_in_batch=not_first_scene_in_batch,
         consecutive_same_task_in_chain=consecutive_same_task_in_chain,
         task_key=task_key,
+        scene=scene,
         object_resolution=object_resolution,
     )
 
@@ -401,6 +409,7 @@ def run_task_queue(
     not_first_scene_in_batch: bool = False,
     consecutive_same_task_in_chain: bool = False,
     task_key: str = "",
+    scene: str = "",
     object_resolution: Any | None = None,
     use_isaac_base_pose: bool = True,
 ) -> None:
@@ -446,6 +455,7 @@ def run_task_queue(
             consecutive_same_task_in_chain=consecutive_same_task_in_chain,
             use_isaac_base_pose=use_isaac_base_pose,
             task_key=task_key,
+            scene=scene,
             object_resolution=object_resolution,
         )
 
@@ -459,6 +469,7 @@ def run_task_queue(
                     idx_label=lbl,
                     execute_stage_kwargs=execute_stage_kwargs,
                     task_key=task_key,
+                    scene=scene,
                     block_index=idx,
                 )
             else:
@@ -469,6 +480,7 @@ def run_task_queue(
                     idx_label=lbl,
                     execute_stage_kwargs=execute_stage_kwargs,
                     task_key=task_key,
+                    scene=scene,
                     block_index=idx,
                 )
 
@@ -498,6 +510,7 @@ def run_task_queue_on_connected_interface(
     consecutive_same_task_in_chain: bool = False,
     use_isaac_base_pose: bool = True,
     task_key: str = "",
+    scene: str = "",
     object_resolution: Any | None = None,
 ) -> None:
     """Execute one task_queue on an already-connected interface (no connect/disconnect)."""
@@ -522,6 +535,7 @@ def run_task_queue_on_connected_interface(
         consecutive_same_task_in_chain=consecutive_same_task_in_chain,
         use_isaac_base_pose=use_isaac_base_pose,
         task_key=task_key,
+        scene=scene,
         object_resolution=object_resolution,
     )
 
@@ -535,6 +549,7 @@ def run_task_queue_on_connected_interface(
                 idx_label=lbl,
                 execute_stage_kwargs=execute_stage_kwargs,
                 task_key=task_key,
+                scene=scene,
                 block_index=idx,
             )
         else:
@@ -545,6 +560,7 @@ def run_task_queue_on_connected_interface(
                 idx_label=lbl,
                 execute_stage_kwargs=execute_stage_kwargs,
                 task_key=task_key,
+                scene=scene,
                 block_index=idx,
             )
 
@@ -593,6 +609,7 @@ def run_task_queue_interactive_on_connected_interface(
     not_first_scene_in_batch: bool = False,
     consecutive_same_task_in_chain: bool = False,
     task_key: str = "",
+    scene: str = "",
     object_resolution: Any | None = None,
 ) -> None:
     """逐 block 等待 Enter 后执行；输入 ``q`` 则 ``FSM_HOLD`` 并提前退出。"""
@@ -617,6 +634,7 @@ def run_task_queue_interactive_on_connected_interface(
         consecutive_same_task_in_chain=consecutive_same_task_in_chain,
         use_isaac_base_pose=use_isaac_base_pose,
         task_key=task_key,
+        scene=scene,
         object_resolution=object_resolution,
     )
 
@@ -635,6 +653,7 @@ def run_task_queue_interactive_on_connected_interface(
                 idx_label=lbl,
                 execute_stage_kwargs=execute_stage_kwargs,
                 task_key=task_key,
+                scene=scene,
                 block_index=idx,
             )
         else:
@@ -645,6 +664,7 @@ def run_task_queue_interactive_on_connected_interface(
                 idx_label=lbl,
                 execute_stage_kwargs=execute_stage_kwargs,
                 task_key=task_key,
+                scene=scene,
                 block_index=idx,
             )
 

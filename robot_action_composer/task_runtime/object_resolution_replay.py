@@ -22,18 +22,19 @@ from robot_action_composer.task_runtime.context import (  # pyright: ignore[repo
     get_effective_block_meta,
 )
 
-ObjectResolutionKey = tuple[str, str, str, str]
+ObjectResolutionKey = tuple[str, str, str, str, str]
 _record_file_lock = threading.Lock()
 
 
 def make_resolution_key(
     *,
     task_key: str,
+    scene: str,
     block_key: str,
     arm_side: str,
     object_role: str,
 ) -> ObjectResolutionKey:
-    return (task_key, block_key, arm_side, object_role)
+    return (task_key, scene, block_key, arm_side, object_role)
 
 
 def pose_to_dict(pose: Pose) -> dict[str, Any]:
@@ -68,9 +69,23 @@ def pose_from_dict(raw: Mapping[str, Any]) -> Pose:
     return pose
 
 
-def _record_key(record: Mapping[str, Any]) -> ObjectResolutionKey:
+def _record_scene(record: Mapping[str, Any], *, path: Path, idx: int) -> str:
+    raw = record.get("scene")
+    if raw is None:
+        raise ValueError(
+            f"object resolution JSON record missing scene at {path}:records[{idx}]; "
+            "re-record object-resolution JSON with scene-aware format"
+        )
+    scene = str(raw).strip()
+    if not scene:
+        raise ValueError(f"object resolution JSON record has empty scene at {path}:records[{idx}]")
+    return scene
+
+
+def _record_key(record: Mapping[str, Any], *, path: Path, idx: int) -> ObjectResolutionKey:
     return make_resolution_key(
         task_key=str(record["task_key"]),
+        scene=_record_scene(record, path=path, idx=idx),
         block_key=str(record["block_key"]),
         arm_side=str(record["arm_side"]),
         object_role=str(record["object_role"]),
@@ -109,7 +124,7 @@ def load_json_index(path: str | Path) -> dict[ObjectResolutionKey, dict[str, Any
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid object resolution JSON: {json_path}") from exc
     for idx, record in enumerate(_records_from_json_payload(raw, path=json_path)):
-        key = _record_key(record)
+        key = _record_key(record, path=json_path, idx=idx)
         if key in index:
             print(
                 f"[ObjectResolution] duplicate key {key!r} at {json_path}:records[{idx}]; "
@@ -171,8 +186,12 @@ def resolve_object_pose_for_task(
     block = get_effective_block_meta(ctx)
     if session is None or block is None:
         raise RuntimeError("object resolution requires ctx.object_resolution and ctx.current_block")
+    scene = str(block.scene or ctx.scene).strip()
+    if not scene:
+        raise RuntimeError("object resolution requires current scene")
     key = make_resolution_key(
         task_key=ctx.task_key,
+        scene=scene,
         block_key=block.block_key,
         arm_side=arm_side,
         object_role=object_role,
@@ -183,7 +202,7 @@ def resolve_object_pose_for_task(
         if record is None:
             raise KeyError(
                 "object resolution replay miss: "
-                f"task_key={ctx.task_key!r} block_key={block.block_key!r} "
+                f"task_key={ctx.task_key!r} scene={scene!r} block_key={block.block_key!r} "
                 f"arm_side={arm_side!r} object_role={object_role!r}"
             )
         pose_raw = record.get("pose")
@@ -215,6 +234,7 @@ def resolve_object_pose_for_task(
             session.record_json_path,
             {
                 "task_key": ctx.task_key,
+                "scene": scene,
                 "block_key": block.block_key,
                 "skill": block.skill,
                 "block_index": block.block_index,

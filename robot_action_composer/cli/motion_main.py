@@ -799,8 +799,8 @@ def run_motion_generation(
         if entry_kind in ("last_chain", "interactive_chain"):
             raise ValueError("real object-resolution replay supports single task mode only")
         assert task_entry is not None
-        if scene == "__all__":
-            raise ValueError("real object-resolution replay does not support scene='__all__'")
+        scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
+        scenes_to_run = list(scene_presets.keys()) if scene == "__all__" else [scene]
         json_path = _prompt_object_resolution_json_path(
             isaac_dir=isaac_dir,
             robot_entry=robot_entry,
@@ -814,12 +814,6 @@ def run_motion_generation(
             replay_json_path=str(json_path),
         )
         print(f"[ObjectResolution] Real replay from: {json_path}")
-        runtime, merged_queue = _build_runtime_for_scene(
-            task_entry=task_entry,
-            scene=scene,
-            allowed=allowed,
-        )
-        print(format_merged_queue_summary(scene, runtime))
         use_stamped = task_entry.get("use_stamped", True)
         interface = build_ros2_interface_from_robot_cfg(robot_entry["robot_cfg"])
         sim_time = WallTimeHelper()
@@ -827,19 +821,37 @@ def run_motion_generation(
         try:
             interface.connect()
             connected = True
-            print("[OK] Robot connected (real object-resolution replay)")
-            run_task_queue_interactive_on_connected_interface(
-                interface=interface,
-                sim_time=sim_time,
-                robot_cfg=robot_entry["robot_cfg"],
-                runtime=runtime,
-                blocks=merged_queue,
-                reset_env=False,
-                use_stamped=use_stamped,
-                use_isaac_base_pose=False,
-                task_key=task_key,
-                object_resolution=object_resolution,
-            )
+            label = "real object-resolution replay"
+            if scene == "__all__":
+                label += " (__all__)"
+            print(f"[OK] Robot connected ({label})")
+            for scene_idx, scene_name in enumerate(scenes_to_run):
+                runtime, merged_queue = _build_runtime_for_scene(
+                    task_entry=task_entry,
+                    scene=scene_name,
+                    allowed=allowed,
+                )
+                print(format_merged_queue_summary(scene_name, runtime))
+                print(
+                    f"\n{'=' * 70}\nReal replay "
+                    f"(scene {scene_idx + 1}/{len(scenes_to_run)}: {scene_name})\n{'=' * 70}"
+                )
+                if scene_idx > 0:
+                    print("[info] REAL __all__ replay: continuing to next scene without env reset.")
+                run_task_queue_interactive_on_connected_interface(
+                    interface=interface,
+                    sim_time=sim_time,
+                    robot_cfg=robot_entry["robot_cfg"],
+                    runtime=runtime,
+                    blocks=merged_queue,
+                    reset_env=False,
+                    use_stamped=use_stamped,
+                    use_isaac_base_pose=False,
+                    not_first_scene_in_batch=(scene_idx > 0),
+                    task_key=task_key,
+                    scene=scene_name,
+                    object_resolution=object_resolution,
+                )
         finally:
             sim_time.shutdown()
             if connected:
@@ -914,6 +926,7 @@ def run_motion_generation(
                         use_stamped=use_stamped_seg,
                         consecutive_same_task_in_chain=consecutive_same_task_in_chain,
                         task_key=tk,
+                        scene=scene_name,
                         object_resolution=object_resolution,
                     )
                     prev_chain_task_key = tk
@@ -981,6 +994,7 @@ def run_motion_generation(
                         use_stamped=use_stamped,
                         not_first_scene_in_batch=not_first_scene_in_batch,
                         task_key=task_key,
+                        scene=scene_name,
                         object_resolution=object_resolution,
                     )
             finally:
@@ -1003,5 +1017,6 @@ def run_motion_generation(
                 reset_env=reset_env,
                 use_stamped=use_stamped,
                 task_key=task_key,
+                scene=scene_name,
                 object_resolution=object_resolution,
             )

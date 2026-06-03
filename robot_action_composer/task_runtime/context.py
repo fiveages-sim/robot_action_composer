@@ -14,6 +14,7 @@ from robot_action_composer.motion_generation.tasks.bimanual_place import Bimanua
 @dataclass(frozen=True)
 class CurrentBlockMeta:
     task_key: str
+    scene: str
     skill: str
     block_key: str
     block_index: int
@@ -25,7 +26,7 @@ class ObjectResolutionSession:
     mode: str = "live"  # live | replay
     record_json_path: str | None = None
     replay_json_path: str | None = None
-    replay_index: dict[tuple[str, str, str, str], dict[str, Any]] = field(default_factory=dict)
+    replay_index: dict[tuple[str, str, str, str, str], dict[str, Any]] = field(default_factory=dict)
 
 
 _block_meta_tls = threading.local()
@@ -91,6 +92,7 @@ class QueueRuntimeContext:
     #: 多段 chain 中，本段与前一段**连续**且 task_key 相同时为 True（含 __all__ 展开的 default→box2）。
     consecutive_same_task_in_chain: bool = False
     task_key: str = ""
+    scene: str = ""
     current_block: CurrentBlockMeta | None = None
     object_resolution: ObjectResolutionSession | None = None
 
