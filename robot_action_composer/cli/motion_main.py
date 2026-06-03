@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from datetime import datetime
 import importlib.util
 import json
 import sys
@@ -45,6 +46,7 @@ def _discover_task_registry(isaac_dir: Path) -> dict[str, dict[str, Any]]:
         if discovery.tasks:
             registry[robot_key] = {
                 "label": robot_label,
+                "robot_dir_name": robot_dir.name,
                 "robot_cfg": robot_cfg,
                 "tasks": discovery.tasks,
                 "task_groups": discovery.task_groups,
@@ -238,6 +240,142 @@ def _format_motion_last_line(last: _MotionLastDict) -> str:
     sc = last.get("scene", "?")
     scene_s = "ALL_SCENES" if sc == "__all__" else str(sc)
     return f"robot={rk}  task={tk}  scene={scene_s}  runs={n}  reset_env={reset_s}"
+
+
+def _robot_records_dir(*, isaac_dir: Path, robot_entry: dict[str, Any]) -> Path:
+    robot_dir_name = str(robot_entry.get("robot_dir_name", "")).strip()
+    if not robot_dir_name:
+        robot_dir_name = str(robot_entry.get("label", "")).strip()
+    if not robot_dir_name:
+        raise ValueError("Cannot resolve robot records directory: robot_dir_name and label are empty")
+    return isaac_dir / "robots" / robot_dir_name / "records"
+
+
+def _default_object_resolution_json_output(
+    *,
+    isaac_dir: Path,
+    robot_entry: dict[str, Any],
+    robot_key: str,
+    task_key: str,
+    scene: str,
+    run_idx: int,
+) -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_scene = scene.replace("/", "_")
+    filename = f"{robot_key}_{task_key}_{safe_scene}_run{run_idx + 1:02d}_{ts}.object_resolution.json"
+    return _robot_records_dir(isaac_dir=isaac_dir, robot_entry=robot_entry) / filename
+
+
+def _prompt_record_object_resolution_json() -> bool:
+    return (
+        _select_option(
+            title="Record object-resolution JSON during this sim run?",
+            options=["yes", "no"],
+            default_value="no",
+        )
+        == "yes"
+    )
+
+
+def _discover_object_resolution_jsons(*, isaac_dir: Path, robot_entry: dict[str, Any]) -> list[Path]:
+    records_dir = _robot_records_dir(isaac_dir=isaac_dir, robot_entry=robot_entry)
+    if not records_dir.is_dir():
+        return []
+    files: list[Path] = []
+    for pattern in ("*.object_resolution.json",):
+        files.extend(records_dir.glob(pattern))
+    return sorted({p.resolve() for p in files}, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _filter_object_resolution_jsons(
+    jsons: list[Path],
+    *,
+    robot_key: str,
+    task_key: str,
+    scene: str,
+) -> list[Path]:
+    robot_token = str(robot_key).strip()
+    task_token = str(task_key).strip()
+    scene_token = str(scene).strip()
+    if not robot_token or not task_token:
+        return jsons
+
+    def _matches(path: Path) -> bool:
+        stem = path.stem
+        if robot_token not in stem or task_token not in stem:
+            return False
+        if scene_token == "__all__":
+            return "__all__" in stem
+        return scene_token in stem or "__all__" in stem
+
+    filtered = [path for path in jsons if _matches(path)]
+    return filtered if filtered else jsons
+
+
+def _read_object_resolution_json_manual() -> Path:
+    raw = input("Object resolution JSON path for real robot replay: ").strip()
+    if not raw:
+        raise ValueError("object resolution JSON path is required for real robot replay")
+    json_path = Path(raw).expanduser()
+    if not json_path.is_file():
+        raise FileNotFoundError(f"object resolution JSON not found: {json_path}")
+    return json_path
+
+
+def _prompt_object_resolution_json_path(
+    *,
+    isaac_dir: Path,
+    robot_entry: dict[str, Any],
+    robot_key: str,
+    task_key: str,
+    scene: str,
+    override_path: Path | None = None,
+) -> Path:
+    if override_path is not None:
+        if not override_path.is_file():
+            raise FileNotFoundError(f"object resolution JSON not found: {override_path}")
+        return override_path
+
+    records_dir = _robot_records_dir(isaac_dir=isaac_dir, robot_entry=robot_entry)
+    all_jsons = _discover_object_resolution_jsons(isaac_dir=isaac_dir, robot_entry=robot_entry)
+    jsons = _filter_object_resolution_jsons(
+        all_jsons,
+        robot_key=robot_key,
+        task_key=task_key,
+        scene=scene,
+    )
+    if not jsons:
+        if not records_dir.is_dir():
+            print(f"[info] Records directory not found: {records_dir}")
+        else:
+            print(f"[info] No object resolution JSON files found in: {records_dir}")
+        return _read_object_resolution_json_manual()
+
+    default_path = jsons[0]
+    print("\n可用的 object resolution JSON 文件")
+    for idx, path in enumerate(jsons, start=1):
+        suffix = " (default, newest)" if path == default_path else ""
+        try:
+            display = path.relative_to(isaac_dir.resolve())
+        except ValueError:
+            display = path
+        print(f"  {idx}. {path.name}  [{display}]{suffix}")
+
+    raw = input("Select JSON (Enter = default): ").strip()
+    if raw == "":
+        selected = default_path
+    elif raw.isdigit():
+        index = int(raw) - 1
+        if 0 <= index < len(jsons):
+            selected = jsons[index]
+        else:
+            selected = default_path
+    else:
+        selected = default_path
+
+    if not selected.is_file():
+        raise FileNotFoundError(f"object resolution JSON not found: {selected}")
+    return selected
 
 
 def _build_runtime_for_scene(
@@ -443,7 +581,15 @@ def _prompt_chain_segments(*, robot_entry: dict[str, Any]) -> list[_ChainSegment
     return segments
 
 
-def run_motion_generation(*, isaac_dir: Path) -> None:
+def run_motion_generation(
+    *,
+    isaac_dir: Path,
+    robot_key: str | None = None,
+    task_key: str | None = None,
+    scene: str | None = None,
+    object_resolution_json: Path | None = None,
+    no_reset: bool = False,
+) -> None:
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         format_merged_queue_summary,
     )
@@ -495,7 +641,26 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
     task_entry: dict[str, Any] | None = None
     chain_segments: list[_ChainSegmentDict] = []
 
-    if entry_kind == "last_single" and last:
+    if robot_key is not None and task_key is not None:
+        if robot_key not in registry:
+            raise ValueError(f"Unknown robot key: {robot_key!r}")
+        robot_entry = registry[robot_key]
+        if task_key not in robot_entry["tasks"]:
+            raise ValueError(f"Unknown task key {task_key!r} for robot {robot_key!r}")
+        task_entry = robot_entry["tasks"][task_key]
+        scene_presets_cli = task_entry["scene_presets"]
+        if scene is None:
+            scene = str(task_entry.get("default_scene") or next(iter(scene_presets_cli)))
+        if scene != "__all__" and scene not in scene_presets_cli:
+            raise ValueError(f"Unknown scene {scene!r} for task {task_key!r}")
+        num_runs = 1
+        reset_env = not no_reset
+        entry_kind = "interactive_single"
+        print(
+            f"\n[info] CLI selection: robot={robot_key} task={task_key} "
+            f"scene={scene} reset_env={'yes' if reset_env else 'no'}"
+        )
+    elif entry_kind == "last_single" and last:
         robot_key = str(last["robot_key"])
         task_key = str(last["task_key"])
         scene = str(last["scene"])
@@ -620,10 +785,69 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
     allowed = _merged_queue_allowed_keys()
     import robot_action_composer.task_runtime.skills  # noqa: F401 - register built-in skills
 
+    from robot_action_composer.hardware_detection import detect_motion_environment_from_ros
+    from robot_action_composer.task_runtime.object_resolution_replay import build_object_resolution_session
     from robot_action_composer.task_runtime.runner import (  # pyright: ignore[reportMissingImports]
         run_task_queue,
         run_task_queue_on_connected_interface,
+        run_task_queue_interactive_on_connected_interface,
     )
+    from robot_action_composer.record.time_helpers import WallTimeHelper
+
+    motion_environment = detect_motion_environment_from_ros()
+    if motion_environment == "real":
+        if entry_kind in ("last_chain", "interactive_chain"):
+            raise ValueError("real object-resolution replay supports single task mode only")
+        assert task_entry is not None
+        if scene == "__all__":
+            raise ValueError("real object-resolution replay does not support scene='__all__'")
+        json_path = _prompt_object_resolution_json_path(
+            isaac_dir=isaac_dir,
+            robot_entry=robot_entry,
+            robot_key=robot_key,
+            task_key=task_key,
+            scene=scene,
+            override_path=object_resolution_json,
+        )
+        object_resolution = build_object_resolution_session(
+            mode="replay",
+            replay_json_path=str(json_path),
+        )
+        print(f"[ObjectResolution] Real replay from: {json_path}")
+        runtime, merged_queue = _build_runtime_for_scene(
+            task_entry=task_entry,
+            scene=scene,
+            allowed=allowed,
+        )
+        print(format_merged_queue_summary(scene, runtime))
+        use_stamped = task_entry.get("use_stamped", True)
+        interface = build_ros2_interface_from_robot_cfg(robot_entry["robot_cfg"])
+        sim_time = WallTimeHelper()
+        connected = False
+        try:
+            interface.connect()
+            connected = True
+            print("[OK] Robot connected (real object-resolution replay)")
+            run_task_queue_interactive_on_connected_interface(
+                interface=interface,
+                sim_time=sim_time,
+                robot_cfg=robot_entry["robot_cfg"],
+                runtime=runtime,
+                blocks=merged_queue,
+                reset_env=False,
+                use_stamped=use_stamped,
+                use_isaac_base_pose=False,
+                task_key=task_key,
+                object_resolution=object_resolution,
+            )
+        finally:
+            sim_time.shutdown()
+            if connected:
+                interface.disconnect()
+                print("[OK] Robot disconnected")
+        return
+
+    record_object_resolution_json = object_resolution_json is not None or _prompt_record_object_resolution_json()
 
     if entry_kind in ("last_chain", "interactive_chain"):
         for run_idx in range(num_runs):
@@ -640,6 +864,21 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                     task_entry_seg = robot_entry["tasks"][tk]
                     use_stamped_seg = task_entry_seg.get("use_stamped", True)
                     scene_name = seg["scene"]
+                    object_resolution = None
+                    if record_object_resolution_json:
+                        record_json_path = object_resolution_json or _default_object_resolution_json_output(
+                            isaac_dir=isaac_dir,
+                            robot_entry=robot_entry,
+                            robot_key=robot_key,
+                            task_key=tk,
+                            scene=scene_name,
+                            run_idx=run_idx,
+                        )
+                        object_resolution = build_object_resolution_session(
+                            mode="live",
+                            record_json_path=str(record_json_path),
+                        )
+                        print(f"[ObjectResolution] Sim live recording to: {record_json_path}")
                     consecutive_same_task_in_chain = (
                         prev_chain_task_key is not None and tk == prev_chain_task_key
                     )
@@ -674,6 +913,8 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                         reset_env=should_reset_env,
                         use_stamped=use_stamped_seg,
                         consecutive_same_task_in_chain=consecutive_same_task_in_chain,
+                        task_key=tk,
+                        object_resolution=object_resolution,
                     )
                     prev_chain_task_key = tk
             finally:
@@ -690,6 +931,22 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
 
     run_all_scenes = len(scenes_to_run) > 1
     for run_idx in range(num_runs):
+        object_resolution = None
+        if record_object_resolution_json:
+            record_json_path = object_resolution_json or _default_object_resolution_json_output(
+                isaac_dir=isaac_dir,
+                robot_entry=robot_entry,
+                robot_key=robot_key,
+                task_key=task_key,
+                scene=scenes_to_run[0] if not run_all_scenes else "__all__",
+                run_idx=run_idx,
+            )
+            object_resolution = build_object_resolution_session(
+                mode="live",
+                record_json_path=str(record_json_path),
+            )
+            print(f"[ObjectResolution] Sim live recording to: {record_json_path}")
+
         if run_all_scenes:
             interface = build_ros2_interface_from_robot_cfg(robot_entry["robot_cfg"])
             sim_time = SimTimeHelper()
@@ -723,6 +980,8 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                         reset_env=should_reset_env,
                         use_stamped=use_stamped,
                         not_first_scene_in_batch=not_first_scene_in_batch,
+                        task_key=task_key,
+                        object_resolution=object_resolution,
                     )
             finally:
                 sim_time.shutdown()
@@ -743,4 +1002,6 @@ def run_motion_generation(*, isaac_dir: Path) -> None:
                 blocks=merged_queue,
                 reset_env=reset_env,
                 use_stamped=use_stamped,
+                task_key=task_key,
+                object_resolution=object_resolution,
             )

@@ -21,7 +21,12 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
     build_bimanual_place_relative_sequence,
 )
 
-from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
+from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+    SERVICE_CALL_RETRIES,
+    SERVICE_CALL_TIMEOUT,
+    SERVICE_RETRY_DELAY,
+    get_object_pose_from_service,
+)
 
 from robot_action_composer.motion_generation.tasks.bimanual_carry import (  # pyright: ignore[reportMissingImports]
     BimanualCarryTaskConfig,
@@ -38,6 +43,7 @@ from robot_action_composer.motion_generation.tasks.pick_place import (  # pyrigh
 )
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
+from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.skills.single_arm import (
     _is_bimanual_ee_cache,
@@ -291,12 +297,24 @@ def _resolve_parallel_pick_target_poses(
     exec_f = str(execution_frame_id).strip() or src
 
     def _one(side: str, prim: str, off: tuple[float, float, float]) -> Pose:
-        pose = get_object_pose_from_service(
-            ctx.base_world_pos,
-            ctx.base_world_quat,
-            prim,
-            include_orientation=True,
-        )
+        if ctx.object_resolution is not None:
+            pose = resolve_object_pose_for_task(
+                ctx,
+                object_prim_path=prim,
+                include_orientation=True,
+                arm_side=side,
+                object_role=f"{side}_pick",
+                entity_state_timeout=SERVICE_CALL_TIMEOUT,
+                retries=SERVICE_CALL_RETRIES,
+                retry_delay=SERVICE_RETRY_DELAY,
+            )
+        else:
+            pose = get_object_pose_from_service(
+                ctx.base_world_pos,
+                ctx.base_world_quat,
+                prim,
+                include_orientation=True,
+            )
         pose = apply_object_local_offset_to_pose(pose, off)
         if exec_f != src:
             iface = ctx.interface
@@ -397,12 +415,24 @@ def skill_place(
         ref_path = ref_path_raw.strip()
         ref_off_obj = _param_vec3(params, "object_position_offset", (0.0, 0.0, 0.0))
         # 参考物位姿服务输出在 ctx.frame_id；必要时转换到 motion_frame 再参与几何计算。
-        ref_pose = get_object_pose_from_service(
-            ctx.base_world_pos,
-            ctx.base_world_quat,
-            ref_path,
-            include_orientation=True,
-        )
+        if ctx.object_resolution is not None:
+            ref_pose = resolve_object_pose_for_task(
+                ctx,
+                object_prim_path=ref_path,
+                include_orientation=True,
+                arm_side="none",
+                object_role="place_reference",
+                entity_state_timeout=SERVICE_CALL_TIMEOUT,
+                retries=SERVICE_CALL_RETRIES,
+                retry_delay=SERVICE_RETRY_DELAY,
+            )
+        else:
+            ref_pose = get_object_pose_from_service(
+                ctx.base_world_pos,
+                ctx.base_world_quat,
+                ref_path,
+                include_orientation=True,
+            )
         ref_motion = ref_pose
         if motion_frame != ctx.frame_id:
             if not hasattr(iface, "transform_pose"):
@@ -604,12 +634,24 @@ def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[l
     """双臂搬运：一次执行完整搬运序列。"""
     cfg = _require_carry(ctx)
     _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label="dual_arm.carry")
-    oc_base = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        cfg.object_prim_path,
-        include_orientation=False,
-    )
+    if ctx.object_resolution is not None:
+        oc_base = resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=cfg.object_prim_path,
+            include_orientation=False,
+            arm_side="none",
+            object_role="carry_object",
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    else:
+        oc_base = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            cfg.object_prim_path,
+            include_orientation=False,
+        )
     oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
     ctx.carry_object_position = oc
     exec_f = _carry_execution_frame_id(cfg, ctx)

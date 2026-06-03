@@ -223,3 +223,25 @@ task_queue:
 - `examples/IsaacSim/robots/Agibot_G1/task_configs/handover.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/bimanual_carry.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/navigate_and_carry.yaml`
+
+---
+
+## 8) 对象位姿录制与回放（统一入口）
+
+使用 `examples/IsaacSim/motion_generation.py` 作为统一入口。仿真与真机命令形式相同，实际行为由 `robot_description` 中的 ros2_control 硬件插件自动检测决定（`sim` → live，可选录制；`real` → JSON 回放）。
+
+```bash
+python examples/IsaacSim/motion_generation.py \
+  --robot FiveAges_W2 \
+  --task-key poc_bimanual_2box_rev \
+  --scene two_box
+```
+
+说明：
+
+- `--object-resolution-json` 为可选覆盖路径。
+- 仿真环境不传该参数时，会询问是否录制 object-resolution JSON；选择 yes 后写入 `examples/IsaacSim/robots/<robot_dir>/records/` 下的默认 pretty JSON 文件。
+- 真机环境不传该参数时，会从 `examples/IsaacSim/robots/<robot_dir>/records/` 中选择匹配的 JSON；找不到时提示手动输入路径。
+- 回放仅替代 Isaac object pose service 查询，不替代 `object_position_offset` 与 TF 变换。
+- 真机回放按交互式习惯，每个 block 前按 Enter 继续，输入 `q` 则 `FSM_HOLD` 并退出。
+- `dual_arm.parallel_pick` 分别记录 `left_pick` 与 `right_pick`。

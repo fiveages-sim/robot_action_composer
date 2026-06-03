@@ -30,7 +30,13 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
     build_single_arm_return_home_sequence,
 )
 
-from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
+from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+    SERVICE_CALL_RETRIES,
+    SERVICE_CALL_TIMEOUT,
+    SERVICE_RETRY_DELAY,
+    get_object_pose_from_service,
+)
+from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
     apply_object_local_offset_to_pose,
@@ -144,12 +150,26 @@ def _resolve_object_target_pose_from_pick_like_params(
 ) -> tuple[Pose, str]:
     """Resolve object pose (+ local offset) into execution frame, mirroring ``single_arm.pick``."""
     exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
-    target = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        object_prim_path,
-        include_orientation=True,
-    )
+    arm_side = ctx.task_cfg.common.arm.strip().lower()
+    object_role = "pick_target" if label == "single_arm.pick" else "move_to_object_target"
+    if ctx.object_resolution is not None:
+        target = resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=object_prim_path,
+            include_orientation=True,
+            arm_side=arm_side,
+            object_role=object_role,
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    else:
+        target = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            object_prim_path,
+            include_orientation=True,
+        )
     if exec_f != ctx.frame_id:
         iface = ctx.interface
         if not hasattr(iface, "transform_pose"):
@@ -284,6 +304,7 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
         pl,
         base_world_pos=ctx.base_world_pos,
         base_world_quat=ctx.base_world_quat,
+        ctx=ctx,
     )
     if pl2.ee_base_orientation is None:
         pl2 = replace(pl2, ee_base_orientation=qt.pick.ee_base_orientation)
