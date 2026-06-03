@@ -192,6 +192,18 @@ task_queue:
 - **多段 chain**：先选 **task folder**（整链锁定同一目录），再逐段选 task + scene；某段可选 ``__all__`` 展开该任务尚未用过的 scene（如 ``black_box_pick/__all__`` → ``default``、``box2``）。仅当本 segment 与前一段**连续且 task_key 相同**时跳过预备块；**不同 task**（搬运 → 黑盒）不跳过。同 task+scene 可重复加入（如首尾各一段搬运）。
 - 单 scene、单段首次执行时照常运行；并行块中可对子步骤分别设置。
 
+### real/object-resolution replay 中的导航跳过
+
+real/object-resolution replay 使用交互式 task queue runner。遇到 `nav.*` 导航 skill 时，runner 会在执行前询问：
+
+- 直接回车或输入 `r` / `run`：执行当前导航 skill。
+- 输入 `s` / `skip`：跳过当前导航 skill。
+- 输入 `q` / `quit`：停止当前交互队列，runner 会发送 `FSM_HOLD` 后退出。
+
+如果导航 skill 位于 `parallel` 块中，runner 只对 `nav.*` 子 skill 逐个询问。选择跳过时只跳过该导航子 skill，parallel 块中的其它非导航子 skill 会保留，并继续按原并行逻辑执行。
+
+已有的 `skip_when_not_first_scene: true` 优先级更高：在 `__all__` 的非首 scene 或 chain 连续同 task 场景中，如果某个 block 已经因该标记被跳过，runner 不会再弹出导航跳过询问。
+
 ### 缓存回程
 
 - 笛卡尔：`robot.cache_ee_pose` + `single_arm.goto_cache_pose` / `dual_arm.goto_cache_pose`

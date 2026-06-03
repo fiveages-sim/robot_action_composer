@@ -59,6 +59,10 @@ def _block_param_key(spec: BlockSpec) -> str:
     return spec.id if spec.id else spec.skill
 
 
+def _is_navigation_skill(spec: BlockSpec) -> bool:
+    return spec.skill.startswith("nav.")
+
+
 def _set_current_block(
     ctx: Any,
     spec: BlockSpec,
@@ -169,7 +173,36 @@ def _execute_parallel(
     if not active:
         print(f"[{runner_prefix}] {idx_label} parallel({len(par_spec.skills)}) -> all sub-steps skipped")
         return
-    n = len(active)
+    _execute_parallel_active_subset(
+        ctx,
+        par_spec,
+        active,
+        runner_prefix=runner_prefix,
+        idx_label=idx_label,
+        execute_stage_kwargs=execute_stage_kwargs,
+        task_key=task_key,
+        scene=scene,
+        block_index=block_index,
+    )
+
+
+def _execute_parallel_active_subset(
+    ctx: Any,
+    par_spec: ParallelSpec,
+    active_specs: Sequence[tuple[int, BlockSpec]],
+    *,
+    runner_prefix: str,
+    idx_label: str,
+    execute_stage_kwargs: Mapping[str, Any] | None = None,
+    task_key: str = "",
+    scene: str = "",
+    block_index: int = 0,
+) -> None:
+    if not active_specs:
+        print(f"[{runner_prefix}] {idx_label} parallel({len(par_spec.skills)}) -> all sub-steps skipped")
+        return
+
+    n = len(active_specs)
     print(f"[{runner_prefix}] {idx_label} parallel({n}) -> dispatching {n} skill(s)")
     errors: list[BaseException] = []
     lock = threading.Lock()
@@ -199,7 +232,7 @@ def _execute_parallel(
             args=(sub_spec, f"{idx_label}[{orig_i}]", orig_i),
             daemon=True,
         )
-        for orig_i, sub_spec in active
+        for orig_i, sub_spec in active_specs
     ]
     for t in threads:
         t.start()
@@ -587,6 +620,50 @@ def _drain_stdin_buffer(stream: TextIO | None = None) -> None:
         return
 
 
+def _prompt_nav_block_action(spec: BlockSpec, lbl: str) -> str:
+    """Return 'run', 'skip', or 'quit' for an interactive navigation block."""
+    label = _block_label(spec)
+    while True:
+        _drain_stdin_buffer()
+        print(f"\n[{lbl}] Navigation block: {label}")
+        print("  Press Enter/r to run, s to skip this navigation skill, or q to stop.")
+        raw = input("> ").strip().lower()
+        if raw in {"", "r", "run", "y", "yes"}:
+            return "run"
+        if raw in {"s", "skip"}:
+            return "skip"
+        if raw in {"q", "quit"}:
+            return "quit"
+        print("  Please enter Enter/r, s, or q.")
+
+
+def _filter_interactive_parallel_navigation(
+    ctx: Any,
+    par_spec: ParallelSpec,
+    lbl: str,
+) -> tuple[str, list[tuple[int, BlockSpec]]]:
+    """Return ('run'|'quit', active sub-steps) after prompting for nav sub-steps."""
+    active: list[tuple[int, BlockSpec]] = []
+    for sub_idx, sub in enumerate(par_spec.skills):
+        sub_lbl = f"{lbl}[{sub_idx}]"
+        if _should_skip_repeat_block(ctx, sub):
+            reason = _skip_repeat_reason(ctx) or "repeat batch"
+            print(
+                f"[TaskQ] {sub_lbl} {_block_label(sub)} -> skipped "
+                f"(skip_when_not_first_scene, {reason})",
+            )
+            continue
+        if _is_navigation_skill(sub):
+            action = _prompt_nav_block_action(sub, sub_lbl)
+            if action == "quit":
+                return "quit", active
+            if action == "skip":
+                print(f"[TaskQ] {sub_lbl} {_block_label(sub)} -> skipped (user skipped navigation)")
+                continue
+        active.append((sub_idx, sub))
+    return "run", active
+
+
 def _wait_interactive_block_confirm(spec: QueueBlock, lbl: str) -> bool:
     _drain_stdin_buffer()
     print(f"\n{_format_interactive_block_prompt(spec, lbl)}")
@@ -641,14 +718,21 @@ def run_task_queue_interactive_on_connected_interface(
     total = len(specs)
     for idx, spec in enumerate(specs):
         lbl = f"block {idx + 1}/{total}"
-        if not _wait_interactive_block_confirm(spec, lbl):
-            print(f"[info] Stopped before {lbl} (user quit)")
-            interface.send_fsm_command(FSM_HOLD)
-            return
+
         if isinstance(spec, ParallelSpec):
-            _execute_parallel(
+            if not _wait_interactive_block_confirm(spec, lbl):
+                print(f"[info] Stopped before {lbl} (user quit)")
+                interface.send_fsm_command(FSM_HOLD)
+                return
+            action, active = _filter_interactive_parallel_navigation(ctx, spec, lbl)
+            if action == "quit":
+                print(f"[info] Stopped before {lbl} (user quit)")
+                interface.send_fsm_command(FSM_HOLD)
+                return
+            _execute_parallel_active_subset(
                 ctx,
                 spec,
+                active,
                 runner_prefix="TaskQ",
                 idx_label=lbl,
                 execute_stage_kwargs=execute_stage_kwargs,
@@ -656,7 +740,9 @@ def run_task_queue_interactive_on_connected_interface(
                 scene=scene,
                 block_index=idx,
             )
-        else:
+            continue
+
+        if _should_skip_repeat_block(ctx, spec):
             _execute_block(
                 ctx,
                 spec,
@@ -667,6 +753,32 @@ def run_task_queue_interactive_on_connected_interface(
                 scene=scene,
                 block_index=idx,
             )
+            continue
+
+        if _is_navigation_skill(spec):
+            action = _prompt_nav_block_action(spec, lbl)
+            if action == "quit":
+                print(f"[info] Stopped before {lbl} (user quit)")
+                interface.send_fsm_command(FSM_HOLD)
+                return
+            if action == "skip":
+                print(f"[TaskQ] {lbl} {_block_label(spec)} -> skipped (user skipped navigation)")
+                continue
+        elif not _wait_interactive_block_confirm(spec, lbl):
+            print(f"[info] Stopped before {lbl} (user quit)")
+            interface.send_fsm_command(FSM_HOLD)
+            return
+
+        _execute_block(
+            ctx,
+            spec,
+            runner_prefix="TaskQ",
+            idx_label=lbl,
+            execute_stage_kwargs=execute_stage_kwargs,
+            task_key=task_key,
+            scene=scene,
+            block_index=idx,
+        )
 
     interface.send_fsm_command(FSM_HOLD)
     print("[OK] Interactive task queue completed")
