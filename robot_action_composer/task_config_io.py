@@ -9,13 +9,21 @@ from typing import Any, Mapping
 
 _FORBIDDEN_ROOT_KEYS: frozenset[str] = frozenset({"pick", "place", "handover", "carry", "drawer"})
 _STRIPPED_ROOT_KEYS: frozenset[str] = frozenset({"skill_params"})
+RUNTIME_DEFAULTS_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "base_link_entity_path",
+        "max_stage_duration",
+        "pose_tol_pos",
+        "pose_tol_ori",
+    }
+)
 
 
 def queue_root_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Extract queue root overrides (excluding nested skill sections)."""
     if not isinstance(raw, Mapping):
         raise TypeError(f"task overrides must be a mapping, got {type(raw).__name__}")
-    ctx = "base_task_overrides or scene preset"
+    ctx = "runtime_defaults or scene preset"
     for key in _FORBIDDEN_ROOT_KEYS:
         if key in raw:
             raise ValueError(
@@ -24,6 +32,18 @@ def queue_root_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
             )
     skip = _FORBIDDEN_ROOT_KEYS | _STRIPPED_ROOT_KEYS
     return {k: v for k, v in raw.items() if k not in skip}
+
+
+def validate_runtime_defaults_keys(raw: Mapping[str, Any], *, context: str) -> dict[str, Any]:
+    """Validate ``runtime_defaults``-like root keys and return stripped root overrides."""
+    root = queue_root_overrides(raw)
+    unknown = [k for k in root if k not in RUNTIME_DEFAULTS_ALLOWED_KEYS]
+    if unknown:
+        raise ValueError(
+            f"{context}: unknown runtime_defaults keys: {unknown}. "
+            f"Allowed keys: {sorted(RUNTIME_DEFAULTS_ALLOWED_KEYS)}"
+        )
+    return root
 
 
 def _normalize_numeric_lists(obj: Any) -> Any:
@@ -147,8 +167,10 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskCon
 
 
 __all__ = [
+    "RUNTIME_DEFAULTS_ALLOWED_KEYS",
     "TaskConfigDiscovery",
     "discover_task_configs",
+    "validate_runtime_defaults_keys",
     "queue_root_overrides",
     "load_task_dict_from_yaml",
 ]

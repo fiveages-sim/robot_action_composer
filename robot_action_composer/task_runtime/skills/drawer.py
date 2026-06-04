@@ -29,7 +29,13 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
     execute_stage_sequence,
 )
 
-from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
+from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+    SERVICE_CALL_RETRIES,
+    SERVICE_CALL_TIMEOUT,
+    SERVICE_RETRY_DELAY,
+    get_object_pose_from_service,
+)
+from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 from robot_action_composer.motion_generation.tasks.drawer import (  # pyright: ignore[reportMissingImports]
     DrawerGeometryConfig,
@@ -159,6 +165,27 @@ def _require_drawer_phase(ctx: QueueRuntimeContext) -> DrawerPhaseState:
     return d
 
 
+def _resolve_drawer_source_pose(ctx: QueueRuntimeContext, *, path_drawer: str) -> Pose:
+    arm_label = ctx.task_cfg.common.arm.strip().lower()
+    if ctx.object_resolution is not None:
+        return resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=path_drawer,
+            include_orientation=True,
+            arm_side=arm_label,
+            object_role="drawer_source",
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    return get_object_pose_from_service(
+        ctx.base_world_pos,
+        ctx.base_world_quat,
+        path_drawer,
+        include_orientation=True,
+    )
+
+
 def skill_drawer_pull_open(
     ctx: QueueRuntimeContext, _params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
@@ -167,12 +194,7 @@ def skill_drawer_pull_open(
     if not path_drawer:
         raise ValueError("object_prim_path is required for single_arm.drawer.pull_open (single_arm.drawer)")
 
-    source_target_pose_d = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        path_drawer,
-        include_orientation=True,
-    )
+    source_target_pose_d = _resolve_drawer_source_pose(ctx, path_drawer=path_drawer)
     # 拉手位：Prim 局部 ``object_position_offset``（通常离线填 (max+min)/2*scale 各轴）旋到世界系再累加
     handle_offset = _rotate_vector_by_quat(
         dcfg.object_position_offset,
@@ -269,12 +291,7 @@ def skill_drawer_close_push(
     ee_base_ori = drw.ee_base_orientation_xyzw
     dir_vec = drw.pull_direction_xyz
 
-    source_target_pose_d = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        path_drawer,
-        include_orientation=True,
-    )
+    source_target_pose_d = _resolve_drawer_source_pose(ctx, path_drawer=path_drawer)
     ee_base_ori = quat_multiply(ee_base_ori, (0, -0.2164396, 0, 0.976296))
     drw.ee_base_orientation_xyzw = ee_base_ori
 

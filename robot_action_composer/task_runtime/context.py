@@ -2,12 +2,46 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.bimanual_place import BimanualPlaceTaskConfig  # pyright: ignore[reportMissingImports]
+
+
+@dataclass(frozen=True)
+class CurrentBlockMeta:
+    task_key: str
+    scene: str
+    skill: str
+    block_key: str
+    block_index: int
+    parallel_index: int | None = None
+
+
+@dataclass
+class ObjectResolutionSession:
+    mode: str = "live"  # live | replay
+    record_json_path: str | None = None
+    replay_json_path: str | None = None
+    replay_index: dict[tuple[str, str, str, str, str], dict[str, Any]] = field(default_factory=dict)
+
+
+_block_meta_tls = threading.local()
+
+
+def set_thread_block_meta(meta: CurrentBlockMeta | None) -> None:
+    """并行子 block 在线程内写入 block 元信息，避免共享 ``ctx.current_block`` 竞态。"""
+    _block_meta_tls.current = meta
+
+
+def get_effective_block_meta(ctx: QueueRuntimeContext) -> CurrentBlockMeta | None:
+    tls_meta = getattr(_block_meta_tls, "current", None)
+    if tls_meta is not None:
+        return tls_meta
+    return ctx.current_block
 
 
 @dataclass
@@ -53,6 +87,14 @@ class QueueRuntimeContext:
     handover_sync: HandoverSyncConfig | None = None
     drawer_geometry: DrawerGeometryConfig | None = None
     scratch: dict[str, Any] = field(default_factory=dict)
+    #: 单任务 ``__all__`` 批量中，本段不是第一个 scene preset 时为 True。
+    not_first_scene_in_batch: bool = False
+    #: 多段 chain 中，本段与前一段**连续**且 task_key 相同时为 True（含 __all__ 展开的 default→box2）。
+    consecutive_same_task_in_chain: bool = False
+    task_key: str = ""
+    scene: str = ""
+    current_block: CurrentBlockMeta | None = None
+    object_resolution: ObjectResolutionSession | None = None
 
     def __post_init__(self) -> None:
         if self.gripper_for_return_home == 0.0:

@@ -28,7 +28,9 @@ task_key: pick_place
 label: Pick Place
 default_scene: scene_a
 
-base_task_overrides:
+runtime_defaults:
+  base_link_entity_path: /World/robot/base_link
+  max_stage_duration: 2.0
   pose_tol_pos: 0.025
   pose_tol_ori: 0.08
 
@@ -94,16 +96,31 @@ scene_presets:
 
 ### 顶层常见字段
 
-- `task_key` / `label` / `robot_id` / `default_scene`
+- `task_key` / `label` / `default_scene`
 - `use_stamped`
-- `base_task_overrides`
+- `runtime_defaults`
 - `skill_defaults`
 - `task_queue`
 - `scene_presets`
 
+### `runtime_defaults` 允许键（严格）
+
+`runtime_defaults`（以及 `scene_presets.<scene>` 根层）仅允许以下 4 个键：
+
+- `base_link_entity_path`
+- `max_stage_duration`
+- `pose_tol_pos`
+- `pose_tol_ori`
+
+其他字段（抓取/放置几何、双臂参数、drawer/handover 参数等）必须写在：
+
+- `skill_defaults.<skill_or_id>`
+- `scene_presets.<scene>.skill_params.<skill_or_id>`
+- 对应 block 的 `params`
+
 ### 合并优先级（低 -> 高）
 
-1. `base_task_overrides`
+1. `runtime_defaults`（仅 4 个基础键）
 2. `skill_defaults`
 3. `scene_presets.<scene>.skill_params`
 4. 当前块 `params`
@@ -120,8 +137,8 @@ scene_presets:
 ### 关键补充规则
 
 - pick/place 都有 `arm` 时：全局主臂以 pick 为准；place 的 `arm` 只作用于其块执行。
-- `base_link_entity_path` 可在 `base_task_overrides` 或场景根覆盖机器人默认 base prim。
-- `pose_tol_pos` / `pose_tol_ori` 可在 `base_task_overrides` 或场景根配置，作用于笛卡尔到达判定。
+- `base_link_entity_path` 可在 `runtime_defaults` 或场景根覆盖机器人默认 base prim。
+- `pose_tol_pos` / `pose_tol_ori` / `max_stage_duration` 可在 `runtime_defaults` 或场景根配置，作用于流程级判定。
 
 ---
 
@@ -136,6 +153,56 @@ scene_presets:
 `nav.navigate_backup` -> `parallel(nav.send_nav_goal + joint.movej_to_config)` -> `nav.wait_nav_arrived` -> `dual_arm.goto_cache_pose`
 
 并行导航时如需避免 HOLD 打断 Nav2，可设：`skip_fsm_hold: true`
+
+并行子步骤支持可选延迟（仿真时钟秒）：
+
+```yaml
+task_queue:
+  - parallel:
+      - skill: nav.navigate_to_object
+        id: nav_to_carry
+      - skill: joint.movej_to_config
+        id: navigate_gesture
+        start_delay_s: 2.0   # 延后 2 秒再派发该子技能
+```
+
+说明：
+
+- `start_delay_s` 写在 **block 顶层**（与 `skill` / `id` 同级），不是 `params`。
+- 该延迟使用 `sim_time.sleep(...)`，按仿真时钟推进。
+- 可用于顺序块与并行子块；并行场景中通常最有用。
+
+### 批量执行时跳过重复步骤（`skip_when_not_first_scene`）
+
+在**同一会话**内连续跑多个 scene 或 chain segment 时，机器人状态可延续。若某些步骤只需在批量**首段**执行（例如开头 ``nav + movej``），可在块顶层设置：
+
+```yaml
+task_queue:
+  - parallel:
+      - skill: nav.navigate_to_object
+        id: nav_to_box1
+        skip_when_not_first_scene: true
+      - skill: joint.movej_to_config
+        id: pre_pick_movej
+        skip_when_not_first_scene: true
+```
+
+- `skip_when_not_first_scene`（`bool`，默认 `false`）：写在 block 顶层，与 `skill` / `id` 同级。
+- **单任务 + `__all__`**：同一会话内从第 2 个 scene preset 起跳过（如 `default` → `box2`，`box2` 会跳过带 flag 的块）。
+- **多段 chain**：先选 **task folder**（整链锁定同一目录），再逐段选 task + scene；某段可选 ``__all__`` 展开该任务尚未用过的 scene（如 ``black_box_pick/__all__`` → ``default``、``box2``）。仅当本 segment 与前一段**连续且 task_key 相同**时跳过预备块；**不同 task**（搬运 → 黑盒）不跳过。同 task+scene 可重复加入（如首尾各一段搬运）。
+- 单 scene、单段首次执行时照常运行；并行块中可对子步骤分别设置。
+
+### real/object-resolution replay 中的导航跳过
+
+real/object-resolution replay 使用交互式 task queue runner。遇到 `nav.*` 导航 skill 时，runner 会在执行前询问：
+
+- 直接回车或输入 `r` / `run`：执行当前导航 skill。
+- 输入 `s` / `skip`：跳过当前导航 skill。
+- 输入 `q` / `quit`：停止当前交互队列，runner 会发送 `FSM_HOLD` 后退出。
+
+如果导航 skill 位于 `parallel` 块中，runner 只对 `nav.*` 子 skill 逐个询问。选择跳过时只跳过该导航子 skill，parallel 块中的其它非导航子 skill 会保留，并继续按原并行逻辑执行。
+
+已有的 `skip_when_not_first_scene: true` 优先级更高：在 `__all__` 的非首 scene 或 chain 连续同 task 场景中，如果某个 block 已经因该标记被跳过，runner 不会再弹出导航跳过询问。
 
 ### 缓存回程
 
@@ -168,3 +235,35 @@ scene_presets:
 - `examples/IsaacSim/robots/Agibot_G1/task_configs/handover.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/bimanual_carry.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/navigate_and_carry.yaml`
+
+---
+
+## 8) 对象位姿录制与回放（统一入口）
+
+使用 `examples/IsaacSim/motion_generation.py` 作为统一入口。仿真与真机命令形式相同，实际行为由 `robot_description` 中的 ros2_control 硬件插件自动检测决定（`sim` → live，可选录制；`real` → JSON 回放）。
+
+```bash
+python examples/IsaacSim/motion_generation.py \
+  --robot FiveAges_W2 \
+  --task-key poc_bimanual_2box_rev \
+  --scene two_box
+```
+
+说明：
+
+- `--object-resolution-json` 为可选覆盖路径。
+- 仿真环境不传该参数时，会询问是否录制 object-resolution JSON；选择 yes 后写入 `examples/IsaacSim/robots/<robot_dir>/records/` 下的默认 pretty JSON 文件。
+- 真机环境不传该参数时，会从 `examples/IsaacSim/robots/<robot_dir>/records/` 中选择匹配的 JSON；找不到时提示手动输入路径。
+- 回放仅替代 Isaac object pose service 查询，不替代 `object_position_offset` 与 TF 变换。
+- 真机回放按交互式习惯，每个 block 前按 Enter 继续，输入 `q` 则 `FSM_HOLD` 并退出。
+- `dual_arm.parallel_pick` 分别记录 `left_pick` 与 `right_pick`。
+
+Object-resolution replay key now includes scene:
+
+```text
+(task_key, scene, block_key, arm_side, object_role)
+```
+
+When sim runs with `scene="__all__"`, the generated filename may contain `__all__`, but every JSON record stores the concrete scene, such as `two_box1` or `two_box2`.
+
+Real replay also accepts `scene="__all__"` for a single task. It loads one `*.object_resolution.json`, expands the task's `scene_presets` in order, and replays each concrete scene interactively. JSON records must contain `scene`; old object-resolution JSON without `scene` is not supported and must be re-recorded.

@@ -31,14 +31,31 @@
     - `motion_frame_id`：位姿参考帧；不写则沿用任务级 `frame_id`（通常为 `arm_base`）。
   - **末端系配置**
     - `gripper`：目标夹爪值，默认保持上一步结束时的状态。
+- **备注**：位姿在 ``motion_frame_id`` 下给出绝对目标，非相对当前末端。
+
+### 1.1b 相对当前末端平移旋转（`single_arm.move_relative`）
+
+- **效果**：读取当前末端位姿，在 ``motion_frame_id`` 下叠加位置增量并左乘姿态增量（单段 MoveL）。
+- **参数**：
+  - **执行控制**
+    - `arm`：`left|right`，必填。
+  - **运动系配置**
+    - `position_delta`：`[dx, dy, dz]`（米），默认 `[0,0,0]`。
+    - `orientation_delta_rpy`：`[roll, pitch, yaw]`（弧度），在 ``motion_frame_id`` 下定义，左乘当前四元数；例如绕 Y 轴 +90° 为 `[0, 1.5708, 0]`。
+    - `motion_frame_id`：增量解释坐标系，默认与末端反馈 frame 一致（常为 `arm_base`）。
+    - `tf_lookup_timeout`：与任务 frame 不一致时的 TF 超时（秒）。
+  - **执行控制**
+    - `gripper`：目标夹爪值，默认 ``gripper_for_return_home``。
+    - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **YAML 示例**：
   ```yaml
-  - skill: single_arm.move_to_pose
+  - skill: single_arm.move_relative
     params:
       arm: right
       motion_frame_id: arm_base
-      position: [0.45, -0.15, 0.50]
-      orientation: [-0.7, 0.7, 0.0, 0.0]
+      position_delta: [0.05, 0.0, 0.05]
+      orientation_delta_rpy: [0.0, 1.5708, 0.0]
+      gripper: 0.0
   ```
 
 ### 1.2 末端移动到目标物体相对位姿（`single_arm.move_to_object`）
@@ -157,7 +174,7 @@ https://github.com/user-attachments/assets/3ae2fb74-8933-49fc-972e-f9ab8237a53b
 
 > 搬运统一使用单个 `dual_arm.carry`。  
 > 配置主要来自 `dual_arm.carry`（即 `skill_defaults.dual_arm.carry` / `scene_presets.*.skill_params.dual_arm.carry`）。
-> PoC 项目里你看到的大部分字段（如 `orientation_delta_rpy`、`ee_lift_offset`）都属于这层配置，而不是技能块 `params`。
+> PoC 项目里你看到的大部分字段（如 `orientation_delta_rpy`、`ee_pregrasp_lift_offset`、`ee_lift_offset`）都属于这层配置，而不是技能块 `params`。
 
 `dual_arm.carry` 主要字段（与 `BimanualCarryTaskConfig` 对齐）：
 
@@ -175,13 +192,17 @@ https://github.com/user-attachments/assets/3ae2fb74-8933-49fc-972e-f9ab8237a53b
 
 - **末端系配置**
   - `carry_prepare_offset`：预闭合前的工具系偏移；为空或全 0 时可省略预接近段。
+  - `ee_pregrasp_lift_offset`：**可选**；在 `CloseIn`（夹爪开）之后、`Grasp`（夹爪闭）之前插入一段抬升/平移（工具系向量）。
   - `ee_lift_offset`：抓取后抬升位移（是否生成抬升段取决于该值是否为空）。
   - `ee_retreat_offset`：抬升后后撤位移（是否生成后撤段取决于该值是否为空）。
   - `arm_movel_duration`：执行前写入臂控制器的 `movel_duration`（调节笛卡尔段时长）。
 
 #### `dual_arm.carry`
 
-- **效果**：一次执行完整搬运序列（接近/闭合/抬升/后撤）。
+- **效果**：一次执行完整搬运序列。
+- **阶段顺序**：
+  - 无 `ee_pregrasp_lift_offset`：`Approach`(可选) -> `Forward` -> `CloseIn` -> `Grasp` -> `Lift`(可选) -> `Retreat`(可选)
+  - 有 `ee_pregrasp_lift_offset`：`Approach`(可选) -> `Forward` -> `CloseIn` -> `PregraspLift` -> `Grasp` -> `Lift`(可选) -> `Retreat`(可选)
 - **参数**：无块级专用参数（读取 `dual_arm.carry` 配置）。
 
 https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
@@ -229,7 +250,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
 
 #### `dual_arm.place`
 
-- **效果**：执行双臂相对放置序列（同向平移 -> 松爪 -> 外张 -> 后撤）。默认按当前末端做相对位移；若提供参考物体配置（`reference_object_prim_path` + `object_position_offset`），则会先计算目标放置点，再自动换算本次平移量。
+- **效果**：执行双臂相对放置序列（同向平移 -> 松爪 -> 可选开爪后下降 -> 外张 -> 后撤）。默认按当前末端做相对位移；若提供参考物体配置（`reference_object_prim_path` + `object_position_offset`），则会先计算目标放置点，再自动换算本次平移量。
 - **默认值复用**：当未显式配置放置参数时，会复用 `dual_arm.carry` 的部分几何/节奏配置作为默认值（因此 `place` 常可只写少量参数）。
 - **参数**：
   - **目标物体配置**
@@ -238,6 +259,7 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
 
   - **运动系配置**
     - `translation_xyz`（`[float,float,float]`，默认 `[0,0,0]`）：双臂同向平移位移。
+    - `post_release_lower_xyz`（`[float,float,float]`）：**可选**；松爪后、外张前的同向位移（常用于“先抬后抓”的对称下降）。
     - `spread_half`（`float`，默认取 `dual_arm.carry.arm_merge_distance_y`，否则 `0.04`）：单侧外张距离。
     - `retreat_xyz`（`[float,float,float]`，默认取 `dual_arm.carry.ee_retreat_offset`，否则 `[-0.2, 0.0, 0.0]`）：外张后的后撤位移。
     - `motion_frame_id` / `relative_frame_id`（`str`）：几何计算与下发坐标系。
@@ -246,6 +268,10 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
   - **末端系配置**
     - `arm_movel_duration`（`float`，默认取 `dual_arm.carry.arm_movel_duration`）：覆盖笛卡尔段 movel 时长。
 - **备注**：需要左右臂当前位姿可读；设置 `motion_frame_id` 时依赖 TF 变换；若未配置 `dual_arm.carry`，上述复用默认将回退到内置默认值。
+  - 当未显式给 `post_release_lower_xyz` 时：
+    - 若 `dual_arm.carry.ee_pregrasp_lift_offset` 存在，默认取其相反数（实现开爪后对称下降）；
+    - 且若 `dual_arm.carry.ee_lift_offset` 也存在，会优先映射到**闭爪下降段**；开爪下降段会自动变为剩余位移（两段合计仍到参考 offset）；
+    - 否则不生成该下降段。
 
 ### 2.4 双臂对齐
 
@@ -451,5 +477,5 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
 
 ## 6. 配置项放在哪一层（速查）
 
-与 § 开头「约定」一致：**默认** → `skill_defaults`；**按场景覆盖** → `scene_presets.<scene>.skill_params`；**仅本块** → `task_queue` 里该块的 `params`；**与具体技能无关、整任务共用** → `base_task_overrides`。  
+与 § 开头「约定」一致：**默认** → `skill_defaults`；**按场景覆盖** → `scene_presets.<scene>.skill_params`；**仅本块** → `task_queue` 里该块的 `params`；**与具体技能无关、整任务共用** → `runtime_defaults`（仅 `base_link_entity_path` / `max_stage_duration` / `pose_tol_pos` / `pose_tol_ori`）。  
 **合并顺序、禁止项与示例**以 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md) 为准（本节不展开）。

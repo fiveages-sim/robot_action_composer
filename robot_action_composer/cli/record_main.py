@@ -46,16 +46,19 @@ def _apply_task_preset_runtime(base: Any, preset_raw: dict[str, object]) -> Any:
 
 
 def _build_task_runtime(task_entry_cfg: Any) -> Any:
-    from robot_action_composer.task_config_io import queue_root_overrides
+    from robot_action_composer.task_config_io import validate_runtime_defaults_keys
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         build_merged_queue_config,
     )
 
-    if not (isinstance(task_entry_cfg, dict) and "base_task_overrides" in task_entry_cfg):
-        raise TypeError("task YAML must be a dict with base_task_overrides")
+    if not (isinstance(task_entry_cfg, dict) and "runtime_defaults" in task_entry_cfg):
+        raise TypeError("task YAML must be a dict with runtime_defaults")
     skill_defaults = dict(task_entry_cfg.get("skill_defaults") or {})
     return build_merged_queue_config(
-        base_task_overrides=queue_root_overrides(task_entry_cfg["base_task_overrides"]),
+        runtime_defaults=validate_runtime_defaults_keys(
+            task_entry_cfg["runtime_defaults"],
+            context="task.runtime_defaults",
+        ),
         skill_defaults=skill_defaults,
         scene_preset=None,
     )
@@ -75,7 +78,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
         select_task_with_optional_group,
     )
     from robot_action_composer.discovery.registry_loader import load_robot_entries
-    from robot_action_composer.task_config_io import queue_root_overrides
+    from robot_action_composer.task_config_io import queue_root_overrides, validate_runtime_defaults_keys
     from robot_action_composer.task_runtime.merge import (  # pyright: ignore[reportMissingImports]
         merge_task_queue_skill_params,
     )
@@ -145,6 +148,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
             default_key=default_scene,
         )
         preset_raw: dict[str, object] = dict(scene_presets.get(scene_key, {}))
+        validate_runtime_defaults_keys(preset_raw, context=f"scene_presets.{scene_key}")
         unknown = [k for k in queue_root_overrides(preset_raw) if k not in allowed]
         if unknown:
             raise ValueError(f"Unknown scene preset keys: {unknown}")

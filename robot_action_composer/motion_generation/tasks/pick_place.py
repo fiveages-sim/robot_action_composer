@@ -12,10 +12,17 @@ from typing import Any
 
 from ros2_robot_interface.utils.quat_pose import rotate_vector_by_quat  # pyright: ignore[reportMissingImports]
 
-from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
+from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+    SERVICE_CALL_RETRIES,
+    SERVICE_CALL_TIMEOUT,
+    SERVICE_RETRY_DELAY,
+    get_object_pose_from_service,
+)
 from robot_action_composer.task_runtime.config.single_arm import (  # pyright: ignore[reportMissingImports]
     QueueSlicePlace,
 )
+from robot_action_composer.task_runtime.context import QueueRuntimeContext  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 
 def _apply_target_pose_offset(pose: Any, offset: tuple[float, float, float]) -> Any:
@@ -46,6 +53,7 @@ def resolve_place_skill_from_entity(
     *,
     base_world_pos: Any,
     base_world_quat: Any,
+    ctx: QueueRuntimeContext | None = None,
 ) -> QueueSlicePlace:
     """When ``object_prim_path`` is set, fill ``place_position`` from the Isaac
     entity service (plus ``object_position_offset``).
@@ -55,12 +63,24 @@ def resolve_place_skill_from_entity(
     """
     if not place.object_prim_path:
         return place
-    place_pose = get_object_pose_from_service(
-        base_world_pos,
-        base_world_quat,
-        place.object_prim_path,
-        include_orientation=False,
-    )
+    if ctx is not None and ctx.object_resolution is not None:
+        place_pose = resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=place.object_prim_path,
+            include_orientation=False,
+            arm_side="none",
+            object_role="place_target",
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    else:
+        place_pose = get_object_pose_from_service(
+            base_world_pos,
+            base_world_quat,
+            place.object_prim_path,
+            include_orientation=False,
+        )
     place_pose = _apply_target_pose_offset(place_pose, place.object_position_offset)
     resolved_place_position = (
         place_pose.position.x,

@@ -158,7 +158,7 @@ flowchart TB
 **配置与合并**
 
 - **`config/single_arm.py`**：**`QueueSingleArmSlice`**（`common` / `pick` / `place`）及块参数 overlay。
-- **`config/merged.py`**：**`MergedQueueConfig`**：从 `base_task_overrides` + `skill_defaults` + `scene_presets.skill_params` 构建单臂切片 + 可选 **`carry` / `handover` / `drawer`**；**`drawer` 相关类型在 `_try_drawer` 内延迟 import**，避免与 `motion_generation.tasks.drawer` 循环依赖。
+- **`config/merged.py`**：**`MergedQueueConfig`**：从 `runtime_defaults` + `skill_defaults` + `scene_presets.skill_params` 构建单臂切片 + 可选 **`carry` / `handover` / `drawer`**；**`drawer` 相关类型在 `_try_drawer` 内延迟 import**，避免与 `motion_generation.tasks.drawer` 循环依赖。
 - **`merge/block_params.py`**：按块合并最终 **`params`**（**`merge_task_queue_skill_params`**）。
 
 ### 2.5 配置发现与其它模块

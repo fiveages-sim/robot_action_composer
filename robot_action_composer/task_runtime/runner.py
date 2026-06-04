@@ -5,9 +5,10 @@ from __future__ import annotations
 import random
 import signal
 import sys
+import termios
 import threading
 from collections.abc import Mapping
-from typing import Any, Sequence
+from typing import Any, Sequence, TextIO
 
 from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMissingImports]
 
@@ -24,11 +25,63 @@ from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import
     BimanualParallelPickTaskConfig,
     parallel_pick_cfg_from_params,
 )
-from robot_action_composer.task_runtime.context import QueueRuntimeContext
+from robot_action_composer.task_runtime.context import (
+    CurrentBlockMeta,
+    QueueRuntimeContext,
+    set_thread_block_meta,
+)
 from robot_action_composer.task_runtime.merge.utils import reset_settle_entity_path_from_queue
 from robot_action_composer.task_runtime.registry import get_skill
 from robot_action_composer.task_runtime.config.merged import MergedQueueConfig
 from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec, QueueBlock, block_spec_from_mapping
+
+
+def _skip_repeat_reason(ctx: Any) -> str | None:
+    """Return a short reason string if flagged blocks should be skipped in this run."""
+    if bool(getattr(ctx, "not_first_scene_in_batch", False)):
+        return "not first scene in __all__ batch"
+    if bool(getattr(ctx, "consecutive_same_task_in_chain", False)):
+        return "consecutive same task in chain"
+    return None
+
+
+def _should_skip_repeat_block(ctx: Any, spec: BlockSpec) -> bool:
+    if not spec.skip_when_not_first_scene:
+        return False
+    return _skip_repeat_reason(ctx) is not None
+
+
+def _block_label(spec: BlockSpec) -> str:
+    return f"{spec.skill!r}" if spec.id is None else f"{spec.skill!r} (id={spec.id!r})"
+
+
+def _block_param_key(spec: BlockSpec) -> str:
+    return spec.id if spec.id else spec.skill
+
+
+def _is_navigation_skill(spec: BlockSpec) -> bool:
+    return spec.skill.startswith("nav.")
+
+
+def _set_current_block(
+    ctx: Any,
+    spec: BlockSpec,
+    *,
+    task_key: str,
+    scene: str,
+    block_index: int,
+    parallel_index: int | None,
+) -> None:
+    meta = CurrentBlockMeta(
+        task_key=task_key,
+        scene=scene,
+        skill=spec.skill,
+        block_key=_block_param_key(spec),
+        block_index=block_index,
+        parallel_index=parallel_index,
+    )
+    ctx.current_block = meta
+    set_thread_block_meta(meta)
 
 
 def _execute_block(
@@ -38,10 +91,35 @@ def _execute_block(
     runner_prefix: str,
     idx_label: str,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
+    task_key: str = "",
+    scene: str = "",
+    block_index: int = 0,
+    parallel_index: int | None = None,
 ) -> None:
+    if task_key:
+        _set_current_block(
+            ctx,
+            spec,
+            task_key=task_key,
+            scene=scene,
+            block_index=block_index,
+            parallel_index=parallel_index,
+        )
+    label = _block_label(spec)
+    skip_reason = _skip_repeat_reason(ctx)
+    if skip_reason is not None and spec.skip_when_not_first_scene:
+        print(
+            f"[{runner_prefix}] {idx_label} {label} -> skipped "
+            f"(skip_when_not_first_scene, {skip_reason})",
+        )
+        return
+    if spec.start_delay_s > 0.0:
+        print(
+            f"[{runner_prefix}] {idx_label} {spec.skill!r} delaying {spec.start_delay_s:.3f}s before dispatch",
+        )
+        ctx.sim_time.sleep(spec.start_delay_s)
     skill_fn = get_skill(spec.skill)
     stages, meta = skill_fn(ctx, spec.params)
-    label = f"{spec.skill!r}" if spec.id is None else f"{spec.skill!r} (id={spec.id!r})"
     if not stages:
         print(f"[{runner_prefix}] {idx_label} {label} -> (no stages / inline-only)")
         return
@@ -76,13 +154,60 @@ def _execute_parallel(
     runner_prefix: str,
     idx_label: str,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
+    task_key: str = "",
+    scene: str = "",
+    block_index: int = 0,
 ) -> None:
-    n = len(par_spec.skills)
+    active: list[tuple[int, BlockSpec]] = [
+        (i, sub) for i, sub in enumerate(par_spec.skills) if not _should_skip_repeat_block(ctx, sub)
+    ]
+    skipped = len(par_spec.skills) - len(active)
+    if skipped:
+        for i, sub in enumerate(par_spec.skills):
+            if _should_skip_repeat_block(ctx, sub):
+                reason = _skip_repeat_reason(ctx) or "repeat batch"
+                print(
+                    f"[{runner_prefix}] {idx_label}[{i}] {_block_label(sub)} -> skipped "
+                    f"(skip_when_not_first_scene, {reason})",
+                )
+    if not active:
+        print(f"[{runner_prefix}] {idx_label} parallel({len(par_spec.skills)}) -> all sub-steps skipped")
+        return
+    _execute_parallel_active_subset(
+        ctx,
+        par_spec,
+        active,
+        runner_prefix=runner_prefix,
+        idx_label=idx_label,
+        execute_stage_kwargs=execute_stage_kwargs,
+        task_key=task_key,
+        scene=scene,
+        block_index=block_index,
+    )
+
+
+def _execute_parallel_active_subset(
+    ctx: Any,
+    par_spec: ParallelSpec,
+    active_specs: Sequence[tuple[int, BlockSpec]],
+    *,
+    runner_prefix: str,
+    idx_label: str,
+    execute_stage_kwargs: Mapping[str, Any] | None = None,
+    task_key: str = "",
+    scene: str = "",
+    block_index: int = 0,
+) -> None:
+    if not active_specs:
+        print(f"[{runner_prefix}] {idx_label} parallel({len(par_spec.skills)}) -> all sub-steps skipped")
+        return
+
+    n = len(active_specs)
     print(f"[{runner_prefix}] {idx_label} parallel({n}) -> dispatching {n} skill(s)")
     errors: list[BaseException] = []
     lock = threading.Lock()
 
-    def worker(sub_spec: BlockSpec, sub_label: str) -> None:
+    def worker(sub_spec: BlockSpec, sub_label: str, parallel_index: int) -> None:
         try:
             _execute_block(
                 ctx,
@@ -90,18 +215,24 @@ def _execute_parallel(
                 runner_prefix=runner_prefix,
                 idx_label=sub_label,
                 execute_stage_kwargs=execute_stage_kwargs,
+                task_key=task_key,
+                scene=scene,
+                block_index=block_index,
+                parallel_index=parallel_index,
             )
         except Exception as exc:  # noqa: BLE001
             with lock:
                 errors.append(exc)
+        finally:
+            set_thread_block_meta(None)
 
     threads = [
         threading.Thread(
             target=worker,
-            args=(sub_spec, f"{idx_label}[{i}]"),
+            args=(sub_spec, f"{idx_label}[{orig_i}]", orig_i),
             daemon=True,
         )
-        for i, sub_spec in enumerate(par_spec.skills)
+        for orig_i, sub_spec in active_specs
     ]
     for t in threads:
         t.start()
@@ -131,7 +262,7 @@ def effective_base_link_entity_path(*, robot_cfg: Any, runtime: MergedQueueConfi
             return ps
     raise ValueError(
         "Isaac base prim path is required: set robot_cfg.base_link_entity_path "
-        "or task base_task_overrides.base_link_entity_path"
+        "or task runtime_defaults.base_link_entity_path"
     )
 
 
@@ -178,13 +309,23 @@ def build_queue_runtime_context(
     sim_time: Any,
     runtime: MergedQueueConfig,
     use_stamped: bool,
+    not_first_scene_in_batch: bool = False,
+    consecutive_same_task_in_chain: bool = False,
+    use_isaac_base_pose: bool = True,
+    task_key: str = "",
+    scene: str = "",
+    object_resolution: Any | None = None,
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
     queue_task = runtime.single_arm
     gripper_open, gripper_closed = _resolve_gripper_open_close(robot_cfg.gripper_control_mode)
     base_path = effective_base_link_entity_path(robot_cfg=robot_cfg, runtime=runtime)
     frame_id = base_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
-    base_world_pos, base_world_quat = get_entity_pose_world_service(base_path)
+    if use_isaac_base_pose:
+        base_world_pos, base_world_quat = get_entity_pose_world_service(base_path)
+    else:
+        base_world_pos = (0.0, 0.0, 0.0)
+        base_world_quat = (0.0, 0.0, 0.0, 1.0)
 
     initial_arm = queue_task.common.arm.strip().lower()
     if initial_arm not in {"left", "right"}:
@@ -207,6 +348,11 @@ def build_queue_runtime_context(
         place_task_cfg=runtime.place,
         handover_sync=runtime.handover,
         drawer_geometry=runtime.drawer,
+        not_first_scene_in_batch=not_first_scene_in_batch,
+        consecutive_same_task_in_chain=consecutive_same_task_in_chain,
+        task_key=task_key,
+        scene=scene,
+        object_resolution=object_resolution,
     )
 
 
@@ -289,11 +435,16 @@ def run_task_queue(
     *,
     robot_cfg: Any,
     runtime: MergedQueueConfig,
-    robot_id: str,
     blocks: Sequence[BlockSpec | dict[str, Any]],
     reset_env: bool = True,
     use_stamped: bool = True,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
+    not_first_scene_in_batch: bool = False,
+    consecutive_same_task_in_chain: bool = False,
+    task_key: str = "",
+    scene: str = "",
+    object_resolution: Any | None = None,
+    use_isaac_base_pose: bool = True,
 ) -> None:
     """Single entry: connect → FSM → execute ``task_queue`` blocks (and parallel groups)."""
     queue_tc = runtime.single_arm
@@ -333,6 +484,12 @@ def run_task_queue(
             sim_time=sim_time,
             runtime=runtime,
             use_stamped=use_stamped,
+            not_first_scene_in_batch=not_first_scene_in_batch,
+            consecutive_same_task_in_chain=consecutive_same_task_in_chain,
+            use_isaac_base_pose=use_isaac_base_pose,
+            task_key=task_key,
+            scene=scene,
+            object_resolution=object_resolution,
         )
 
         for idx, spec in enumerate(specs):
@@ -344,6 +501,9 @@ def run_task_queue(
                     runner_prefix="TaskQ",
                     idx_label=lbl,
                     execute_stage_kwargs=execute_stage_kwargs,
+                    task_key=task_key,
+                    scene=scene,
+                    block_index=idx,
                 )
             else:
                 _execute_block(
@@ -352,6 +512,9 @@ def run_task_queue(
                     runner_prefix="TaskQ",
                     idx_label=lbl,
                     execute_stage_kwargs=execute_stage_kwargs,
+                    task_key=task_key,
+                    scene=scene,
+                    block_index=idx,
                 )
 
         interface.send_fsm_command(FSM_HOLD)
@@ -372,11 +535,16 @@ def run_task_queue_on_connected_interface(
     sim_time: SimTimeHelper,
     robot_cfg: Any,
     runtime: MergedQueueConfig,
-    robot_id: str,  # noqa: ARG001
     blocks: Sequence[BlockSpec | dict[str, Any]],
     reset_env: bool = True,
     use_stamped: bool = True,
     execute_stage_kwargs: Mapping[str, Any] | None = None,
+    not_first_scene_in_batch: bool = False,
+    consecutive_same_task_in_chain: bool = False,
+    use_isaac_base_pose: bool = True,
+    task_key: str = "",
+    scene: str = "",
+    object_resolution: Any | None = None,
 ) -> None:
     """Execute one task_queue on an already-connected interface (no connect/disconnect)."""
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
@@ -396,6 +564,12 @@ def run_task_queue_on_connected_interface(
         sim_time=sim_time,
         runtime=runtime,
         use_stamped=use_stamped,
+        not_first_scene_in_batch=not_first_scene_in_batch,
+        consecutive_same_task_in_chain=consecutive_same_task_in_chain,
+        use_isaac_base_pose=use_isaac_base_pose,
+        task_key=task_key,
+        scene=scene,
+        object_resolution=object_resolution,
     )
 
     for idx, spec in enumerate(specs):
@@ -407,6 +581,9 @@ def run_task_queue_on_connected_interface(
                 runner_prefix="TaskQ",
                 idx_label=lbl,
                 execute_stage_kwargs=execute_stage_kwargs,
+                task_key=task_key,
+                scene=scene,
+                block_index=idx,
             )
         else:
             _execute_block(
@@ -415,7 +592,193 @@ def run_task_queue_on_connected_interface(
                 runner_prefix="TaskQ",
                 idx_label=lbl,
                 execute_stage_kwargs=execute_stage_kwargs,
+                task_key=task_key,
+                scene=scene,
+                block_index=idx,
             )
 
     interface.send_fsm_command(FSM_HOLD)
     print("[OK] Task queue completed")
+
+
+def _format_interactive_block_prompt(spec: QueueBlock, lbl: str) -> str:
+    if isinstance(spec, ParallelSpec):
+        skill_part = f"parallel({len(spec.skills)})"
+        id_part = ""
+    else:
+        skill_part = spec.skill
+        id_part = f", id={spec.id!r}" if spec.id else ""
+    return f"[{lbl}] Next block: skill={skill_part}{id_part}"
+
+
+def _drain_stdin_buffer(stream: TextIO | None = None) -> None:
+    try:
+        target = stream if stream is not None else sys.stdin
+        if target.isatty():
+            termios.tcflush(target.fileno(), termios.TCIFLUSH)
+    except (AttributeError, OSError, termios.error):
+        return
+
+
+def _prompt_nav_block_action(spec: BlockSpec, lbl: str) -> str:
+    """Return 'run', 'skip', or 'quit' for an interactive navigation block."""
+    label = _block_label(spec)
+    while True:
+        _drain_stdin_buffer()
+        print(f"\n[{lbl}] Navigation block: {label}")
+        print("  Press Enter/r to run, s to skip this navigation skill, or q to stop.")
+        raw = input("> ").strip().lower()
+        if raw in {"", "r", "run", "y", "yes"}:
+            return "run"
+        if raw in {"s", "skip"}:
+            return "skip"
+        if raw in {"q", "quit"}:
+            return "quit"
+        print("  Please enter Enter/r, s, or q.")
+
+
+def _filter_interactive_parallel_navigation(
+    ctx: Any,
+    par_spec: ParallelSpec,
+    lbl: str,
+) -> tuple[str, list[tuple[int, BlockSpec]]]:
+    """Return ('run'|'quit', active sub-steps) after prompting for nav sub-steps."""
+    active: list[tuple[int, BlockSpec]] = []
+    for sub_idx, sub in enumerate(par_spec.skills):
+        sub_lbl = f"{lbl}[{sub_idx}]"
+        if _should_skip_repeat_block(ctx, sub):
+            reason = _skip_repeat_reason(ctx) or "repeat batch"
+            print(
+                f"[TaskQ] {sub_lbl} {_block_label(sub)} -> skipped "
+                f"(skip_when_not_first_scene, {reason})",
+            )
+            continue
+        if _is_navigation_skill(sub):
+            action = _prompt_nav_block_action(sub, sub_lbl)
+            if action == "quit":
+                return "quit", active
+            if action == "skip":
+                print(f"[TaskQ] {sub_lbl} {_block_label(sub)} -> skipped (user skipped navigation)")
+                continue
+        active.append((sub_idx, sub))
+    return "run", active
+
+
+def _wait_interactive_block_confirm(spec: QueueBlock, lbl: str) -> bool:
+    _drain_stdin_buffer()
+    print(f"\n{_format_interactive_block_prompt(spec, lbl)}")
+    print("  Press Enter to run this block, or 'q' to stop (FSM_HOLD + exit).")
+    raw = input("> ").strip().lower()
+    return raw != "q"
+
+
+def run_task_queue_interactive_on_connected_interface(
+    *,
+    interface: Any,
+    sim_time: SimTimeHelper,
+    robot_cfg: Any,
+    runtime: MergedQueueConfig,
+    blocks: Sequence[BlockSpec | dict[str, Any]],
+    reset_env: bool = False,
+    use_stamped: bool = True,
+    use_isaac_base_pose: bool = True,
+    execute_stage_kwargs: Mapping[str, Any] | None = None,
+    not_first_scene_in_batch: bool = False,
+    consecutive_same_task_in_chain: bool = False,
+    task_key: str = "",
+    scene: str = "",
+    object_resolution: Any | None = None,
+) -> None:
+    """逐 block 等待 Enter 后执行；输入 ``q`` 则 ``FSM_HOLD`` 并提前退出。"""
+    specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
+    if not specs:
+        raise ValueError("task queue blocks list is empty")
+
+    interface.send_fsm_command(FSM_HOLD)
+    sim_time.sleep(robot_cfg.fsm_switch_delay)
+    interface.send_fsm_command(FSM_OCS2)
+
+    if reset_env:
+        reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+
+    ctx = build_queue_runtime_context(
+        interface=interface,
+        robot_cfg=robot_cfg,
+        sim_time=sim_time,
+        runtime=runtime,
+        use_stamped=use_stamped,
+        not_first_scene_in_batch=not_first_scene_in_batch,
+        consecutive_same_task_in_chain=consecutive_same_task_in_chain,
+        use_isaac_base_pose=use_isaac_base_pose,
+        task_key=task_key,
+        scene=scene,
+        object_resolution=object_resolution,
+    )
+
+    total = len(specs)
+    for idx, spec in enumerate(specs):
+        lbl = f"block {idx + 1}/{total}"
+
+        if isinstance(spec, ParallelSpec):
+            if not _wait_interactive_block_confirm(spec, lbl):
+                print(f"[info] Stopped before {lbl} (user quit)")
+                interface.send_fsm_command(FSM_HOLD)
+                return
+            action, active = _filter_interactive_parallel_navigation(ctx, spec, lbl)
+            if action == "quit":
+                print(f"[info] Stopped before {lbl} (user quit)")
+                interface.send_fsm_command(FSM_HOLD)
+                return
+            _execute_parallel_active_subset(
+                ctx,
+                spec,
+                active,
+                runner_prefix="TaskQ",
+                idx_label=lbl,
+                execute_stage_kwargs=execute_stage_kwargs,
+                task_key=task_key,
+                scene=scene,
+                block_index=idx,
+            )
+            continue
+
+        if _should_skip_repeat_block(ctx, spec):
+            _execute_block(
+                ctx,
+                spec,
+                runner_prefix="TaskQ",
+                idx_label=lbl,
+                execute_stage_kwargs=execute_stage_kwargs,
+                task_key=task_key,
+                scene=scene,
+                block_index=idx,
+            )
+            continue
+
+        if _is_navigation_skill(spec):
+            action = _prompt_nav_block_action(spec, lbl)
+            if action == "quit":
+                print(f"[info] Stopped before {lbl} (user quit)")
+                interface.send_fsm_command(FSM_HOLD)
+                return
+            if action == "skip":
+                print(f"[TaskQ] {lbl} {_block_label(spec)} -> skipped (user skipped navigation)")
+                continue
+        elif not _wait_interactive_block_confirm(spec, lbl):
+            print(f"[info] Stopped before {lbl} (user quit)")
+            interface.send_fsm_command(FSM_HOLD)
+            return
+
+        _execute_block(
+            ctx,
+            spec,
+            runner_prefix="TaskQ",
+            idx_label=lbl,
+            execute_stage_kwargs=execute_stage_kwargs,
+            task_key=task_key,
+            scene=scene,
+            block_index=idx,
+        )
+
+    interface.send_fsm_command(FSM_HOLD)
+    print("[OK] Interactive task queue completed")

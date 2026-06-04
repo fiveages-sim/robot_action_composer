@@ -38,6 +38,7 @@ def skill_movej_to_config(
             与手臂组合时由 ``ROS2RobotInterface.send_coordinated_joint_positions`` 按 WBC / split 自动选路。
         left_arm_positions (list[float], 可选): 左臂关节目标，典型 7 个。
         right_arm_positions (list[float], 可选): 右臂关节目标，典型 7 个。
+        head_positions (list[float], 可选): 头部关节目标，典型 2 个（head_joint1, head_joint2）。
         arrival_timeout (float): 手臂到位等待超时（秒），默认 30.0。
         joint_tolerance (float): 到位判定阈值（rad），默认 0.05。
         resume_ocs2 (bool): 到位后切回 OCS2，供后续笛卡尔 skill 使用，默认 False。
@@ -50,6 +51,7 @@ def skill_movej_to_config(
     body_positions = [float(v) for v in (params.get("body_positions") or [])]
     left_positions = [float(v) for v in (params.get("left_arm_positions") or [])]
     right_positions = [float(v) for v in (params.get("right_arm_positions") or [])]
+    head_positions = [float(v) for v in (params.get("head_positions") or [])]
     arrival_timeout = float(params.get("arrival_timeout", 30.0))
     joint_tolerance = float(params.get("joint_tolerance", 0.05))
     resume_ocs2 = bool(params.get("resume_ocs2", False))
@@ -91,17 +93,19 @@ def skill_movej_to_config(
             print(f"[MoveJ] WARN: FSM HOLD failed: {exc}")
 
     moved = False
-    if body_positions or left_positions or right_positions:
+    if body_positions or left_positions or right_positions or head_positions:
         try:
             interface.send_coordinated_joint_positions(
                 body_positions=body_positions or None,
                 left_arm_positions=left_positions or None,
                 right_arm_positions=right_positions or None,
+                head_positions=head_positions or None,
             )
             moved = True
             print(
                 f"[MoveJ] coordinated  body={bool(body_positions)} "
-                f"L={bool(left_positions)} R={bool(right_positions)}"
+                f"L={bool(left_positions)} R={bool(right_positions)} "
+                f"head={bool(head_positions)}"
             )
         except Exception as exc:
             print(f"[MoveJ] WARN: send_coordinated_joint_positions failed: {exc}")

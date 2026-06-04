@@ -38,6 +38,7 @@ class BimanualCarryTaskConfig:
     # 物体固连系下相对原点的平移：``(x, 与半宽合并的 y 分量, z)``；中线为 ``(x,0,z)``，左右沿 +Y，经 ``object_position.orientation`` 旋到 motion 系
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     # 不写 / ``null``：不生成该段；另一段仍按 (0,0,0) 参与合成其终点。位移统一按工具系解释。
+    ee_pregrasp_lift_offset: tuple[float, float, float] | None = None
     ee_lift_offset: tuple[float, float, float] | None = None
     ee_retreat_offset: tuple[float, float, float] | None = None
     # 可选：双臂 movel 时长，执行前写入 ``arm_controller.movel_duration``（类比 ``body_movej_duration``）
@@ -54,6 +55,7 @@ def format_bimanual_carry_task_cfg_summary(
         f"[Scene] {scene} -> {task_cfg.object_prim_path}, "
         f"object_dual_arm_half_span_y={task_cfg.object_dual_arm_half_span_y}, "
         f"carry_prepare_offset={task_cfg.carry_prepare_offset}, "
+        f"ee_pregrasp_lift_offset={task_cfg.ee_pregrasp_lift_offset!r}, "
         f"ee_lift_offset={task_cfg.ee_lift_offset!r}, ee_retreat_offset={task_cfg.ee_retreat_offset!r}, "
         f"orientation_delta_rpy={task_cfg.orientation_delta_rpy!r}, "
         f"arm_movel_duration={task_cfg.arm_movel_duration!r}, motion_frame_id={task_cfg.motion_frame_id!r}"
@@ -106,6 +108,7 @@ def build_bimanual_carry_record_sequence(
         object_position_offset=carry_task_cfg.object_position_offset,
         carry_left_orientation=lo,
         carry_right_orientation=ro,
+        ee_pregrasp_lift_offset=carry_task_cfg.ee_pregrasp_lift_offset,
         ee_lift_offset=carry_task_cfg.ee_lift_offset,
         ee_retreat_offset=carry_task_cfg.ee_retreat_offset,
         carry_linear_displacement_frame="tool",

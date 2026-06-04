@@ -12,7 +12,10 @@ from typing import Any
 
 from geometry_msgs.msg import Pose
 from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+    euler_rpy_to_quat_xyzw,
     pose_from_tuple,
+    quat_multiply,
+    quat_normalize,
     rotate_vector_by_quat,
 )
 
@@ -27,7 +30,13 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
     build_single_arm_return_home_sequence,
 )
 
-from robot_action_composer.isaac_sim import get_object_pose_from_service  # pyright: ignore[reportMissingImports]
+from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+    SERVICE_CALL_RETRIES,
+    SERVICE_CALL_TIMEOUT,
+    SERVICE_RETRY_DELAY,
+    get_object_pose_from_service,
+)
+from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
     apply_object_local_offset_to_pose,
@@ -141,12 +150,26 @@ def _resolve_object_target_pose_from_pick_like_params(
 ) -> tuple[Pose, str]:
     """Resolve object pose (+ local offset) into execution frame, mirroring ``single_arm.pick``."""
     exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
-    target = get_object_pose_from_service(
-        ctx.base_world_pos,
-        ctx.base_world_quat,
-        object_prim_path,
-        include_orientation=True,
-    )
+    arm_side = ctx.task_cfg.common.arm.strip().lower()
+    object_role = "pick_target" if label == "single_arm.pick" else "move_to_object_target"
+    if ctx.object_resolution is not None:
+        target = resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=object_prim_path,
+            include_orientation=True,
+            arm_side=arm_side,
+            object_role=object_role,
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    else:
+        target = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            object_prim_path,
+            include_orientation=True,
+        )
     if exec_f != ctx.frame_id:
         iface = ctx.interface
         if not hasattr(iface, "transform_pose"):
@@ -213,13 +236,14 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         ee_pick_direction_vector=ee_pick_direction_vector,
         retreat_offset=retreat_offset,
         retreat_xyz=retreat_xyz,
+        retreat_open_gripper=pk.retreat_open_gripper,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
         stage_prefix="TaskQ-Pick",
     )
     stages = assign_to_arm(arm_seq, arm_side)
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
-    ctx.gripper_for_return_home = ctx.gripper_closed
+    ctx.gripper_for_return_home = ctx.gripper_open if pk.retreat_open_gripper else ctx.gripper_closed
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
@@ -280,6 +304,7 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
         pl,
         base_world_pos=ctx.base_world_pos,
         base_world_quat=ctx.base_world_quat,
+        ctx=ctx,
     )
     if pl2.ee_base_orientation is None:
         pl2 = replace(pl2, ee_base_orientation=qt.pick.ee_base_orientation)
@@ -426,6 +451,7 @@ def skill_move_to_pose(
         orientation (dict | list): 目标姿态四元数，``{x, y, z, w}`` 或 ``[x, y, z, w]``，必填。
         motion_frame_id (str, 可选): 位姿所在的参考帧，默认 ``ctx.frame_id``（通常为 ``arm_base``）。
         gripper (float, 可选): 目标夹爪开合值，默认 ``ctx.gripper_for_return_home``（上一步结束时的夹爪状态）。
+        arm_movel_duration (float, 可选): 写入 ``arm_controller.movel_duration``。
     """
     arm = str(params.get("arm", "")).strip().lower()
     if arm not in ("left", "right"):
@@ -470,6 +496,10 @@ def skill_move_to_pose(
         params.get("motion_frame_id", ctx.frame_id) or ctx.frame_id
     ).strip() or ctx.frame_id
 
+    _apply_arm_movel_duration(
+        ctx, duration=params.get("arm_movel_duration"), label="single_arm.move_to_pose"
+    )
+
     arm_side = ArmSide.RIGHT if arm == "right" else ArmSide.LEFT
     arm_seq = build_single_arm_return_home_sequence(
         home_pose=pose,
@@ -493,12 +523,169 @@ def skill_move_to_pose(
     )
 
 
+def _clone_pose(p: Pose) -> Pose:
+    q = Pose()
+    q.position.x = p.position.x
+    q.position.y = p.position.y
+    q.position.z = p.position.z
+    q.orientation.x = p.orientation.x
+    q.orientation.y = p.orientation.y
+    q.orientation.z = p.orientation.z
+    q.orientation.w = p.orientation.w
+    return q
+
+
+def _param_vec3(
+    params: Mapping[str, Any],
+    key: str,
+    default: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    v = params.get(key)
+    if v is None:
+        return default
+    if not isinstance(v, (list, tuple)) or len(v) != 3:
+        raise ValueError(f"{key} must be a length-3 list [x, y, z]")
+    return (float(v[0]), float(v[1]), float(v[2]))
+
+
+def _pose_quat_xyzw(p: Pose) -> tuple[float, float, float, float]:
+    return (
+        float(p.orientation.x),
+        float(p.orientation.y),
+        float(p.orientation.z),
+        float(p.orientation.w),
+    )
+
+
+def _set_pose_quat_xyzw(p: Pose, q: tuple[float, float, float, float]) -> None:
+    x, y, z, w = q
+    p.orientation.x = x
+    p.orientation.y = y
+    p.orientation.z = z
+    p.orientation.w = w
+
+
+def _single_arm_pose_in_motion_frame(
+    iface: Any,
+    pose_raw: Pose,
+    pose_frame: str,
+    params: Mapping[str, Any],
+    *,
+    label: str,
+) -> tuple[Pose, str]:
+    raw_mf = params.get("motion_frame_id")
+    if raw_mf is None or (isinstance(raw_mf, str) and not str(raw_mf).strip()):
+        motion_frame = pose_frame
+    else:
+        motion_frame = str(raw_mf).strip()
+    try:
+        tft = float(params.get("tf_lookup_timeout", 2.0))
+    except (TypeError, ValueError):
+        tft = 2.0
+    if motion_frame == pose_frame:
+        return _clone_pose(pose_raw), motion_frame
+    if not hasattr(iface, "transform_pose"):
+        raise TypeError(f"{label}: motion_frame_id requires ROS2RobotInterface.transform_pose (TF buffer)")
+    out = iface.transform_pose(pose_raw, pose_frame, motion_frame, timeout=tft)
+    if out is None:
+        raise RuntimeError(
+            f"{label}: TF {pose_frame!r} -> {motion_frame!r} failed (timeout={tft}s)."
+        )
+    return out, motion_frame
+
+
+def skill_move_relative(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """相对当前末端位姿平移并旋转（在 ``motion_frame_id`` 下解释增量）。
+
+    params:
+        arm (str): ``left`` 或 ``right``，必填。
+        position_delta (list): ``[dx, dy, dz]``（米），在 ``motion_frame_id`` 下叠加到当前位置，默认 ``[0,0,0]``。
+        orientation_delta_rpy (list): ``[roll, pitch, yaw]``（弧度），左乘当前姿态四元数，默认 ``[0,0,0]``。
+        motion_frame_id (str, 可选): 增量与位姿计算坐标系，默认与末端反馈 frame 一致。
+        gripper (float, 可选): 目标夹爪值，默认 ``ctx.gripper_for_return_home``。
+        arm_movel_duration (float, 可选): 写入 ``arm_controller.movel_duration``。
+    """
+    label = "single_arm.move_relative"
+    arm = str(params.get("arm", "")).strip().lower()
+    if arm not in ("left", "right"):
+        raise ValueError(f"{label}: 'arm' must be 'left' or 'right', got {params.get('arm')!r}")
+
+    iface = ctx.interface
+    handler = iface.right_arm_handler if arm == "right" else iface.left_arm_handler
+    if handler is None:
+        raise TypeError(f"{label}: {arm} arm handler is not available")
+    p0_raw = handler.get_pose()
+    if p0_raw is None:
+        raise RuntimeError(f"{label}: could not read current {arm} EE pose")
+
+    gf = getattr(handler, "get_frame_id", None)
+    pose_frame = str(gf()).strip() if callable(gf) and gf() else str(ctx.frame_id).strip() or "base_link"
+    p0, motion_frame = _single_arm_pose_in_motion_frame(iface, p0_raw, pose_frame, params, label=label)
+
+    dx, dy, dz = _param_vec3(params, "position_delta", (0.0, 0.0, 0.0))
+    dr, dp, dyaw = _param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
+    try:
+        min_abs = float(params.get("min_abs_delta", 1e-4))
+    except (TypeError, ValueError):
+        min_abs = 1e-4
+    try:
+        min_abs_ori = float(params.get("min_abs_orientation_rpy", 1e-4))
+    except (TypeError, ValueError):
+        min_abs_ori = 1e-4
+
+    move = max(abs(dx), abs(dy), abs(dz)) >= min_abs
+    has_ori = max(abs(dr), abs(dp), abs(dyaw)) >= min_abs_ori
+    if not (move or has_ori):
+        return [], ExecutionMeta(
+            send_mode=_stamped_mode(ctx),
+            frame_id=motion_frame,
+            warn_prefix=f"TaskQ {label} timeout",
+        )
+
+    _apply_arm_movel_duration(ctx, duration=params.get("arm_movel_duration"), label=label)
+
+    p1 = _clone_pose(p0)
+    if move:
+        p1.position.x += dx
+        p1.position.y += dy
+        p1.position.z += dz
+    if has_ori:
+        qd = quat_normalize(euler_rpy_to_quat_xyzw(dr, dp, dyaw))
+        q_new = quat_normalize(quat_multiply(qd, _pose_quat_xyzw(p1)))
+        _set_pose_quat_xyzw(p1, q_new)
+
+    grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
+    arm_side = ArmSide.RIGHT if arm == "right" else ArmSide.LEFT
+    arm_seq = build_single_arm_return_home_sequence(
+        home_pose=p1,
+        gripper=grip_v,
+        stage_name="TaskQ-MoveRelative",
+    )
+    stages = assign_to_arm(arm_seq, arm_side)
+    if ctx.use_stamped:
+        for st in stages:
+            st.frame_id = motion_frame
+    print(
+        f"[MoveRelative] arm={arm} motion_frame_id={motion_frame} "
+        f"delta_pos=({dx:.3f},{dy:.3f},{dz:.3f}) delta_rpy=({dr:.3f},{dp:.3f},{dyaw:.3f}) "
+        f"target=({p1.position.x:.3f},{p1.position.y:.3f},{p1.position.z:.3f})"
+    )
+    return stages, ExecutionMeta(
+        send_mode=_stamped_mode(ctx),
+        frame_id=motion_frame,
+        warn_prefix="TaskQ move_relative timeout",
+    )
+
+
 def register_single_arm_skills() -> None:
     register_skill("single_arm.pick", skill_pick)
     register_skill("single_arm.move_to_object", skill_move_to_object)
     register_skill("single_arm.place", skill_place)
     register_skill("single_arm.goto_cache_pose", skill_goto_cache_pose)
     register_skill("single_arm.move_to_pose", skill_move_to_pose)
+    register_skill("single_arm.move_relative", skill_move_relative)
 
 
 register_single_arm_skills()

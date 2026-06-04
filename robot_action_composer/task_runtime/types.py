@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Real
 from typing import Any, Mapping, Union
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
@@ -51,6 +52,9 @@ class BlockSpec:
     skill: str
     params: Mapping[str, Any] = field(default_factory=dict)
     id: str | None = None
+    start_delay_s: float = 0.0
+    #: 为 True 时，在批量执行的非首段跳过本块（``__all__`` 第 2+ scene；chain 连续同 task_key）。
+    skip_when_not_first_scene: bool = False
 
     @property
     def param_key(self) -> str:
@@ -112,4 +116,19 @@ def block_spec_from_mapping(raw: Mapping[str, Any]) -> QueueBlock:
     block_id = str(raw_id).strip() if raw_id is not None else None
     if block_id == "":
         block_id = None
-    return BlockSpec(skill=sk.strip(), params=dict(params or {}), id=block_id)
+    raw_delay = raw.get("start_delay_s", 0.0)
+    if not isinstance(raw_delay, Real):
+        raise TypeError('"start_delay_s" must be a number when present')
+    start_delay_s = float(raw_delay)
+    if start_delay_s < 0.0:
+        raise ValueError('"start_delay_s" must be >= 0')
+    skip_nf = raw.get("skip_when_not_first_scene", False)
+    if not isinstance(skip_nf, bool):
+        raise TypeError('"skip_when_not_first_scene" must be a boolean when present')
+    return BlockSpec(
+        skill=sk.strip(),
+        params=dict(params or {}),
+        id=block_id,
+        start_delay_s=start_delay_s,
+        skip_when_not_first_scene=skip_nf,
+    )

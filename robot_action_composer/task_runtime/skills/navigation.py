@@ -40,6 +40,7 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import Se
 from robot_action_composer.isaac_sim import get_entity_pose_world_service  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.object_resolution_replay import resolve_nav_object_pose_for_task  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.registry import register_skill  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.types import ExecutionMeta  # pyright: ignore[reportMissingImports]
 
@@ -202,8 +203,15 @@ def skill_navigate_to_object(
     timeout = float(params.get("timeout", 60.0))
     poll_period = float(params.get("poll_period", 0.1))
 
-    # 从 Isaac Sim 获取物体世界坐标
-    (obj_x, obj_y, obj_z), _ = get_entity_pose_world_service(object_path)
+    # 从 live/replay object-resolution 获取导航 frame 下的物体位姿。
+    obj_pose = resolve_nav_object_pose_for_task(
+        ctx,
+        object_prim_path=object_path,
+        frame_id=frame_id,
+    )
+    obj_x = float(obj_pose.position.x)
+    obj_y = float(obj_pose.position.y)
+    obj_z = float(obj_pose.position.z)
     nav_x = obj_x + offset_x
     nav_y = obj_y + offset_y
     print(

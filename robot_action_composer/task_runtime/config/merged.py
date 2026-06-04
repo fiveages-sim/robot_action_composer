@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from robot_action_composer.motion_generation.tasks.bimanual_carry import BimanualCarryTaskConfig  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.bimanual_place import BimanualPlaceTaskConfig  # pyright: ignore[reportMissingImports]
 from robot_action_composer.motion_generation.tasks.handover import HandoverSyncConfig  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_config_io import validate_runtime_defaults_keys  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.config.single_arm import (  # pyright: ignore[reportMissingImports]
     QueueSingleArmSlice,
     format_queue_single_arm_summary,
@@ -107,6 +108,7 @@ def _try_place(
         "place_prepare_offset": carry.carry_prepare_offset,
         "place_left_orientation": carry.left_base_orientation,
         "place_right_orientation": carry.right_base_orientation,
+        "place_pregrasp_lower_xyz": carry.ee_pregrasp_lift_offset,
         "place_lift_xyz": carry.ee_lift_offset,
         "place_retreat_xyz": carry.ee_retreat_offset,
         "place_approach_clearance_y": carry.arm_merge_distance_y,
@@ -157,7 +159,7 @@ class MergedQueueConfig:
     place: BimanualPlaceTaskConfig | None = None
     handover: HandoverSyncConfig | None = None
     drawer: DrawerGeometryConfig | None = None
-    # 可选：任务 YAML（如 base_task_overrides / 场景 root 覆盖）覆盖 robot_config 的 Isaac base prim 路径
+    # 可选：任务 YAML（如 runtime_defaults / 场景 root 覆盖）覆盖 robot_config 的 Isaac base prim 路径
     base_link_entity_path: str | None = None
 
 
@@ -171,26 +173,16 @@ def _optional_base_link_entity_path(overrides: Mapping[str, Any]) -> str | None:
     return s or None
 
 
-def _queue_root_overrides(raw: Mapping[str, object] | None) -> dict[str, Any]:
-    if not raw:
-        return {}
-    return {
-        k: v
-        for k, v in dict(raw).items()
-        if k not in {"pick", "place", "handover", "carry", "drawer", "skill_params"}
-    }
-
-
 def build_merged_queue_config(
     *,
-    base_task_overrides: Mapping[str, Any],
+    runtime_defaults: Mapping[str, Any],
     skill_defaults: Mapping[str, Any] | None = None,
     scene_preset: Mapping[str, object] | None = None,
     base_runtime: MergedQueueConfig | None = None,
 ) -> MergedQueueConfig:
     """Build runtime config from structured overlays."""
-    root_base = dict(base_task_overrides or {})
-    root_scene = _queue_root_overrides(scene_preset)
+    root_base = validate_runtime_defaults_keys(runtime_defaults or {}, context="runtime_defaults")
+    root_scene = validate_runtime_defaults_keys(scene_preset or {}, context="scene preset root")
     sd = dict(skill_defaults or {})
     scene_sp = dict((scene_preset or {}).get("skill_params") or {})
 
@@ -215,7 +207,11 @@ def build_merged_queue_config(
         if base_runtime and base_runtime.carry is not None
         else {}
     )
-    carry_flat = {**carry_base, **root_base, **dict(sd.get("dual_arm.carry") or {}), **root_scene, **dict(scene_sp.get("dual_arm.carry") or {})}
+    carry_flat = {
+        **carry_base,
+        **dict(sd.get("dual_arm.carry") or {}),
+        **dict(scene_sp.get("dual_arm.carry") or {}),
+    }
     carry = _try_carry(carry_flat)
 
     handover_base = (
@@ -225,9 +221,7 @@ def build_merged_queue_config(
     )
     handover_flat = {
         **handover_base,
-        **root_base,
         **dict(sd.get("dual_arm.handover") or {}),
-        **root_scene,
         **dict(scene_sp.get("dual_arm.handover") or {}),
     }
     handover = _try_handover(handover_flat)
@@ -239,9 +233,7 @@ def build_merged_queue_config(
         drawer_base = {f.name: getattr(base_runtime.drawer, f.name) for f in fields(DrawerGeometryConfig)}
     drawer_flat = {
         **drawer_base,
-        **root_base,
         **dict(sd.get("single_arm.drawer") or {}),
-        **root_scene,
         **dict(scene_sp.get("single_arm.drawer") or {}),
     }
     drawer = _try_drawer(drawer_flat)
@@ -278,7 +270,7 @@ def merge_scene_preset_into_merged_queue(
 ) -> MergedQueueConfig:
     """Overlay scene preset on top of existing runtime."""
     return build_merged_queue_config(
-        base_task_overrides={},
+        runtime_defaults={},
         skill_defaults={},
         scene_preset=preset_raw,
         base_runtime=base,
