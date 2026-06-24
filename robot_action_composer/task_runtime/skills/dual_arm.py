@@ -229,6 +229,17 @@ def _carry_tf_timeout(cfg: BimanualCarryTaskConfig) -> float:
         return 2.0
 
 
+def _carry_needs_object_orientation(cfg: BimanualCarryTaskConfig) -> bool:
+    if bool(getattr(cfg, "use_object_orientation", False)):
+        return True
+    mode = str(getattr(cfg, "object_orientation_mode", "full") or "full").strip().lower()
+    if mode not in ("", "full", "none", "identity", "motion"):
+        return True
+    span_frame = str(getattr(cfg, "object_span_frame", "motion") or "motion").strip().lower()
+    ee_frame = str(getattr(cfg, "ee_orientation_frame", "motion") or "motion").strip().lower()
+    return span_frame in ("object", "object_body", "body", "local") or ee_frame in ("object", "object_body", "body", "local")
+
+
 def _object_position_in_carry_execution_frame(
     ctx: QueueRuntimeContext,
     cfg: BimanualCarryTaskConfig,
@@ -634,11 +645,12 @@ def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[l
     """双臂搬运：一次执行完整搬运序列。"""
     cfg = _require_carry(ctx)
     _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label="dual_arm.carry")
+    include_orientation = _carry_needs_object_orientation(cfg)
     if ctx.object_resolution is not None:
         oc_base = resolve_object_pose_for_task(
             ctx,
             object_prim_path=cfg.object_prim_path,
-            include_orientation=False,
+            include_orientation=include_orientation,
             arm_side="none",
             object_role="carry_object",
             entity_state_timeout=SERVICE_CALL_TIMEOUT,
@@ -650,7 +662,7 @@ def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[l
             ctx.base_world_pos,
             ctx.base_world_quat,
             cfg.object_prim_path,
-            include_orientation=False,
+            include_orientation=include_orientation,
         )
     oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
     ctx.carry_object_position = oc

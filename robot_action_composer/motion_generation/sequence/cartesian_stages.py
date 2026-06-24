@@ -84,8 +84,11 @@ def _bimanual_carry_lr_xyz_triple_from_object_body(
     object_position_offset: tuple[float, float, float],
     object_dual_arm_half_span_y: float,
     arm_merge_distance_y: float,
+    vertical_approach_clearance_z: float | None,
     carry_prepare_offset: tuple[float, float, float] | None,
     *,
+    object_span_frame: str = "motion",
+    object_span_axis: str = "y",
     carry_left_orientation: tuple[float, float, float, float],
     carry_right_orientation: tuple[float, float, float, float],
 ) -> tuple[
@@ -93,10 +96,12 @@ def _bimanual_carry_lr_xyz_triple_from_object_body(
     tuple[tuple[float, float, float], tuple[float, float, float]],
     tuple[tuple[float, float, float], tuple[float, float, float]],
 ]:
-    """抓取几何：中线用物体姿态，左右张开用 motion 系 **Y**（通常为 ``arm_base`` 的 Y）。
+    """抓取几何：中线用物体姿态，``y`` 横向插入；``x`` 顶部竖直下抓。
 
     - 名义抓取中线相对物体原点：物体系 ``(object_position_offset[0], 0, object_position_offset[2])``，经 ``R(q)`` 映到输出系后加到物体原点位置。
-    - **左右半宽** ``object_dual_arm_half_span_y+object_position_offset[1]`` 及 **Approach 余量** ``arm_merge_distance_y`` 沿输出系 **Y 轴**（非物体固连 Y）。
+    - ``object_span_axis='y'``：历史横抓方案。左右半宽和 Forward 余量沿 span 轴展开，然后 CloseIn 横向夹入。
+    - ``object_span_axis='x'``：顶部下抓方案。左右半宽沿 X 展开，Forward 位姿在 CloseIn 正上方
+      ``vertical_approach_clearance_z``，然后 CloseIn 竖直向下。
     - ``carry_prepare_offset``：与各臂 **末端工具系** 下的平移（与 ``ee_lift_offset`` 在 ``tool`` 帧语义一致），
       同一 ``(dx,dy,dz)`` 分别经 ``carry_left_orientation`` / ``carry_right_orientation`` 旋到输出系后加到 Forward 远点。
     """
@@ -111,10 +116,48 @@ def _bimanual_carry_lr_xyz_triple_from_object_body(
     d_mid = rotate_vector_by_quat((ocx, 0.0, ocz), q)
     p_mid = (cx + d_mid[0], cy + d_mid[1], cz + d_mid[2])
 
-    pl_close = (p_mid[0], p_mid[1] + half, p_mid[2])
-    pr_close = (p_mid[0], p_mid[1] - half, p_mid[2])
-    pl_fwd = (p_mid[0], p_mid[1] + half + clear, p_mid[2])
-    pr_fwd = (p_mid[0], p_mid[1] - half - clear, p_mid[2])
+    axis_raw = str(object_span_axis or "y").strip().lower()
+    sign = -1.0 if axis_raw.startswith("-") else 1.0
+    axis = axis_raw.lstrip("+-")
+    if axis in ("x", "forward", "front_back", "front-back", "longitudinal", "top_down", "top-down", "down"):
+        span_axis = "x"
+        axis_unit = (sign, 0.0, 0.0)
+    elif axis in ("y", "side", "sideways", "left_right", "left-right", "lateral"):
+        span_axis = "y"
+        axis_unit = (0.0, sign, 0.0)
+    elif axis in ("z", "up", "vertical"):
+        span_axis = "z"
+        axis_unit = (0.0, 0.0, sign)
+    else:
+        raise ValueError(f"unsupported object_span_axis {object_span_axis!r}; expected 'x', 'y', or 'z'")
+
+    span_frame = str(object_span_frame or "motion").strip().lower()
+    if span_frame in ("", "motion", "base", "world"):
+        d_half = (axis_unit[0] * half, axis_unit[1] * half, axis_unit[2] * half)
+        d_clear = (axis_unit[0] * clear, axis_unit[1] * clear, axis_unit[2] * clear)
+    elif span_frame in ("object", "object_body", "body", "local"):
+        d_half = rotate_vector_by_quat((axis_unit[0] * half, axis_unit[1] * half, axis_unit[2] * half), q)
+        d_clear = rotate_vector_by_quat((axis_unit[0] * clear, axis_unit[1] * clear, axis_unit[2] * clear), q)
+    else:
+        raise ValueError(f"unsupported object_span_frame {object_span_frame!r}; expected 'motion' or 'object'")
+
+    pl_close = (p_mid[0] + d_half[0], p_mid[1] + d_half[1], p_mid[2] + d_half[2])
+    pr_close = (p_mid[0] - d_half[0], p_mid[1] - d_half[1], p_mid[2] - d_half[2])
+    if span_axis == "x":
+        z_clear = float(vertical_approach_clearance_z) if vertical_approach_clearance_z is not None else clear
+        pl_fwd = (pl_close[0], pl_close[1], pl_close[2] + z_clear)
+        pr_fwd = (pr_close[0], pr_close[1], pr_close[2] + z_clear)
+    else:
+        pl_fwd = (
+            p_mid[0] + d_half[0] + d_clear[0],
+            p_mid[1] + d_half[1] + d_clear[1],
+            p_mid[2] + d_half[2] + d_clear[2],
+        )
+        pr_fwd = (
+            p_mid[0] - d_half[0] - d_clear[0],
+            p_mid[1] - d_half[1] - d_clear[1],
+            p_mid[2] - d_half[2] - d_clear[2],
+        )
 
     if carry_prepare_offset_is_active(carry_prepare_offset):
         ox = float(carry_prepare_offset[0])
@@ -700,7 +743,10 @@ def build_bimanual_carry_sequence(
     object_dual_arm_half_span_y: float,
     carry_prepare_offset: tuple[float, float, float] | None = None,
     arm_merge_distance_y: float = 0.0,
+    vertical_approach_clearance_z: float | None = None,
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    object_span_frame: str = "motion",
+    object_span_axis: str = "y",
     carry_left_orientation: tuple[float, float, float, float],
     carry_right_orientation: tuple[float, float, float, float],
     ee_pregrasp_lift_offset: tuple[float, float, float] | None = None,
@@ -719,10 +765,10 @@ def build_bimanual_carry_sequence(
     Both arms approach, close in, optionally pregrasp-lift while keeping grippers open,
     grasp, then optional lift / retreat.
 
-    **抓取几何**：``object_position_offset[0]`` / ``object_position_offset[2]`` 与物体系 X/Z 对齐，经 ``R(q)`` 映到输出系后定抓取中线；
-    ``object_dual_arm_half_span_y+object_position_offset[1]``、``arm_merge_distance_y`` 沿输出系 **Y**（通常为 ``arm_base`` Y）
-    左右展开；``carry_prepare_offset`` 为末端工具系 ``(dx,dy,dz)``（与 ``ee_lift_offset`` 的 tool 语义一致），
-    左右各用 ``carry_*_orientation`` 旋到输出系后加到 Forward 远点。
+    **抓取几何**：``object_position_offset[0]`` / ``object_position_offset[2]`` 与物体系 X/Z 对齐，经 ``R(q)`` 映到输出系后定抓取中线。
+    ``object_span_axis='y'`` 沿左右横向展开并横插；``object_span_axis='x'`` 沿 X 分开双手，
+    Forward 位姿在 CloseIn 上方 ``vertical_approach_clearance_z``，再竖直下抓。
+    ``carry_prepare_offset`` 为末端工具系 ``(dx,dy,dz)``，左右各用 ``carry_*_orientation`` 旋到输出系后加到 Forward 远点。
 
     ``ee_pregrasp_lift_offset`` / ``ee_lift_offset`` / ``ee_retreat_offset`` 为 ``None``
     （YAML 不写）时**不生成**对应段；
@@ -743,7 +789,10 @@ def build_bimanual_carry_sequence(
         object_position_offset,
         object_dual_arm_half_span_y,
         arm_merge_distance_y,
+        vertical_approach_clearance_z,
         carry_prepare_offset,
+        object_span_frame=object_span_frame,
+        object_span_axis=object_span_axis,
         carry_left_orientation=carry_left_orientation,
         carry_right_orientation=carry_right_orientation,
     )
@@ -923,7 +972,10 @@ def build_bimanual_place_sequence(
     object_dual_arm_half_span_y: float,
     carry_prepare_offset: tuple[float, float, float] | None = None,
     arm_merge_distance_y: float = 0.0,
+    vertical_approach_clearance_z: float | None = None,
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    object_span_frame: str = "motion",
+    object_span_axis: str = "y",
     carry_left_orientation: tuple[float, float, float, float],
     carry_right_orientation: tuple[float, float, float, float],
     ee_pregrasp_lift_offset: tuple[float, float, float] | None = None,
@@ -952,7 +1004,10 @@ def build_bimanual_place_sequence(
         object_position_offset,
         object_dual_arm_half_span_y,
         arm_merge_distance_y,
+        vertical_approach_clearance_z,
         carry_prepare_offset,
+        object_span_frame=object_span_frame,
+        object_span_axis=object_span_axis,
         carry_left_orientation=carry_left_orientation,
         carry_right_orientation=carry_right_orientation,
     )
