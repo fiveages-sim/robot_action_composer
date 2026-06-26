@@ -206,6 +206,75 @@ def _set_pose_quat_xyzw(p: Pose, q: tuple[float, float, float, float]) -> None:
     p.orientation.w = w
 
 
+def _reference_target_xyz_from_params(
+    ctx: QueueRuntimeContext,
+    params: Mapping[str, Any],
+    *,
+    motion_frame: str,
+    label: str,
+    object_role: str,
+) -> tuple[float, float, float] | None:
+    ref_path_raw = params.get("reference_object_prim_path")
+    if not isinstance(ref_path_raw, str) or not ref_path_raw.strip():
+        return None
+
+    ref_path = ref_path_raw.strip()
+    ref_off_obj = _param_vec3(params, "object_position_offset", (0.0, 0.0, 0.0))
+    if ctx.object_resolution is not None:
+        ref_pose = resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=ref_path,
+            include_orientation=True,
+            arm_side="none",
+            object_role=object_role,
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    else:
+        ref_pose = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            ref_path,
+            include_orientation=True,
+        )
+
+    source_frame = str(ctx.frame_id).strip() or "base_link"
+    ref_motion = ref_pose
+    if motion_frame != source_frame:
+        iface = ctx.interface
+        if not hasattr(iface, "transform_pose"):
+            raise TypeError(
+                f"{label}: reference_object_prim_path with motion_frame_id "
+                "requires ROS2RobotInterface.transform_pose",
+            )
+        try:
+            tft = float(params.get("tf_lookup_timeout", 2.0))
+        except (TypeError, ValueError):
+            tft = 2.0
+        ref_motion = iface.transform_pose(ref_pose, source_frame, motion_frame, timeout=tft)
+        if ref_motion is None:
+            raise RuntimeError(
+                f"{label}: TF {source_frame!r} -> {motion_frame!r} failed "
+                f"for reference_object_prim_path={ref_path!r}",
+            )
+
+    ref_q = quat_normalize(
+        (
+            float(ref_motion.orientation.x),
+            float(ref_motion.orientation.y),
+            float(ref_motion.orientation.z),
+            float(ref_motion.orientation.w),
+        ),
+    )
+    ref_off_motion = rotate_vector_by_quat(ref_off_obj, ref_q)
+    return (
+        float(ref_motion.position.x) + ref_off_motion[0],
+        float(ref_motion.position.y) + ref_off_motion[1],
+        float(ref_motion.position.z) + ref_off_motion[2],
+    )
+
+
 def _carry_base_frame_id(ctx: QueueRuntimeContext) -> str:
     """物体解算 ``get_object_pose_from_service`` 所用系，与 ``ctx.frame_id`` 一致。"""
     s = str(ctx.frame_id).strip()
@@ -379,6 +448,9 @@ def skill_place(
             未显式给出时，若 ``carry.ee_pregrasp_lift_offset`` 存在，则默认取其相反数（用于先抬后抓的对称放置下降）。
             且在 place 未显式配置下降分段时，若 ``carry.ee_lift_offset`` 存在，闭爪段优先映射为其相反数，
             开爪段自动改为“到目标平移的剩余量”（保证两段合计仍到参考 offset）。
+        orientation_delta_rpy: 可选。松爪前，对左右末端同时左乘的姿态增量 [roll,pitch,yaw]（rad）。
+        post_release_right_delta_xyz: 可选。松爪后、外张前，只对右臂同加的位移 [x,y,z]（motion 系）。
+        post_release_right_orientation_delta_rpy: 可选。松爪后、外张前，只对右臂左乘的姿态增量 [roll,pitch,yaw]（rad）。
         spread_half: 单侧沿「右→左」在 motion 系 XY 平面的外张距离（米）；默认取 carry 的 ``arm_merge_distance_y`` 或 0.04。
         retreat_xyz: 外张后左右再同加的位移 [x,y,z]（motion 系）；默认取 carry 的 ``ee_retreat_offset`` 或 [-0.2,0,0]。
         reference_object_prim_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为放置参考点。
@@ -421,60 +493,18 @@ def skill_place(
             default_retreat = (-0.2, 0.0, 0.0)
 
     tr = _param_vec3(params, "translation_xyz", (0.0, 0.0, 0.0))
-    ref_path_raw = params.get("reference_object_prim_path")
-    if isinstance(ref_path_raw, str) and ref_path_raw.strip():
-        ref_path = ref_path_raw.strip()
-        ref_off_obj = _param_vec3(params, "object_position_offset", (0.0, 0.0, 0.0))
-        # 参考物位姿服务输出在 ctx.frame_id；必要时转换到 motion_frame 再参与几何计算。
-        if ctx.object_resolution is not None:
-            ref_pose = resolve_object_pose_for_task(
-                ctx,
-                object_prim_path=ref_path,
-                include_orientation=True,
-                arm_side="none",
-                object_role="place_reference",
-                entity_state_timeout=SERVICE_CALL_TIMEOUT,
-                retries=SERVICE_CALL_RETRIES,
-                retry_delay=SERVICE_RETRY_DELAY,
-            )
-        else:
-            ref_pose = get_object_pose_from_service(
-                ctx.base_world_pos,
-                ctx.base_world_quat,
-                ref_path,
-                include_orientation=True,
-            )
-        ref_motion = ref_pose
-        if motion_frame != ctx.frame_id:
-            if not hasattr(iface, "transform_pose"):
-                raise TypeError(
-                    "dual_arm.place: reference_object_prim_path with motion_frame_id "
-                    "requires ROS2RobotInterface.transform_pose",
-                )
-            try:
-                tft = float(params.get("tf_lookup_timeout", 2.0))
-            except (TypeError, ValueError):
-                tft = 2.0
-            ref_motion = iface.transform_pose(ref_pose, ctx.frame_id, motion_frame, timeout=tft)
-            if ref_motion is None:
-                raise RuntimeError(
-                    f"dual_arm.place: TF {ctx.frame_id!r} -> {motion_frame!r} failed "
-                    f"for reference_object_prim_path={ref_path!r}",
-                )
-
+    ref_target = _reference_target_xyz_from_params(
+        ctx,
+        params,
+        motion_frame=motion_frame,
+        label="dual_arm.place",
+        object_role="place_reference",
+    )
+    if ref_target is not None:
         mid_x = (l0.position.x + r0.position.x) * 0.5
         mid_y = (l0.position.y + r0.position.y) * 0.5
         mid_z = (l0.position.z + r0.position.z) * 0.5
-        ref_q = (
-            float(ref_motion.orientation.x),
-            float(ref_motion.orientation.y),
-            float(ref_motion.orientation.z),
-            float(ref_motion.orientation.w),
-        )
-        ref_off_motion = rotate_vector_by_quat(ref_off_obj, ref_q)
-        tx = float(ref_motion.position.x) + ref_off_motion[0]
-        ty = float(ref_motion.position.y) + ref_off_motion[1]
-        tz = float(ref_motion.position.z) + ref_off_motion[2]
+        tx, ty, tz = ref_target
         tr = (tx - mid_x, ty - mid_y, tz - mid_z)
 
     spread_half = float(params.get("spread_half", params.get("spread_y_half", default_spread)))
@@ -505,6 +535,37 @@ def skill_place(
         )
     if post_release_lower is not None and max(abs(post_release_lower[0]), abs(post_release_lower[1]), abs(post_release_lower[2])) < 1e-12:
         post_release_lower = None
+    orientation_delta = None
+    if "orientation_delta_rpy" in params:
+        orientation_delta = _param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
+        if max(abs(orientation_delta[0]), abs(orientation_delta[1]), abs(orientation_delta[2])) < 1e-12:
+            orientation_delta = None
+    post_release_right_delta = None
+    if "post_release_right_delta_xyz" in params:
+        post_release_right_delta = _param_vec3(
+            params,
+            "post_release_right_delta_xyz",
+            (0.0, 0.0, 0.0),
+        )
+        if max(
+            abs(post_release_right_delta[0]),
+            abs(post_release_right_delta[1]),
+            abs(post_release_right_delta[2]),
+        ) < 1e-12:
+            post_release_right_delta = None
+    post_release_right_orientation_delta = None
+    if "post_release_right_orientation_delta_rpy" in params:
+        post_release_right_orientation_delta = _param_vec3(
+            params,
+            "post_release_right_orientation_delta_rpy",
+            (0.0, 0.0, 0.0),
+        )
+        if max(
+            abs(post_release_right_orientation_delta[0]),
+            abs(post_release_right_orientation_delta[1]),
+            abs(post_release_right_orientation_delta[2]),
+        ) < 1e-12:
+            post_release_right_orientation_delta = None
 
     stages = build_bimanual_place_relative_sequence(
         left_current=l0,
@@ -515,6 +576,9 @@ def skill_place(
         retreat_xyz=ret,
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
+        orientation_delta_rpy=orientation_delta,
+        post_release_right_delta_xyz=post_release_right_delta,
+        post_release_right_orientation_delta_rpy=post_release_right_orientation_delta,
         stage_prefix="PlaceRel",
         output_frame_id=motion_frame,
     )
@@ -530,12 +594,15 @@ def skill_bimanual_align(
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     """持箱时双臂对齐：将 **左右末端中点** 移到目标位置（可选姿态增量），``motion_frame_id`` 下计算。
 
-    左右手 **同加** 位置增量，相对几何不变。目标仅支持 ``align_position: [x,y,z]`` 一次指定三轴。
+    左右手 **同加** 位置增量，相对几何不变。目标可用 ``align_position: [x,y,z]`` 直接指定，
+    或用 ``reference_object_prim_path`` + ``object_position_offset`` 从场景 prim 动态解析。
 
     姿态：可选 ``orientation_delta_rpy``（``[roll, pitch, yaw]`` 弧度），左乘当前左、右末端四元数。
 
     params:
-        align_position: 必填 ``[x, y, z]``（米），双臂中心目标位置（``motion_frame_id`` 下）。
+        align_position: ``[x, y, z]``（米），双臂中心目标位置（``motion_frame_id`` 下）。
+        reference_object_prim_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为目标。
+        object_position_offset: 可选。与 ``reference_object_prim_path`` 联用，按参考物体自身坐标系偏移。
         orientation_delta_rpy, min_abs_orientation_rpy, motion_frame_id,
         min_abs_delta_y / min_abs_delta_x / min_abs_delta_z, arm_movel_duration: 同前。
     """
@@ -554,12 +621,25 @@ def skill_bimanual_align(
         iface, l0_raw, r0_raw, pose_frame, params, label=label,
     )
 
-    ap = params.get("align_position")
-    if not isinstance(ap, (list, tuple)) or len(ap) != 3:
-        raise ValueError("align_position is required and must be a length-3 list [x, y, z]")
-    target_mid_x = float(ap[0])
-    target_mid_y = float(ap[1])
-    target_mid_z = float(ap[2])
+    ref_target = _reference_target_xyz_from_params(
+        ctx,
+        params,
+        motion_frame=motion_frame,
+        label=label,
+        object_role="bimanual_align_reference",
+    )
+    if ref_target is not None:
+        target_mid_x, target_mid_y, target_mid_z = ref_target
+    else:
+        ap = params.get("align_position")
+        if not isinstance(ap, (list, tuple)) or len(ap) != 3:
+            raise ValueError(
+                "align_position is required and must be a length-3 list [x, y, z] "
+                "unless reference_object_prim_path is provided",
+            )
+        target_mid_x = float(ap[0])
+        target_mid_y = float(ap[1])
+        target_mid_z = float(ap[2])
 
     try:
         min_abs = float(params.get("min_abs_delta_y", 1e-4))

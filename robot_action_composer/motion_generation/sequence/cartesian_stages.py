@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Callable
 from geometry_msgs.msg import Pose
 
 from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+    euler_rpy_to_quat_xyzw,
+    quat_multiply,
     quat_normalize,
     rotate_vector_by_quat,
 )
@@ -1195,6 +1197,9 @@ def build_bimanual_place_relative_sequence(
     gripper_closed: float,
     stage_prefix: str = "PlaceRel",
     output_frame_id: str | None = None,
+    orientation_delta_rpy: tuple[float, float, float] | None = None,
+    post_release_right_delta_xyz: tuple[float, float, float] | None = None,
+    post_release_right_orientation_delta_rpy: tuple[float, float, float] | None = None,
 ) -> list[StageTarget]:
     """基于**当前**左右末端位姿的相对放置（与物体/货架 prim 无关）。
 
@@ -1206,12 +1211,15 @@ def build_bimanual_place_relative_sequence(
     1. 左右同加一段平移（夹爪仍闭合）。
        - 未配置 ``post_release_lower_xyz``：该段就是完整 ``translation_xyz``（一段到参考 offset）。
        - 配置了 ``post_release_lower_xyz``：该段先走 ``translation_xyz - post_release_lower_xyz``。
-    2. 同一位姿松爪（``wait_gripper_settle``）。
-    3. （可选）在松爪后再同加 ``post_release_lower_xyz``（米），使两段合计到达 ``translation_xyz``（两段到参考 offset）。
-    4. 沿「右→左」在 XY 平面的方向各外张 ``spread_half``（米）。
-    5. 再对左右同加 ``retreat_xyz`` 后撤。
+    2. （可选）左右手同时左乘 ``orientation_delta_rpy``，用于松爪前整体调整姿态。
+    3. 同一位姿松爪（``wait_gripper_settle``）。
+    4. （可选）在松爪后再同加 ``post_release_lower_xyz``（米），使两段合计到达 ``translation_xyz``（两段到参考 offset）。
+    5. （可选）再单独对右手同加 ``post_release_right_delta_xyz``，用于先避开卡点再外抽。
+    6. （可选）再单独对右手左乘 ``post_release_right_orientation_delta_rpy``，用于小角度避让。
+    7. 沿「右→左」在 XY 平面的方向各外张 ``spread_half``（米）。
+    8. 再对左右同加 ``retreat_xyz`` 后撤。
 
-    姿态全程保持与平移前一致（仅位置变）。
+    未配置姿态增量时，姿态全程保持与平移前一致（仅位置变）。
     """
     tx, ty, tz = translation_xyz
     if post_release_lower_xyz is not None:
@@ -1227,14 +1235,18 @@ def build_bimanual_place_relative_sequence(
         r1 = _pose_translate_copy(right_current, tx, ty, tz)
         l_mid, r_mid = l1, r1
 
-    ux, uy = _lr_unit_xy_left_from_right(l_mid, r_mid)
-    sh = float(spread_half)
-    l2 = _pose_translate_copy(l_mid, ux * sh, uy * sh, 0.0)
-    r2 = _pose_translate_copy(r_mid, -ux * sh, -uy * sh, 0.0)
+    if orientation_delta_rpy is not None:
+        dr, dp, dyaw = orientation_delta_rpy
+        qd = quat_normalize(euler_rpy_to_quat_xyzw(dr, dp, dyaw))
 
-    rx, ry, rz = retreat_xyz
-    l3 = _pose_translate_copy(l2, rx, ry, rz)
-    r3 = _pose_translate_copy(r2, rx, ry, rz)
+        def _rotate_pose(p: Pose) -> Pose:
+            q = quat_normalize(quat_multiply(qd, _object_orientation_xyzw(p)))
+            return _pose_xyz_orientation(p.position.x, p.position.y, p.position.z, q)
+
+        l1 = _rotate_pose(l1)
+        r1 = _rotate_pose(r1)
+        l_mid = _rotate_pose(l_mid)
+        r_mid = _rotate_pose(r_mid)
 
     stages = [
         StageTarget(
@@ -1259,6 +1271,38 @@ def build_bimanual_place_relative_sequence(
             ),
         )
         idx += 1
+    if post_release_right_delta_xyz is not None:
+        rdx, rdy, rdz = post_release_right_delta_xyz
+        r_mid = _pose_translate_copy(r_mid, rdx, rdy, rdz)
+    if post_release_right_orientation_delta_rpy is not None:
+        dr, dp, dyaw = post_release_right_orientation_delta_rpy
+        qd = quat_normalize(euler_rpy_to_quat_xyzw(dr, dp, dyaw))
+        qr = quat_normalize(quat_multiply(qd, _object_orientation_xyzw(r_mid)))
+        r_mid = _pose_xyz_orientation(
+            r_mid.position.x,
+            r_mid.position.y,
+            r_mid.position.z,
+            qr,
+        )
+    if post_release_right_delta_xyz is not None or post_release_right_orientation_delta_rpy is not None:
+        stages.append(
+            StageTarget(
+                name=_stage_name(stage_prefix, idx, "PostReleaseRightAdjust"),
+                left=ArmTarget(pose=l_mid, gripper=gripper_open),
+                right=ArmTarget(pose=r_mid, gripper=gripper_open),
+            ),
+        )
+        idx += 1
+
+    ux, uy = _lr_unit_xy_left_from_right(l_mid, r_mid)
+    sh = float(spread_half)
+    l2 = _pose_translate_copy(l_mid, ux * sh, uy * sh, 0.0)
+    r2 = _pose_translate_copy(r_mid, -ux * sh, -uy * sh, 0.0)
+
+    rx, ry, rz = retreat_xyz
+    l3 = _pose_translate_copy(l2, rx, ry, rz)
+    r3 = _pose_translate_copy(r2, rx, ry, rz)
+
     stages.append(
         StageTarget(
             name=_stage_name(stage_prefix, idx, PLACE_RELATIVE_SUFFIXES[3]),
