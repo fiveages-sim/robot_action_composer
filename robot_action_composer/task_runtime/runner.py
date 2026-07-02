@@ -10,7 +10,7 @@ import threading
 from collections.abc import Mapping
 from typing import Any, Sequence, TextIO
 
-from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMissingImports]
+from ros2_robot_interface import FSM_HOLD  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import execute_stage_sequence  # pyright: ignore[reportMissingImports]
 
@@ -318,7 +318,14 @@ def build_queue_runtime_context(
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
     queue_task = runtime.single_arm
-    gripper_open, gripper_closed = _resolve_gripper_open_close(robot_cfg.gripper_control_mode)
+    base_open, base_closed = _resolve_gripper_open_close(robot_cfg.gripper_control_mode)
+    common = queue_task.common
+    gripper_open = (
+        float(common.gripper_open) if common.gripper_open is not None else base_open
+    )
+    gripper_closed = (
+        float(common.gripper_closed) if common.gripper_closed is not None else base_closed
+    )
     base_path = effective_base_link_entity_path(robot_cfg=robot_cfg, runtime=runtime)
     frame_id = base_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
     if use_isaac_base_pose:
@@ -471,9 +478,6 @@ def run_task_queue(
         interface.connect()
         robot_connected = True
         print("[OK] Robot connected (unified task queue)")
-        interface.send_fsm_command(FSM_HOLD)
-        sim_time.sleep(robot_cfg.fsm_switch_delay)
-        interface.send_fsm_command(FSM_OCS2)
 
         if reset_env:
             reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
@@ -550,10 +554,6 @@ def run_task_queue_on_connected_interface(
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
     if not specs:
         raise ValueError("task queue blocks list is empty")
-
-    interface.send_fsm_command(FSM_HOLD)
-    sim_time.sleep(robot_cfg.fsm_switch_delay)
-    interface.send_fsm_command(FSM_OCS2)
 
     if reset_env:
         reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
@@ -693,10 +693,6 @@ def run_task_queue_interactive_on_connected_interface(
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
     if not specs:
         raise ValueError("task queue blocks list is empty")
-
-    interface.send_fsm_command(FSM_HOLD)
-    sim_time.sleep(robot_cfg.fsm_switch_delay)
-    interface.send_fsm_command(FSM_OCS2)
 
     if reset_env:
         reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)

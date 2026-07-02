@@ -219,6 +219,10 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     if not path:
         raise ValueError("object_prim_path is required for skill single_arm.pick")
     _apply_arm_movel_duration(ctx, duration=arm_movel_duration, label="single_arm.pick")
+    gripper_open = float(ctx.gripper_open)
+    gripper_closed = (
+        float(pk.gripper_closed) if pk.gripper_closed is not None else float(ctx.gripper_closed)
+    )
     target, exec_f = _resolve_object_target_pose_from_pick_like_params(
         ctx=ctx,
         object_prim_path=path,
@@ -237,13 +241,13 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         retreat_offset=retreat_offset,
         retreat_xyz=retreat_xyz,
         retreat_open_gripper=pk.retreat_open_gripper,
-        gripper_open=ctx.gripper_open,
-        gripper_closed=ctx.gripper_closed,
+        gripper_open=gripper_open,
+        gripper_closed=gripper_closed,
         stage_prefix="TaskQ-Pick",
     )
     stages = assign_to_arm(arm_seq, arm_side)
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
-    ctx.gripper_for_return_home = ctx.gripper_open if pk.retreat_open_gripper else ctx.gripper_closed
+    ctx.gripper_for_return_home = gripper_open if pk.retreat_open_gripper else gripper_closed
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
@@ -348,6 +352,9 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
             ),
         )
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, place=pl2)
+    gripper_open = (
+        float(pl2.gripper_open) if pl2.gripper_open is not None else float(ctx.gripper_open)
+    )
     arm_seq = build_single_arm_place_sequence(
         place_position=pl2.place_position,
         place_orientation=pl2.ee_base_orientation,
@@ -355,13 +362,12 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
         prepare_offset=pl2.prepare_offset,
         place_insert_clearance=pl2.place_insert_clearance,
         ee_retreat_offset=pl2.ee_retreat_offset,
-        gripper_open=ctx.gripper_open,
-        gripper_closed=ctx.gripper_closed,
+        gripper_open=gripper_open,
         stage_prefix="TaskQ-Place",
         start_index=1,
     )
     stages = assign_to_arm(arm_seq, arm_side)
-    ctx.gripper_for_return_home = ctx.gripper_open
+    ctx.gripper_for_return_home = gripper_open
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,

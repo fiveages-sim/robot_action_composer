@@ -15,6 +15,8 @@ RUNTIME_DEFAULTS_ALLOWED_KEYS: frozenset[str] = frozenset(
         "max_stage_duration",
         "pose_tol_pos",
         "pose_tol_ori",
+        "gripper_open",
+        "gripper_closed",
     }
 )
 

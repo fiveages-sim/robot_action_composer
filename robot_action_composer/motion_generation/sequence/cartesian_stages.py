@@ -268,6 +268,7 @@ class ArmStage:
     target: ArmTarget
     wait_gripper_settle: bool = False
     skip_arrival_check: bool = False
+    skip_gripper_command: bool = False
 
 
 @dataclass
@@ -514,7 +515,6 @@ def build_single_arm_place_sequence(
     place_orientation: tuple[float, float, float, float],
     ee_retreat_offset: tuple[float, float, float],
     gripper_open: float,
-    gripper_closed: float,
     place_axis: str = "top",
     prepare_offset: tuple[float, float, float] | None = None,
     place_insert_clearance: float = 0.0,
@@ -586,7 +586,8 @@ def build_single_arm_place_sequence(
         stages.append(
             ArmStage(
                 _stage_name(stage_prefix, idx, "Approach"),
-                ArmTarget(pose=approach_pose, gripper=gripper_closed),
+                ArmTarget(pose=approach_pose, gripper=0.0),
+                skip_gripper_command=True,
             ),
         )
         idx += 1
@@ -594,7 +595,8 @@ def build_single_arm_place_sequence(
     stages.append(
         ArmStage(
             _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[0]),
-            ArmTarget(pose=final_pose, gripper=gripper_closed),
+            ArmTarget(pose=final_pose, gripper=0.0),
+            skip_gripper_command=True,
         ),
     )
     idx += 1
@@ -642,6 +644,7 @@ def assign_to_arm(
                     left=spec.target,
                     wait_gripper_settle=spec.wait_gripper_settle,
                     skip_arrival_check=spec.skip_arrival_check,
+                    skip_gripper_command=spec.skip_gripper_command,
                 ),
             )
         else:
@@ -651,6 +654,7 @@ def assign_to_arm(
                     right=spec.target,
                     wait_gripper_settle=spec.wait_gripper_settle,
                     skip_arrival_check=spec.skip_arrival_check,
+                    skip_gripper_command=spec.skip_gripper_command,
                 ),
             )
     return result
@@ -1350,6 +1354,30 @@ def _send_arm_targets(
             interface.right_arm_handler.send_target(stage.right.pose)
 
 
+def _send_one_gripper_command(handler: Any, gripper: float, gripper_mode: GripperMode) -> None:
+    """Send gripper target; prefer ``target_percent`` when the handler exposes it."""
+    g = float(gripper)
+    if gripper_mode == GripperMode.TARGET_COMMAND:
+        if getattr(handler, "target_percent_pub", None) is not None:
+            handler.send_position_percent(g)
+            return
+        if g >= 1.0 - 1e-6:
+            handler.send_target_command(1)
+            return
+        if g <= 1e-6:
+            handler.send_target_command(0)
+            return
+        if getattr(handler, "command_pub", None) is not None:
+            cfg = handler.config
+            lo = float(cfg.gripper_min_position)
+            hi = float(cfg.gripper_max_position)
+            handler.send_joint_positions(lo + g * (hi - lo))
+            return
+        handler.send_target_command(1 if g >= 0.5 else 0)
+        return
+    handler.send_joint_positions(g)
+
+
 def _send_gripper_commands(
     interface: ROS2RobotInterface,
     stage: StageTarget,
@@ -1358,15 +1386,13 @@ def _send_gripper_commands(
     if stage.skip_gripper_command:
         return
     if stage.left and interface.left_gripper_handler:
-        if gripper_mode == GripperMode.TARGET_COMMAND:
-            interface.left_gripper_handler.send_target_command(int(stage.left.gripper))
-        else:
-            interface.left_gripper_handler.send_joint_positions(stage.left.gripper)
+        _send_one_gripper_command(
+            interface.left_gripper_handler, stage.left.gripper, gripper_mode
+        )
     if stage.right and interface.right_gripper_handler:
-        if gripper_mode == GripperMode.TARGET_COMMAND:
-            interface.right_gripper_handler.send_target_command(int(stage.right.gripper))
-        else:
-            interface.right_gripper_handler.send_joint_positions(stage.right.gripper)
+        _send_one_gripper_command(
+            interface.right_gripper_handler, stage.right.gripper, gripper_mode
+        )
 
 
 # ---------------------------------------------------------------------------
