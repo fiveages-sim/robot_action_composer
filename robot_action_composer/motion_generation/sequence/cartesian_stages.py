@@ -411,21 +411,26 @@ def build_single_arm_pick_sequence(
     ee_base_orientation: tuple[float, float, float, float],
     prepare_offset: tuple[float, float, float] | None = None,
     pick_clearance: float = 0.01,
-    ee_pick_axis: str = "+z",
-    ee_pick_direction_vector: DirectionVec | None = None,
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    retreat_direction_extra: float = 0.0,
-    retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    retreat_offset: tuple[float, float, float] | None = None,
     retreat_xyz: tuple[float, float, float] | None = None,
     retreat_open_gripper: bool = False,
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Pickup",
 ) -> list[ArmStage]:
-    direction_vec = _resolve_axis_direction_unit_vec(
-        axis_label=ee_pick_axis,
-        explicit_direction_vector=ee_pick_direction_vector,
-    )
+    """Build pick stages: Approach (optional) → CloseIn → Grasp → Lift (optional) → Retreat (optional).
+
+    Used by ``single_arm.pick`` and ``dual_arm.parallel_pick`` only. Drawer pull uses
+    :func:`robot_action_composer.motion_generation.tasks.drawer.build_single_arm_pull_drawer_sequence`.
+
+    Lift / Retreat (aligned with :func:`build_bimanual_carry_sequence`):
+
+    - ``retreat_offset`` (motion/output frame): **Lift** delta from CloseIn; ``None`` → skip Lift
+      (YAML ``ee_lift_offset`` omitted).
+    - ``retreat_xyz`` (motion/output frame): **Retreat** delta from the post-lift pose (CloseIn when
+      Lift skipped); ``None`` → skip Retreat (YAML ``ee_retreat_offset`` omitted).
+    """
     # pick_clearance 采用工具系语义：沿 ee_base_orientation 的局部 +Z 偏移到 close-in。
     cdx, cdy, cdz = rotate_vector_by_quat((0.0, 0.0, pick_clearance), ee_base_orientation)
     close_in_pose = Pose()
@@ -451,22 +456,27 @@ def build_single_arm_pick_sequence(
         approach_pose.orientation = close_in_pose.orientation
     else:
         approach_pose = close_in_pose
+    lift_dx, lift_dy, lift_dz = (
+        (float(retreat_offset[0]), float(retreat_offset[1]), float(retreat_offset[2]))
+        if retreat_offset is not None
+        else (0.0, 0.0, 0.0)
+    )
     lift_pose = Pose()
-    lift_pose.position.x = close_in_pose.position.x + retreat_offset[0]
-    lift_pose.position.y = close_in_pose.position.y + retreat_offset[1]
-    lift_pose.position.z = close_in_pose.position.z + retreat_offset[2]
+    lift_pose.position.x = close_in_pose.position.x + lift_dx
+    lift_pose.position.y = close_in_pose.position.y + lift_dy
+    lift_pose.position.z = close_in_pose.position.z + lift_dz
     lift_pose.orientation = close_in_pose.orientation
+    has_lift = retreat_offset is not None
+    retreat_pose: Pose | None
     if retreat_xyz is not None:
+        rdx, rdy, rdz = (float(retreat_xyz[0]), float(retreat_xyz[1]), float(retreat_xyz[2]))
         retreat_pose = Pose()
-        retreat_pose.position.x = lift_pose.position.x + retreat_xyz[0]
-        retreat_pose.position.y = lift_pose.position.y + retreat_xyz[1]
-        retreat_pose.position.z = lift_pose.position.z + retreat_xyz[2]
+        retreat_pose.position.x = lift_pose.position.x + rdx
+        retreat_pose.position.y = lift_pose.position.y + rdy
+        retreat_pose.position.z = lift_pose.position.z + rdz
         retreat_pose.orientation = lift_pose.orientation
     else:
-        retreat_pose = _make_pose_from_target(
-            close_in_pose, offset=retreat_direction_extra,
-            direction_vec=direction_vec, orientation=ee_base_orientation,
-        )
+        retreat_pose = None
     stages: list[ArmStage] = []
     i = 1
     if has_prepare:
@@ -492,20 +502,25 @@ def build_single_arm_pick_sequence(
             skip_arrival_check=True,
         )
     )
-    i += 1
-    stages.append(
-        ArmStage(
-            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[3]),
-            ArmTarget(pose=lift_pose, gripper=gripper_closed),
+    if has_lift:
+        i += 1
+        stages.append(
+            ArmStage(
+                _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[3]),
+                ArmTarget(pose=lift_pose, gripper=gripper_closed),
+            )
         )
-    )
-    i += 1
-    stages.append(
-        ArmStage(
-            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[4]),
-            ArmTarget(pose=retreat_pose, gripper=gripper_open if retreat_open_gripper else gripper_closed),
+    if retreat_pose is not None:
+        i += 1
+        stages.append(
+            ArmStage(
+                _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[4]),
+                ArmTarget(
+                    pose=retreat_pose,
+                    gripper=gripper_open if retreat_open_gripper else gripper_closed,
+                ),
+            )
         )
-    )
     return stages
 
 

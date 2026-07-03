@@ -8,6 +8,7 @@ Drawer Cartesian 序列只读 :class:`DrawerGeometryConfig`，
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,7 +39,7 @@ class DrawerGeometryConfig:
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     #: 拉手闭合段沿工具系 +Z 的位移（米），语义同 ``pick_clearance``；写入 ``skill_defaults.single_arm.drawer``。
     drawer_clearance: float = 0.01
-    #: 拉开抽屉时沿拉手拉出方向末段行程（米），语义同 pick 的 ``retreat_direction_extra``；在 ``skill_defaults.single_arm.drawer`` 中配置。
+    #: 拉开抽屉时沿拉手拉出方向的行程（米）；在 ``skill_defaults.single_arm.drawer`` 中配置。
     pull_distance: float = 0.18
     #: 拉手预接近（工具系 ``[x,y,z]``，语义与 ``single_arm.pick.prepare_offset`` 相同，但**仅**用于 ``pull_open`` / ``close_push``）。省略或 ``None`` 时不生成预接近段（**不**读取 ``pick.prepare_offset``）。
     prepare_offset: tuple[float, float, float] | None = None
@@ -82,6 +83,42 @@ def _clone_pose(src: Pose) -> Pose:
     dst.orientation.z = float(src.orientation.z)
     dst.orientation.w = float(src.orientation.w)
     return dst
+
+
+def _unit_direction_xyz(vec: tuple[float, float, float]) -> tuple[float, float, float]:
+    vx, vy, vz = float(vec[0]), float(vec[1]), float(vec[2])
+    norm = math.sqrt(vx * vx + vy * vy + vz * vz)
+    if norm < 1e-8:
+        raise ValueError(f"pull direction norm is too small: {vec!r}")
+    return (vx / norm, vy / norm, vz / norm)
+
+
+def _append_drawer_pull_stage(
+    arm_seq: list[ArmStage],
+    *,
+    pull_direction_xyz: tuple[float, float, float],
+    pull_distance: float,
+    gripper_closed: float,
+    stage_prefix: str,
+) -> list[ArmStage]:
+    """Grasp 后沿拉手方向拉开抽屉（``single_arm.drawer.pull_open`` 专用，不走通用 pick retreat）。"""
+    if pull_distance <= 1e-12:
+        return arm_seq
+    ux, uy, uz = _unit_direction_xyz(pull_direction_xyz)
+    grasp_pose = arm_seq[-1].target.pose
+    pull_pose = _clone_pose(grasp_pose)
+    pull_pose.position.x += ux * float(pull_distance)
+    pull_pose.position.y += uy * float(pull_distance)
+    pull_pose.position.z += uz * float(pull_distance)
+    idx = len(arm_seq) + 1
+    out = list(arm_seq)
+    out.append(
+        ArmStage(
+            f"{stage_prefix}-{idx}-Pull",
+            ArmTarget(pose=pull_pose, gripper=gripper_closed),
+        )
+    )
+    return out
 
 
 def _append_pull_open_release_retreat_stages(
@@ -141,15 +178,18 @@ def build_single_arm_pull_drawer_sequence(
             ee_base_orientation=ee_base_orientation,
             prepare_offset=prep,
             pick_clearance=drawer.drawer_clearance,
-            ee_pick_direction_vector=pull_direction_xyz,
             object_position_offset=(0.0, 0.0, 0.0),
-            retreat_direction_extra=pull_distance,
-            retreat_offset=(0.0, 0.0, 0.0),
-            retreat_xyz=None,
             gripper_open=gripper_open,
             gripper_closed=gripper_closed,
             stage_prefix=stage_prefix,
         )
+    )
+    arm_seq = _append_drawer_pull_stage(
+        arm_seq,
+        pull_direction_xyz=pull_direction_xyz,
+        pull_distance=pull_distance,
+        gripper_closed=gripper_closed,
+        stage_prefix=stage_prefix,
     )
     arm_seq = _append_pull_open_release_retreat_stages(
         arm_seq,
@@ -179,11 +219,7 @@ def build_single_arm_close_drawer_sequence(
             ee_base_orientation=ee_base_orientation,
             prepare_offset=prep,
             pick_clearance=drawer.drawer_clearance,
-            ee_pick_direction_vector=pull_direction_xyz,
             object_position_offset=(0.0, 0.0, 0.0),
-            retreat_direction_extra=0,
-            retreat_offset=(0.0, 0.0, 0.0),
-            retreat_xyz=None,
             gripper_open=gripper_open,
             gripper_closed=gripper_closed,
             stage_prefix="PickPlaceFlow",

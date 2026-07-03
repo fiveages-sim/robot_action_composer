@@ -201,15 +201,13 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     prepare_offset = pk.prepare_offset
     pick_clearance = pk.pick_clearance
     ee_base_orientation = pk.ee_base_orientation
-    ee_pick_axis = pk.ee_pick_axis
-    ee_pick_direction_vector = pk.ee_pick_direction_vector
     motion_frame_id = pk.motion_frame_id
     tf_lookup_timeout = pk.tf_lookup_timeout
     arm_movel_duration = pk.arm_movel_duration
     retreat_offset = (
         rotate_vector_by_quat(pk.ee_lift_offset, ee_base_orientation)
         if pk.ee_lift_offset is not None
-        else (0.0, 0.0, 0.0)
+        else None
     )
     retreat_xyz = (
         rotate_vector_by_quat(pk.ee_retreat_offset, ee_base_orientation)
@@ -236,8 +234,6 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         ee_base_orientation=ee_base_orientation,
         prepare_offset=prepare_offset,
         pick_clearance=pick_clearance,
-        ee_pick_axis=ee_pick_axis,
-        ee_pick_direction_vector=ee_pick_direction_vector,
         retreat_offset=retreat_offset,
         retreat_xyz=retreat_xyz,
         retreat_open_gripper=pk.retreat_open_gripper,

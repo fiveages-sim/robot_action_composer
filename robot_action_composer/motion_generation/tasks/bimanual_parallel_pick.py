@@ -82,7 +82,7 @@ def _pick_retreat_world_vectors(
     """与 ``single_arm.skill_pick`` 一致：工具系抬升/后撤先按 ``ee_base_orientation`` 旋到世界系再交给序列构建。"""
     q = arm.ee_base_orientation
     retreat_offset = (
-        rotate_vector_by_quat(arm.ee_lift_offset, q) if arm.ee_lift_offset is not None else (0.0, 0.0, 0.0)
+        rotate_vector_by_quat(arm.ee_lift_offset, q) if arm.ee_lift_offset is not None else None
     )
     retreat_xyz = (
         rotate_vector_by_quat(arm.ee_retreat_offset, q) if arm.ee_retreat_offset is not None else None
@@ -107,8 +107,6 @@ def build_bimanual_parallel_pick_record_sequence(
         ee_base_orientation=left.ee_base_orientation,
         prepare_offset=left.prepare_offset,
         pick_clearance=left.pick_clearance,
-        ee_pick_axis=left.ee_pick_axis,
-        ee_pick_direction_vector=left.ee_pick_direction_vector,
         object_position_offset=(0.0, 0.0, 0.0),
         retreat_offset=lo,
         retreat_xyz=lz,
@@ -121,8 +119,6 @@ def build_bimanual_parallel_pick_record_sequence(
         ee_base_orientation=right.ee_base_orientation,
         prepare_offset=right.prepare_offset,
         pick_clearance=right.pick_clearance,
-        ee_pick_axis=right.ee_pick_axis,
-        ee_pick_direction_vector=right.ee_pick_direction_vector,
         object_position_offset=(0.0, 0.0, 0.0),
         retreat_offset=ro,
         retreat_xyz=rz,
