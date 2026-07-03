@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from robot_action_composer.cli.i18n import Lang, get_language, normalize_lang, resolve_language, set_language, t
-from robot_action_composer.discovery.registry_loader import load_motion_entries
+from robot_action_composer.cli.interactive import select_robot_from_registry
+from robot_action_composer.discovery.registry_loader import load_motion_entries, resolve_robot_profile_dir
 
 
 def _section_header(title: str) -> str:
@@ -423,12 +424,7 @@ def _motion_last_applies(
 
 
 def _robot_records_dir(*, workspace_dir: Path, robot_entry: dict[str, Any]) -> Path:
-    robot_dir_name = str(robot_entry.get("robot_dir_name", "")).strip()
-    if not robot_dir_name:
-        robot_dir_name = str(robot_entry.get("label", "")).strip()
-    if not robot_dir_name:
-        raise ValueError("Cannot resolve robot records directory: robot_dir_name and label are empty")
-    return workspace_dir / "robots" / robot_dir_name / "records"
+    return resolve_robot_profile_dir(workspace_dir, robot_entry) / "records"
 
 
 def _default_object_resolution_json_output(
@@ -703,7 +699,7 @@ def _scenes_for_chain_segment(
 
 def _prompt_chain_segments(*, robot_entry: dict[str, Any]) -> list[_ChainSegmentDict]:
     """Interactive: one folder for the chain; per segment pick task + scene (or ``__all__``)."""
-    from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.cli.interactive import (  # pyright: ignore[reportMissingImports]
         select_task_with_optional_group,
     )
 
@@ -774,7 +770,7 @@ def run_motion_generation(
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         format_merged_queue_summary,
     )
-    from robot_action_composer.dataset_recording.launcher import (  # pyright: ignore[reportMissingImports]
+    from robot_action_composer.cli.interactive import (  # pyright: ignore[reportMissingImports]
         prompt_positive_int,
         select_task_with_optional_group,
     )
@@ -883,10 +879,10 @@ def run_motion_generation(
         else:
             robot_keys = list(registry.keys())
             default_robot = "dobot_cr5" if "dobot_cr5" in registry else robot_keys[0]
-            robot_key_sel = _select_option(
+            robot_key_sel = select_robot_from_registry(
                 title=t("motion.select_robot"),
-                options=robot_keys,
-                default_value=default_robot,
+                registry=registry,
+                default_key=default_robot,
             )
             robot_entry = registry[robot_key_sel]
             robot_key = robot_key_sel

@@ -5,14 +5,17 @@ from __future__ import annotations
 from typing import Any
 
 from geometry_msgs.msg import Pose
-from ros2_robot_interface import ROS2RobotInterface  # pyright: ignore[reportMissingImports]
+from ros2_robot_interface import (  # pyright: ignore[reportMissingImports]
+    ROS2RobotInterface,
+    ROS2RobotInterfaceConfig,
+)
 
 
 def build_ros2_interface_from_robot_cfg(robot_cfg: Any) -> ROS2RobotInterface:
     """Build interface from ``robot_cfg.ros2_interface`` (a :class:`ROS2RobotInterfaceConfig`)."""
     cfg = getattr(robot_cfg, "ros2_interface", None)
     if cfg is None:
-        raise ValueError("robot_cfg must define ros2_interface (ROS2RobotInterfaceConfig)")
+        cfg = ROS2RobotInterfaceConfig()
     return ROS2RobotInterface(cfg)
 
 

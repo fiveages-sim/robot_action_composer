@@ -64,14 +64,17 @@ def _build_task_runtime(task_entry_cfg: Any) -> Any:
     )
 
 
-def _pointcloud_supported(robot_cfg: Any) -> bool:
-    cameras = getattr(robot_cfg, "cameras", {}) or {}
+def _pointcloud_supported(lerobot_cfg: Any) -> bool:
+    if lerobot_cfg is None:
+        return False
+    cameras = getattr(lerobot_cfg, "cameras", {}) or {}
     has_depth_topic = any(getattr(cam, "depth_topic_name", None) for cam in cameras.values())
-    has_depth_info = getattr(robot_cfg, "depth_info_topic", None) is not None
+    has_depth_info = bool(getattr(lerobot_cfg, "depth_info_topic", None))
     return bool(has_depth_topic and has_depth_info)
 
 
 def run_record_datasets(*, isaac_dir: Path) -> None:
+    from robot_action_composer.cli.interactive import select_robot_from_registry
     from robot_action_composer.dataset_recording.launcher import (
         collect_runtime_options,
         select_option,
@@ -109,7 +112,11 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
             }
         registry[key] = {
             "label": entry["label"],
-            "robot_cfg": entry["robot_cfg"],
+            "motion_cfg": entry["motion_cfg"],
+            "lerobot_cfg": entry["lerobot_cfg"],
+            "robot_cfg": entry["motion_cfg"],
+            "robot_dir_name": entry.get("robot_dir_name", ""),
+            "robot_dir_relpath": entry.get("robot_dir_relpath", ""),
             "tasks": tasks,
             "task_groups": entry.get("task_groups", {}),
         }
@@ -120,7 +127,12 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
     print("=" * 70)
     robot_keys = list(registry.keys())
     default_robot = "dobot_cr5" if "dobot_cr5" in registry else robot_keys[0]
-    robot_key = select_option(title="Select robot", options=registry, default_key=default_robot)
+    robot_key = select_robot_from_registry(
+        title="Select robot",
+        registry=registry,
+        default_key=default_robot,
+        show_label=True,
+    )
     robot_entry = registry[robot_key]
 
     task_keys = list(robot_entry["tasks"].keys())
@@ -166,7 +178,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
     profile_entry = task_entry["record_profiles"][profile_key]
 
     loops, enable_keypoint_pcd, enable_manual_episode_check = collect_runtime_options(
-        pointcloud_supported=_pointcloud_supported(robot_entry["robot_cfg"]),
+        pointcloud_supported=_pointcloud_supported(robot_entry["lerobot_cfg"]),
         default_enable_keypoint_pcd=False,
     )
     print(
@@ -183,7 +195,8 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
     merged_task_queue = merge_task_queue_skill_params(list(tq), skill_defaults, scene_skill_params)
 
     task_entry["runner"](
-        robot_cfg=robot_entry["robot_cfg"],
+        motion_cfg=robot_entry["motion_cfg"],
+        lerobot_cfg=robot_entry["lerobot_cfg"],
         task_cfg=task_runtime,
         record_cfg=profile_entry["record_cfg"],
         loops=loops,

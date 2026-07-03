@@ -8,7 +8,6 @@ import time
 from typing import Any, Callable, Optional
 
 import numpy as np
-from lerobot.datasets.utils import build_dataset_frame, hw_to_dataset_features  # pyright: ignore[reportMissingImports]
 
 
 class DatasetRecorder:
@@ -57,6 +56,8 @@ class DatasetRecorder:
         *,
         include_depth_feature: bool,
     ) -> tuple[dict[str, dict], list[str], bool]:
+        from lerobot.datasets.utils import hw_to_dataset_features  # pyright: ignore[reportMissingImports]
+
         obs_hw_features = dict(robot.observation_features)
         if not include_depth_feature:
             obs_hw_features = {
@@ -193,6 +194,8 @@ class DatasetRecorder:
             )
 
     def _extract_observation_frame(self, obs: dict[str, float]) -> tuple[dict[str, object], dict[str, float]]:
+        from lerobot.datasets.utils import build_dataset_frame  # pyright: ignore[reportMissingImports]
+
         frame = build_dataset_frame(self.dataset_features, obs, prefix="observation")
         ee_pose = {
             "x": obs.get("left_ee.pos.x", 0.0),

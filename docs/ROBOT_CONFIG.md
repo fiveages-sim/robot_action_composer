@@ -1,72 +1,111 @@
-# 机器人配置：`robot_config.py` 与目录约定
+# 机器人目录与配置约定
 
-本文件说明与 **`robot_action_composer`** 的 **运动 / 录制 / 推理** 入口配合时，每个机器人目录应包含哪些文件、**`robot_config.py`** 需导出哪些符号，以及 **`ROBOT_CFG`** 在运动运行时会被用到哪些字段。
+每个 `robots/<RobotName>/` 目录包含任务编排与（可选）LeRobot 录制/推理配置。
 
-任务 YAML 格式见 **[TASK_CONFIG_YAML.md](TASK_CONFIG_YAML.md)**。包内分层与调用关系见包根 **[README.md](../README.md)**（**架构与设计**）。
+## 目录布局
 
----
+支持两种路径（仅一层厂商分组）：
 
-## 1. 目录约定
+```
+robots/FiveAges_W2/          # 扁平
+  robot.yaml
+  task_configs/
 
-对每个机器人，约定一个**子目录**（名称任意，通常与机型一致），其下至少包含：
+robots/galbot/Galbot_One/    # 按厂商分组
+  robot.yaml
+  task_configs/
+```
 
-| 路径 | 作用 |
-|------|------|
-| **`robot_config.py`** | 导出 `ROBOT_KEY`、`ROBOT_LABEL`、`ROBOT_CFG` |
-| **`task_configs/`** | 若干 `*.yaml` / `*.yml` 任务文件（见 `task_config_io.discover_task_configs`） |
+每个机器人目录需包含 `robot.yaml`（或遗留 motion 配置）与 `task_configs/`。`robots/<Vendor>/` 仅作分组时自身不应同时具备上述文件。
 
-**发现逻辑**（`robot_action_composer.discovery.registry_loader.load_motion_entries`）：
+| 文件 | 内容 | 依赖 | 用途 |
+|------|------|------|------|
+| `robot.yaml` | `key`、`label`、motion 字段、`ros2_interface` | `pyyaml`；构建时懒加载 `ros2_robot_interface` | `motion-generation`、任务队列执行 |
+| `lerobot_config.py` | `LEROBOT_CFG` | 无（类型定义在 composer 内） | `record_datasets`、IsaacSim `inference.py` |
 
-- 遍历传入的 **`isaac_dir / "robots"`**（在 monorepo 中一般为 `examples/IsaacSim/robots`）。
-- 跳过以 `__` 开头的目录。
-- 若存在 **`robot_config.py`** 且存在 **`task_configs/`** 目录，则加载该机器人并扫描任务 YAML。
-- **`ROBOT_KEY` / `ROBOT_LABEL`** 若未在模块中定义，则分别回退为**目录名小写**与**目录名**（仍须提供 **`ROBOT_CFG`**）。
+解析结果为 `MotionRobotConfig`（见 `robot_action_composer.config.robot_profiles`）。
 
-各机器人子目录内可有 **`README.md`**（相机、话题、仿真路径等），与 composer 加载无强耦合。
+## `robot.yaml` 格式
 
----
+```yaml
+key: my_robot
+label: My Robot
+base_link_entity_path: /World/.../base_link   # Isaac Sim 专用
+gripper_action_wait: 2.0                      # 仅在与默认值不同时填写
 
-## 2. `robot_config.py` 导出约定
+ros2_interface:                               # 可选；省略则 preset=auto
+  preset: auto                                # auto | single_arm | ocs2_single_arm
+  pose_position_threshold: 0.02
+  pose_orientation_threshold: 0.05
+```
 
-模块**必须**导出 **`ROBOT_CFG`**；**`ROBOT_KEY`** 与 **`ROBOT_LABEL`** 强烈建议显式写出（缺省时由发现逻辑用目录名推断，见上一节）。
+motion 相关字段可写在根级，或集中在 `motion:` 下（与根级合并，根级优先）：
 
-| 符号 | 类型 | 含义 |
-|------|------|------|
-| **`ROBOT_KEY`** | `str` | 注册表键（小写+下划线，如 `dobot_cr5`），用于 CLI / 推理侧选择机器人 |
-| **`ROBOT_LABEL`** | `str` | 人类可读名称 |
-| **`ROBOT_CFG`** | 任意对象（通常为 `@dataclass`） | 传给 `run_task_queue(robot_cfg=...)`、构造 `ROS2RobotInterface`、录制与推理 |
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `gripper_control_mode` | `target_command` | 夹爪控制模式 |
+| `base_link_entity_path` | `""` | Isaac Sim base_link Prim 路径 |
+| `fsm_switch_delay` | `0.1` | 状态机切换延迟（秒） |
+| `post_reset_wait` | `1.0` | reset 后等待（秒） |
+| `arrival_timeout` | `3.0` | 到位超时（秒） |
+| `arrival_poll` | `0.05` | 到位轮询间隔（秒） |
+| `gripper_action_wait` | `0.3` | 夹爪动作后等待（秒） |
 
-`ROBOT_CFG` 的具体类型由各示例仓库自定义；**`ros2_robot_interface`** 中的 **`ROS2RobotInterfaceConfig`** 通常作为其字段 **`ros2_interface`**（或通过 `build_ros2_interface_from_robot_cfg` 所识别的结构）出现。
+### `ros2_interface.preset`
 
----
+`ros2_robot_interface` 在 `connect()` 时会自动探测双臂、夹爪、arm/body/head topic 等。
 
-## 3. 运动运行时对 `ROBOT_CFG` 的依赖
+| preset | 用途 |
+|--------|------|
+| `auto`（默认） | 仅设置到位阈值，其余靠 auto-detect |
+| `single_arm` | 单臂非标准夹爪（如 Realman RM75） |
+| `ocs2_single_arm` | 单臂 + `ocs2_arm_controller`（如 Dobot CR5） |
 
-**`task_runtime.runner.run_task_queue`** 与 **`runner.build_queue_runtime_context`** 等路径会直接读取（属性访问）的常见字段包括：
+**示例 — 双臂标准栈（最简）：**
 
-- **`gripper_control_mode`**：例如 `target_command`，用于解析开合夹爪数值。
-- **`base_link_entity_path`**：Isaac 中 base link 的 prim 路径；用于 stamped 帧名截取与实体位姿服务。任务 YAML 可在 **`runtime_defaults`** 或场景根下提供同名键**覆盖**本字段（合并进 **`MergedQueueConfig.base_link_entity_path`**）；统一推理入口亦会在选用任务后把该覆盖应用到 `ROBOT_CFG`。
-- **`fsm_switch_delay`**、**`post_reset_wait`**：FSM 切换与 reset 后等待。
-- **`arrival_timeout`**、**`arrival_poll`**、**`gripper_action_wait`**：阶段到达与夹爪节拍。
+```yaml
+key: galbot_one
+label: Galbot One
+base_link_entity_path: /World/Galbot_One/Chassis/base_link/base_link
+```
 
-环境 reset 等还会用到任务侧合并配置（如 `MergedQueueConfig` 中的 pick 物体路径），与 **`ROBOT_CFG`** 分工不同：前者多来自 **YAML**，后者多描述**机器人与接口**。
+**示例 — 单臂 OCS2 + 自定义夹爪：**
 
-**录制**（`[recording]` extra，经 **`lerobot_robot_ros2`** 构建 **`ROS2Robot`**）通常沿用示例里与 **`ROS2Robot`** / 相机观测相关的字段（如各示例 `robot_config.py` 中的 **`cameras`**、**`depth_camera_name`**、**`depth_info_topic`** 等）；若缺失，仅影响观测与深度相关功能，不一定影响纯运动队列（`run_task_queue` 不直接读这些字段）。
+```yaml
+key: dobot_cr5
+label: Dobot CR5
+base_link_entity_path: /World/CR5/base_link
+ros2_interface:
+  preset: ocs2_single_arm
+  gripper_joint_name: gripper_joint
+  gripper_command_topic: gripper_joint/position_command
+  left_gripper_controller_name: gripper_controller
+  left_gripper_target_percent_topic: /gripper_controller/target_percent
+```
 
----
+发现结果中的 `robot_dir_relpath`（相对 `robots/`）用于 CLI 按厂商文件夹分组展示；扁平布局（无 `/`）时菜单与原先一致。
 
-## 4. 与 `ROS2RobotInterface` 的衔接
+## 字段划分（motion vs lerobot）
 
-**`robot_action_composer.ros_interface_utils.build_ros2_interface_from_robot_cfg`** 根据各项目的 **`ROBOT_CFG`** 形状构造 **`ROS2RobotInterface`**。具体字段以 **`ros2_robot_interface`** 包内 **`ROS2RobotInterfaceConfig`** 及示例 `robot_config.py` 为准。
+| 字段 | motion (`robot.yaml`) | lerobot (`lerobot_config.py`) |
+|------|:---------------------:|:-----------------------------:|
+| `ros2_interface` | ✓ | （录制时复用 motion 侧） |
+| `gripper_control_mode` | ✓ | ✓ |
+| `base_link_entity_path` | ✓ | — |
+| `post_reset_wait`, `fsm_switch_delay` | ✓ | ✓（推理） |
+| `arrival_*`, `gripper_action_wait` | ✓ | — |
+| `robot_id`, `cameras`, `depth_*` | — | ✓ |
 
----
+## 安装与环境
 
-## 5. 参考示例
+- **仅任务编排**：`./init.sh all-motion` 或菜单 3 / 5（无需 PyPI `lerobot`）。
+- **录制 / 推理**：`./init.sh install-lerobot` 或菜单 4 / 6 / `./init.sh all`。
 
-在 monorepo 中可直接对照（`examples/IsaacSim/robots/` 下各机型目录，均含 `robot_config.py` + `task_configs/`）：
+## 发现机制
 
-- **`DobotCR5/robot_config.py`**：单臂 + 相机等录制相关字段
-- **`Agibot_G1/robot_config.py`**：双臂 + WBC 等接口配置
-- **`FiveAges_W2/`**、**`Galbot_One/`** 等：导航、双臂或单臂组合示例
+- `load_motion_entries()` 扫描 `robots/<Robot>/` 与 `robots/<Vendor>/<Robot>/`（一层分组），优先加载 `robot.yaml`；兼容 `motion_config.py`、`robot_config.py`（带 deprecation 警告）。
+- `load_lerobot_profile()` 加载 `lerobot_config.py`（录制 / 推理入口调用）。
 
-将新机器人放入同一 `robots/` 树下并满足上述约定后，`load_motion_entries` 即可自动发现。
+## 过渡期
+
+仍支持遗留 `motion_config.py`（`ROBOT_KEY` / `ROBOT_LABEL` / `MOTION_CFG`）与合并的 `robot_config.py`；请迁移为 `robot.yaml` + 可选 `lerobot_config.py`。

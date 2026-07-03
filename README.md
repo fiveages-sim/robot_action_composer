@@ -15,7 +15,7 @@ https://github.com/user-attachments/assets/4c3bcf28-f2cd-4c47-83a0-ecccb30c1891
 | **本 README** | 包简介、**运行环境**（Python 3.12 / ROS 2 Jazzy）、**架构与调用关系**（分层、`task_queue`、技能注册表）、安装与依赖约定 |
 | [docs/SKILLS_REFERENCE.md](docs/SKILLS_REFERENCE.md) | 各技能参数、默认值与 YAML 示例 |
 | [docs/TASK_CONFIG_YAML.md](docs/TASK_CONFIG_YAML.md) | 任务 YAML 格式、`skill_defaults` / `skill_params`、加载与合并规则 |
-| [docs/ROBOT_CONFIG.md](docs/ROBOT_CONFIG.md) | `robot_config.py`、`ROBOT_CFG` 与 `robots/` 目录约定 |
+| [docs/ROBOT_CONFIG.md](docs/ROBOT_CONFIG.md) | `robot.yaml` / `lerobot_config.py` 与 `robots/` 目录约定 |
 
 monorepo 内 **Isaac Sim 环境、USD、工作空间** 步骤见 **`examples/IsaacSim/README.md`**。
 
@@ -164,7 +164,7 @@ flowchart TB
 ### 2.5 配置发现与其它模块
 
 - **`task_config_io.py`**：扫描 **`task_configs/*.yaml`**，**`queue_root_overrides`**（禁止根级嵌套 `pick`/`place`/`handover`/`carry`/`drawer` 等）。
-- **`discovery/registry_loader.py`**：扫描 **`robots/*/robot_config.py`** + **`task_configs/`**，供 CLI / inference。
+- **`discovery/registry_loader.py`**：扫描 **`robots/*/`** 与 **`robots/*/*/`**（一层厂商分组）下的 `robot.yaml` + `task_configs/`，供 CLI / inference。
 
 | 路径 | 作用 |
 |------|------|
@@ -190,7 +190,7 @@ motion-generation --lang zh
 # 交互模式：配置菜单选 3「偏好设置」（有上次选择时为 4），可配置语言与 object-resolution JSON 录制
 ```
 
-`motion-generation` 扫描 `workspace_dir/robots/*/robot_config.py` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。上次选择与偏好（`lang`、`record_object_resolution_json` 等）缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。
+`motion-generation` 扫描 `workspace_dir/robots/` 下扁平或一层分组（`robots/<Vendor>/<Robot>/`）的 `robot.yaml` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。上次选择与偏好（`lang`、`record_object_resolution_json` 等）缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。
 | **`dataset_recording/`** | `[recording]` extra：**`ROS2Robot`**、episode 写入；运动中仍走 **`robot.ros2_interface`** |
 
 ### 2.6 依赖关系要点
@@ -212,19 +212,30 @@ motion-generation --lang zh
 
 ## 4. 安装
 
-在 monorepo 中（路径按你的仓库为准），**先满足上文第 3 节「运行环境」**：
+在 monorepo 根目录推荐使用 **`./init.sh`**（见主仓库 README）：
+
+```bash
+./init.sh all-motion          # 仅任务编排（interface + robot_action_composer）
+./init.sh install-lerobot     # 额外：PyTorch + lerobot + 插件（录制 / 推理）
+# 或一次性：./init.sh all
+```
+
+手动安装（路径按你的仓库为准），**先满足上文第 3 节「运行环境」**：
 
 ```bash
 pip install -e submodules/ros2_robot_interface
 pip install -e submodules/robot_action_composer
 ```
 
-需要录制时再装：
+需要录制 / 推理时再装：
 
 ```bash
 pip install -e lerobot_robot_ros2
-pip install -e "submodules/robot_action_composer[recording]"
+pip install -e lerobot_camera_ros2
+pip install "lerobot==0.5.1"
 ```
+
+机器人配置拆分为 `robot.yaml`（任务编排）与 `lerobot_config.py`（可选），见 [docs/ROBOT_CONFIG.md](docs/ROBOT_CONFIG.md)。
 
 ---
 
