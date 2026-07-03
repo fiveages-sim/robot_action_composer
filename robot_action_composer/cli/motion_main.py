@@ -1,58 +1,33 @@
 #!/usr/bin/env python3
-"""IsaacSim motion-generation launcher (robot_action_composer)."""
+"""Motion-generation CLI (robot_action_composer)."""
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import fields
 from datetime import datetime
-import importlib.util
 import json
 import sys
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-
-def _load_module(module_name: str, file_path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Failed to load module spec: {file_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+from robot_action_composer.cli.i18n import Lang, get_language, normalize_lang, resolve_language, set_language, t
+from robot_action_composer.discovery.registry_loader import load_motion_entries
 
 
-def _discover_task_registry(isaac_dir: Path) -> dict[str, dict[str, Any]]:
-    from robot_action_composer.task_config_io import discover_task_configs
+def _section_header(title: str) -> str:
+    return f"\n{'=' * 70}\n{title}\n{'=' * 70}"
 
-    robots_root = isaac_dir / "robots"
-    if not robots_root.is_dir():
-        return {}
 
-    registry: dict[str, dict[str, Any]] = {}
-    for robot_dir in sorted(p for p in robots_root.iterdir() if p.is_dir() and not p.name.startswith("__")):
-        robot_cfg_file = robot_dir / "robot_config.py"
-        task_cfg_dir = robot_dir / "task_configs"
-        if not robot_cfg_file.is_file() or not task_cfg_dir.is_dir():
-            continue
-
-        robot_mod = _load_module(f"{robot_dir.name}_robot_cfg", robot_cfg_file)
-        robot_key = getattr(robot_mod, "ROBOT_KEY", robot_dir.name.lower())
-        robot_label = getattr(robot_mod, "ROBOT_LABEL", robot_dir.name)
-        robot_cfg = getattr(robot_mod, "ROBOT_CFG")
-
-        discovery = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
-
-        if discovery.tasks:
-            registry[robot_key] = {
-                "label": robot_label,
-                "robot_dir_name": robot_dir.name,
-                "robot_cfg": robot_cfg,
-                "tasks": discovery.tasks,
-                "task_groups": discovery.task_groups,
-            }
-
-    return registry
+def _select_yes_no(*, title: str, default_yes: bool = True) -> bool:
+    yes = t("option.yes")
+    no = t("option.no")
+    picked = _select_option(
+        title=title,
+        options=[yes, no],
+        default_value=yes if default_yes else no,
+    )
+    return picked == yes
 
 
 def _select_option(
@@ -65,15 +40,11 @@ def _select_option(
     """List-based menu. With ``allow_back=True``, ``0`` / ``b`` / ``back`` returns ``\"__back__\"``."""
     print(f"\n{title}")
     if allow_back:
-        print("  0. « Back (previous menu)")
+        print(t("option.back"))
     for idx, name in enumerate(options, start=1):
-        suffix = " (default)" if name == default_value else ""
+        suffix = t("option.default_suffix") if name == default_value else ""
         print(f"  {idx}. {name}{suffix}")
-    prompt = (
-        "Select option (0/b/back = previous, Enter = default): "
-        if allow_back
-        else "Select option (press Enter for default): "
-    )
+    prompt = t("option.select_with_back") if allow_back else t("option.select")
     raw = input(prompt).strip()
     if raw == "":
         return default_value
@@ -90,7 +61,7 @@ def _select_option(
             return options[index]
     if raw in options:
         return raw
-    print(f"[info] Invalid option '{raw}', using default '{default_value}'.")
+    print(t("option.invalid", raw=raw, default=default_value))
     return default_value
 
 
@@ -100,7 +71,8 @@ class _ChainSegmentDict(TypedDict):
 
 
 class _MotionLastDict(TypedDict, total=False):
-    isaac_dir: str
+    lang: str
+    record_object_resolution_json: bool
     robot_key: str
     """Single-task mode (default when ``mode`` is absent or ``single``)."""
     task_key: str
@@ -112,12 +84,15 @@ class _MotionLastDict(TypedDict, total=False):
     reset_env: bool
 
 
-def _motion_last_file() -> Path:
-    return Path.home() / ".cache" / "robot_action_composer" / "motion_last.json"
+_MOTION_LAST_FILENAME = ".motion_last.json"
 
 
-def _load_motion_last() -> _MotionLastDict | None:
-    path = _motion_last_file()
+def _motion_last_file(workspace_dir: Path) -> Path:
+    return workspace_dir / _MOTION_LAST_FILENAME
+
+
+def _load_motion_last(workspace_dir: Path) -> _MotionLastDict | None:
+    path = _motion_last_file(workspace_dir)
     if not path.is_file():
         return None
     try:
@@ -129,9 +104,238 @@ def _load_motion_last() -> _MotionLastDict | None:
     return raw  # type: ignore[return-value]
 
 
+def _merge_motion_prefs(workspace_dir: Path, **updates: Any) -> None:
+    path = _motion_last_file(workspace_dir)
+    data: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = dict(raw)
+        except (OSError, json.JSONDecodeError):
+            pass
+    data.update(updates)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _load_cached_lang(workspace_dir: Path) -> Lang | None:
+    last = _load_motion_last(workspace_dir)
+    if not last:
+        return None
+    raw = last.get("lang")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return normalize_lang(raw)
+    except ValueError:
+        return None
+
+
+def _load_record_object_resolution_pref(workspace_dir: Path) -> bool:
+    last = _load_motion_last(workspace_dir)
+    if not last:
+        return False
+    raw = last.get("record_object_resolution_json")
+    return raw is True
+
+
+def _save_motion_lang(workspace_dir: Path, lang: Lang) -> None:
+    _merge_motion_prefs(workspace_dir, lang=lang)
+
+
+def _save_record_object_resolution_pref(workspace_dir: Path, enabled: bool) -> None:
+    _merge_motion_prefs(workspace_dir, record_object_resolution_json=bool(enabled))
+
+
+def _language_display_name(lang: Lang) -> str:
+    return t("motion.language_name_zh") if lang == "zh" else t("motion.language_name_en")
+
+
+def _prompt_language(*, workspace_dir: Path) -> None:
+    zh_label = t("motion.lang_option_zh")
+    en_label = t("motion.lang_option_en")
+    current = get_language()
+    default = zh_label if current == "zh" else en_label
+    picked = _select_option(
+        title=t("motion.select_language"),
+        options=[zh_label, en_label],
+        default_value=default,
+    )
+    new_lang: Lang = "zh" if picked == zh_label else "en"
+    set_language(new_lang)
+    _save_motion_lang(workspace_dir, new_lang)
+    print(t("motion.language_saved", lang=_language_display_name(new_lang)))
+
+
+def _prompt_record_object_resolution_pref(*, workspace_dir: Path) -> None:
+    current = _load_record_object_resolution_pref(workspace_dir)
+    enabled = _select_yes_no(title=t("motion.record_object_resolution"), default_yes=current)
+    _save_record_object_resolution_pref(workspace_dir, enabled)
+    value = t("motion.reset.yes") if enabled else t("motion.reset.no")
+    print(t("motion.record_object_resolution_saved", value=value))
+
+
+def _print_menu_divider() -> None:
+    print(t("motion.menu_divider"))
+
+
+def _task_brief_value(*, robot_entry: dict[str, Any] | None, task_key: str) -> str:
+    if robot_entry is None:
+        return task_key
+    task_entry = (robot_entry.get("tasks") or {}).get(task_key)
+    if not isinstance(task_entry, dict):
+        return task_key
+    label = str(task_entry.get("label") or "").strip()
+    if label and label != task_key:
+        return t("motion.brief.task_with_label", task_key=task_key, label=label)
+    return task_key
+
+
+def _format_motion_last_brief(
+    last: _MotionLastDict,
+    *,
+    registry: dict[str, dict[str, Any]],
+) -> list[str]:
+    lines: list[str] = []
+    rk = last.get("robot_key", "?")
+    robot_entry = registry.get(rk) if isinstance(rk, str) else None
+    lines.append(t("motion.brief.robot", value=rk))
+    n = last.get("num_runs", 1)
+    re_ = last.get("reset_env", True)
+    reset_s = t("motion.reset.yes") if re_ else t("motion.reset.no")
+    mode = last.get("mode", "single")
+    if mode == "chain":
+        lines.append(t("motion.brief.mode", value=t("motion.brief.mode_chain")))
+        segs = last.get("chain_segments") or []
+        seg_idx = 0
+        for s in segs:
+            if not isinstance(s, dict):
+                continue
+            seg_idx += 1
+            tk = str(s.get("task_key", "?"))
+            sc = s.get("scene", "?")
+            sc_display = t("motion.all_scenes") if sc == "__all__" else str(sc)
+            task_display = _task_brief_value(robot_entry=robot_entry, task_key=tk)
+            lines.append(
+                t("motion.brief.segment_item", index=seg_idx, task=task_display, scene=sc_display)
+            )
+    else:
+        tk = str(last.get("task_key", "?"))
+        sc = last.get("scene", "?")
+        scene_s = t("motion.all_scenes") if sc == "__all__" else str(sc)
+        lines.append(t("motion.brief.task", value=_task_brief_value(robot_entry=robot_entry, task_key=tk)))
+        lines.append(t("motion.brief.scene", value=scene_s))
+    lines.append(t("motion.brief.runs", value=n))
+    lines.append(t("motion.brief.reset_env", value=reset_s))
+    return lines
+
+
+def _print_last_selection_menu_option(
+    last: _MotionLastDict,
+    *,
+    registry: dict[str, dict[str, Any]],
+) -> None:
+    print(t("motion.last_selection_header"))
+    for line in _format_motion_last_brief(last, registry=registry):
+        print(line)
+
+
+def _print_using_last_summary(
+    last: _MotionLastDict,
+    *,
+    registry: dict[str, dict[str, Any]],
+) -> None:
+    print(t("motion.using_last"))
+    for line in _format_motion_last_brief(last, registry=registry):
+        print(line)
+
+
+def _print_how_to_run_menu(
+    *,
+    last: _MotionLastDict,
+    registry: dict[str, dict[str, Any]],
+) -> None:
+    print(t("motion.how_to_run"))
+    _print_last_selection_menu_option(last, registry=registry)
+    print(t("motion.interactive_single"))
+    print(t("motion.interactive_chain"))
+    print()
+    _print_menu_divider()
+    print(t("motion.language_settings_how_to_run"))
+
+
+def _print_configure_menu() -> None:
+    print(t("motion.configure"))
+    print(t("motion.single_task"))
+    print(t("motion.multi_chain"))
+    print()
+    _print_menu_divider()
+    print(t("motion.language_settings"))
+
+
+def _prompt_settings(*, workspace_dir: Path) -> None:
+    while True:
+        record_current = t("motion.reset.yes") if _load_record_object_resolution_pref(workspace_dir) else t(
+            "motion.reset.no"
+        )
+        print(t("motion.settings_menu"))
+        print(t("motion.settings_language"))
+        print(t("motion.settings_object_resolution", current=record_current))
+        print(t("motion.settings_back"))
+        raw = input(t("motion.settings_select")).strip().lower()
+        if raw in ("", "0", "b", "back"):
+            return
+        if raw == "1":
+            _prompt_language(workspace_dir=workspace_dir)
+            continue
+        if raw == "2":
+            _prompt_record_object_resolution_pref(workspace_dir=workspace_dir)
+            continue
+
+
+def _prompt_interactive_entry_kind(
+    *,
+    workspace_dir: Path,
+    last: _MotionLastDict | None,
+    registry: dict[str, dict[str, Any]],
+) -> Literal["last_single", "last_chain", "interactive_single", "interactive_chain"]:
+    while True:
+        has_last = last is not None and _motion_last_applies(last, registry=registry)
+        if has_last:
+            assert last is not None
+            _print_how_to_run_menu(last=last, registry=registry)
+            raw = input(t("motion.select_mode")).strip().lower()
+            if raw in ("", "1"):
+                lm = last.get("mode", "single")
+                return "last_chain" if lm == "chain" else "last_single"
+            if raw == "2":
+                return "interactive_single"
+            if raw == "3":
+                return "interactive_chain"
+            if raw == "4":
+                _prompt_settings(workspace_dir=workspace_dir)
+                continue
+            return "interactive_single"
+
+        _print_configure_menu()
+        raw = input(t("motion.select_config")).strip().lower()
+        if raw in ("", "1"):
+            return "interactive_single"
+        if raw == "2":
+            return "interactive_chain"
+        if raw == "3":
+            _prompt_settings(workspace_dir=workspace_dir)
+            continue
+        return "interactive_single"
+
+
 def _save_motion_last(
     *,
-    isaac_dir: Path,
+    workspace_dir: Path,
     robot_key: str,
     num_runs: int,
     reset_env: bool,
@@ -140,11 +344,10 @@ def _save_motion_last(
     mode: Literal["single", "chain"] = "single",
     chain_segments: list[_ChainSegmentDict] | None = None,
 ) -> None:
-    path = _motion_last_file()
+    path = _motion_last_file(workspace_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
-            "isaac_dir": str(isaac_dir.resolve()),
             "robot_key": robot_key,
             "num_runs": int(num_runs),
             "reset_env": bool(reset_env),
@@ -157,6 +360,8 @@ def _save_motion_last(
                 data["task_key"] = task_key
             if scene is not None:
                 data["scene"] = scene
+        data["lang"] = get_language()
+        data["record_object_resolution_json"] = _load_record_object_resolution_pref(workspace_dir)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     except OSError:
         pass
@@ -180,11 +385,8 @@ def _segment_valid_for_robot(
 def _motion_last_applies(
     last: _MotionLastDict,
     *,
-    isaac_dir: Path,
     registry: dict[str, dict[str, Any]],
 ) -> bool:
-    if str(isaac_dir.resolve()) != last.get("isaac_dir"):
-        return False
     rk = last.get("robot_key")
     if not isinstance(rk, str):
         return False
@@ -220,40 +422,18 @@ def _motion_last_applies(
     return True
 
 
-def _format_motion_last_line(last: _MotionLastDict) -> str:
-    rk = last.get("robot_key", "?")
-    n = last.get("num_runs", 1)
-    re_ = last.get("reset_env", True)
-    reset_s = "yes" if re_ else "no"
-    mode = last.get("mode", "single")
-    if mode == "chain":
-        segs = last.get("chain_segments") or []
-        parts: list[str] = []
-        for s in segs:
-            if isinstance(s, dict):
-                tk = s.get("task_key", "?")
-                sc = s.get("scene", "?")
-                parts.append(f"{tk}@{sc}")
-        chain_s = " + ".join(parts) if parts else "?"
-        return f"robot={rk}  mode=chain  segments=[{chain_s}]  runs={n}  reset_env={reset_s}"
-    tk = last.get("task_key", "?")
-    sc = last.get("scene", "?")
-    scene_s = "ALL_SCENES" if sc == "__all__" else str(sc)
-    return f"robot={rk}  task={tk}  scene={scene_s}  runs={n}  reset_env={reset_s}"
-
-
-def _robot_records_dir(*, isaac_dir: Path, robot_entry: dict[str, Any]) -> Path:
+def _robot_records_dir(*, workspace_dir: Path, robot_entry: dict[str, Any]) -> Path:
     robot_dir_name = str(robot_entry.get("robot_dir_name", "")).strip()
     if not robot_dir_name:
         robot_dir_name = str(robot_entry.get("label", "")).strip()
     if not robot_dir_name:
         raise ValueError("Cannot resolve robot records directory: robot_dir_name and label are empty")
-    return isaac_dir / "robots" / robot_dir_name / "records"
+    return workspace_dir / "robots" / robot_dir_name / "records"
 
 
 def _default_object_resolution_json_output(
     *,
-    isaac_dir: Path,
+    workspace_dir: Path,
     robot_entry: dict[str, Any],
     robot_key: str,
     task_key: str,
@@ -263,22 +443,21 @@ def _default_object_resolution_json_output(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_scene = scene.replace("/", "_")
     filename = f"{robot_key}_{task_key}_{safe_scene}_run{run_idx + 1:02d}_{ts}.object_resolution.json"
-    return _robot_records_dir(isaac_dir=isaac_dir, robot_entry=robot_entry) / filename
+    return _robot_records_dir(workspace_dir=workspace_dir, robot_entry=robot_entry) / filename
 
 
-def _prompt_record_object_resolution_json() -> bool:
-    return (
-        _select_option(
-            title="Record object-resolution JSON during this sim run?",
-            options=["yes", "no"],
-            default_value="no",
-        )
-        == "yes"
-    )
+def _resolve_record_object_resolution_json(
+    *,
+    workspace_dir: Path,
+    object_resolution_json: Path | None,
+) -> bool:
+    if object_resolution_json is not None:
+        return True
+    return _load_record_object_resolution_pref(workspace_dir)
 
 
-def _discover_object_resolution_jsons(*, isaac_dir: Path, robot_entry: dict[str, Any]) -> list[Path]:
-    records_dir = _robot_records_dir(isaac_dir=isaac_dir, robot_entry=robot_entry)
+def _discover_object_resolution_jsons(*, workspace_dir: Path, robot_entry: dict[str, Any]) -> list[Path]:
+    records_dir = _robot_records_dir(workspace_dir=workspace_dir, robot_entry=robot_entry)
     if not records_dir.is_dir():
         return []
     files: list[Path] = []
@@ -313,7 +492,7 @@ def _filter_object_resolution_jsons(
 
 
 def _read_object_resolution_json_manual() -> Path:
-    raw = input("Object resolution JSON path for real robot replay: ").strip()
+    raw = input(t("motion.object_resolution_manual")).strip()
     if not raw:
         raise ValueError("object resolution JSON path is required for real robot replay")
     json_path = Path(raw).expanduser()
@@ -324,7 +503,7 @@ def _read_object_resolution_json_manual() -> Path:
 
 def _prompt_object_resolution_json_path(
     *,
-    isaac_dir: Path,
+    workspace_dir: Path,
     robot_entry: dict[str, Any],
     robot_key: str,
     task_key: str,
@@ -336,8 +515,8 @@ def _prompt_object_resolution_json_path(
             raise FileNotFoundError(f"object resolution JSON not found: {override_path}")
         return override_path
 
-    records_dir = _robot_records_dir(isaac_dir=isaac_dir, robot_entry=robot_entry)
-    all_jsons = _discover_object_resolution_jsons(isaac_dir=isaac_dir, robot_entry=robot_entry)
+    records_dir = _robot_records_dir(workspace_dir=workspace_dir, robot_entry=robot_entry)
+    all_jsons = _discover_object_resolution_jsons(workspace_dir=workspace_dir, robot_entry=robot_entry)
     jsons = _filter_object_resolution_jsons(
         all_jsons,
         robot_key=robot_key,
@@ -346,22 +525,22 @@ def _prompt_object_resolution_json_path(
     )
     if not jsons:
         if not records_dir.is_dir():
-            print(f"[info] Records directory not found: {records_dir}")
+            print(t("motion.records_dir_missing", path=records_dir))
         else:
-            print(f"[info] No object resolution JSON files found in: {records_dir}")
+            print(t("motion.no_object_resolution_json", path=records_dir))
         return _read_object_resolution_json_manual()
 
     default_path = jsons[0]
-    print("\n可用的 object resolution JSON 文件")
+    print(t("motion.available_object_resolution_json"))
     for idx, path in enumerate(jsons, start=1):
-        suffix = " (default, newest)" if path == default_path else ""
+        suffix = t("motion.json_default_newest") if path == default_path else ""
         try:
-            display = path.relative_to(isaac_dir.resolve())
+            display = path.relative_to(workspace_dir.resolve())
         except ValueError:
             display = path
         print(f"  {idx}. {path.name}  [{display}]{suffix}")
 
-    raw = input("Select JSON (Enter = default): ").strip()
+    raw = input(t("motion.select_json")).strip()
     if raw == "":
         selected = default_path
     elif raw.isdigit():
@@ -449,7 +628,7 @@ def _merged_queue_allowed_keys() -> frozenset[str]:
 
 
 def _group_display_name(group_key: str) -> str:
-    return "Top level" if group_key == "" else group_key
+    return t("group.top_level") if group_key == "" else group_key
 
 
 def _group_task_keys(robot_entry: dict[str, Any], group_key: str) -> list[str]:
@@ -465,13 +644,13 @@ def _prompt_chain_group(*, robot_entry: dict[str, Any]) -> str:
         raise ValueError("Robot has no task_groups with tasks")
     if len(group_keys) == 1:
         only = group_keys[0]
-        print(f"[info] Chain locked to folder {_group_display_name(only)!r}.")
+        print(t("motion.chain_locked_folder", folder=_group_display_name(only)))
         return only
     labels = [_group_display_name(gk) for gk in group_keys]
     preferred = "siemens" if "siemens" in group_keys else group_keys[0]
     default_label = _group_display_name(preferred)
     picked = _select_option(
-        title="Select task folder for entire chain",
+        title=t("motion.select_chain_folder"),
         options=labels,
         default_value=default_label,
         allow_back=False,
@@ -500,7 +679,7 @@ def _scenes_for_chain_segment(
         scene_options.append("__all__")
 
     scene = _select_option(
-        title=f"Select scene for {task_key!r} (Enter = default; __all__ = all unused presets)",
+        title=t("motion.select_scene_for_task", task=task_key),
         options=scene_options,
         default_value=default_scene,
         allow_back=True,
@@ -509,14 +688,14 @@ def _scenes_for_chain_segment(
         return []
     if scene == "__all__":
         if not unused_for_all:
-            print(
-                f"[info] All scenes for {task_key!r} are already in the chain; "
-                "pick a single scene instead."
-            )
+            print(t("motion.all_scenes_in_chain", task=task_key))
             return []
         print(
-            f"[info] Segment uses ALL_SCENES — expanding to {len(unused_for_all)} "
-            f"sub-segment(s): {', '.join(unused_for_all)}"
+            t(
+                "motion.expand_all_scenes",
+                count=len(unused_for_all),
+                scenes=", ".join(unused_for_all),
+            )
         )
         return unused_for_all
     return [scene]
@@ -549,14 +728,14 @@ def _prompt_chain_segments(*, robot_entry: dict[str, Any]) -> list[_ChainSegment
     while True:
         while True:
             task_key = select_task_with_optional_group(
-                title_group=f"Select task (folder {folder!r}, locked)",
-                title_task="Select task for this segment",
+                title_group=t("motion.select_task_locked_folder", folder=folder),
+                title_task=t("motion.select_task_segment"),
                 tasks=task_options,
                 task_groups=filtered_groups,
                 default_task_key=default_task_key,
             )
             if task_key not in filtered_tasks:
-                print(f"[info] Task {task_key!r} is not in folder {folder!r}. Pick again.")
+                print(t("motion.task_not_in_folder", task=task_key, folder=folder))
                 continue
             scene_names = _scenes_for_chain_segment(
                 task_key=task_key,
@@ -571,9 +750,9 @@ def _prompt_chain_segments(*, robot_entry: dict[str, Any]) -> list[_ChainSegment
             used_pairs.add((task_key, sn))
         default_task_key = task_key
         if len(segments) >= 30:
-            print("[info] Reached 30 segments; finishing chain.")
+            print(t("motion.chain_max_segments"))
             break
-        more = input("Add another segment to the chain? [y/N]: ").strip().lower()
+        more = input(t("motion.add_chain_segment")).strip().lower()
         if more not in {"y", "yes"}:
             break
     if not segments:
@@ -583,13 +762,15 @@ def _prompt_chain_segments(*, robot_entry: dict[str, Any]) -> list[_ChainSegment
 
 def run_motion_generation(
     *,
-    isaac_dir: Path,
+    workspace_dir: Path,
     robot_key: str | None = None,
     task_key: str | None = None,
     scene: str | None = None,
     object_resolution_json: Path | None = None,
     no_reset: bool = False,
+    lang: str | None = None,
 ) -> None:
+    set_language(resolve_language(cli_lang=lang, cached_lang=_load_cached_lang(workspace_dir)))
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         format_merged_queue_summary,
     )
@@ -600,170 +781,181 @@ def run_motion_generation(
     from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
     from robot_action_composer.isaac_sim import SimTimeHelper  # pyright: ignore[reportMissingImports]
 
-    registry = _discover_task_registry(isaac_dir)
+    registry = load_motion_entries(workspace_dir)
+    robots_root = workspace_dir / "robots"
     if not registry:
-        raise RuntimeError("No motion-generation capable robot configs found under examples/IsaacSim/robots")
+        raise RuntimeError(
+            f"No motion-generation capable robot configs found under {robots_root}"
+        )
 
-    print("IsaacSim Run Motion Generation")
-    print("=" * 70)
+    cli_robot_key = robot_key
+    cli_task_key = task_key
+    cli_scene = scene
 
-    last = _load_motion_last()
-    entry_kind: Literal["last_single", "last_chain", "interactive_single", "interactive_chain"] = (
-        "interactive_single"
-    )
-    if last and _motion_last_applies(last, isaac_dir=isaac_dir, registry=registry):
-        line = _format_motion_last_line(last)
-        print("\nHow to run?")
-        print(f"  1. Last selection — {line}")
-        print("  2. Interactive — single task")
-        print("  3. Interactive — multi-segment chain")
-        raw_mode = input("Select [1/2/3] (Enter = 1): ").strip().lower()
-        if raw_mode in ("", "1"):
-            lm = last.get("mode", "single")
-            entry_kind = "last_chain" if lm == "chain" else "last_single"
-        elif raw_mode == "3":
-            entry_kind = "interactive_chain"
-        else:
-            entry_kind = "interactive_single"
-    else:
-        print("\nConfigure motion generation:")
-        print("  1. Single task")
-        print("  2. Multi-segment chain")
-        raw_cfg = input("Select [1/2] (Enter = 1): ").strip().lower()
-        entry_kind = "interactive_chain" if raw_cfg == "2" else "interactive_single"
-
-    robot_key: str
-    num_runs: int
-    reset_env: bool
-    robot_entry: dict[str, Any]
-    task_key: str = ""
-    scene: str = ""
-    task_entry: dict[str, Any] | None = None
-    chain_segments: list[_ChainSegmentDict] = []
-
-    if robot_key is not None and task_key is not None:
-        if robot_key not in registry:
-            raise ValueError(f"Unknown robot key: {robot_key!r}")
-        robot_entry = registry[robot_key]
-        if task_key not in robot_entry["tasks"]:
-            raise ValueError(f"Unknown task key {task_key!r} for robot {robot_key!r}")
-        task_entry = robot_entry["tasks"][task_key]
+    if cli_robot_key is not None and cli_task_key is not None:
+        if cli_robot_key not in registry:
+            raise ValueError(f"Unknown robot key: {cli_robot_key!r}")
+        robot_entry = registry[cli_robot_key]
+        if cli_task_key not in robot_entry["tasks"]:
+            raise ValueError(f"Unknown task key {cli_task_key!r} for robot {cli_robot_key!r}")
+        task_entry = robot_entry["tasks"][cli_task_key]
         scene_presets_cli = task_entry["scene_presets"]
-        if scene is None:
+        if cli_scene is None:
             scene = str(task_entry.get("default_scene") or next(iter(scene_presets_cli)))
+        else:
+            scene = cli_scene
         if scene != "__all__" and scene not in scene_presets_cli:
-            raise ValueError(f"Unknown scene {scene!r} for task {task_key!r}")
+            raise ValueError(f"Unknown scene {scene!r} for task {cli_task_key!r}")
+        robot_key = cli_robot_key
+        task_key = cli_task_key
         num_runs = 1
         reset_env = not no_reset
-        entry_kind = "interactive_single"
-        print(
-            f"\n[info] CLI selection: robot={robot_key} task={task_key} "
-            f"scene={scene} reset_env={'yes' if reset_env else 'no'}"
+        entry_kind: Literal["last_single", "last_chain", "interactive_single", "interactive_chain"] = (
+            "interactive_single"
         )
-    elif entry_kind == "last_single" and last:
-        robot_key = str(last["robot_key"])
-        task_key = str(last["task_key"])
-        scene = str(last["scene"])
-        num_runs = int(last.get("num_runs", 1))
-        reset_env = bool(last.get("reset_env", True))
-        robot_entry = registry[robot_key]
-        task_entry = robot_entry["tasks"][task_key]
-        print(f"\n[info] Using last selection: {_format_motion_last_line(last)}")
-    elif entry_kind == "last_chain" and last:
-        robot_key = str(last["robot_key"])
-        num_runs = int(last.get("num_runs", 1))
-        reset_env = bool(last.get("reset_env", True))
-        robot_entry = registry[robot_key]
-        raw_segs = last.get("chain_segments")
-        if not isinstance(raw_segs, list):
-            raise RuntimeError("Last chain selection is invalid (missing chain_segments)")
-        chain_segments = [
-            {"task_key": str(s["task_key"]), "scene": str(s["scene"])}
-            for s in raw_segs
-            if isinstance(s, dict) and "task_key" in s and "scene" in s
-        ]
-        if not chain_segments:
-            raise RuntimeError("Last chain selection is empty")
-        print(f"\n[info] Using last selection: {_format_motion_last_line(last)}")
+        chain_segments: list[_ChainSegmentDict] = []
+        print(t("motion.title"))
+        print("=" * 70)
+        print(
+            t(
+                "motion.cli_selection",
+                robot=robot_key,
+                task=task_key,
+                scene=scene,
+                reset=t("motion.reset.yes") if reset_env else t("motion.reset.no"),
+            )
+        )
     else:
-        robot_keys = list(registry.keys())
-        default_robot = "dobot_cr5" if "dobot_cr5" in registry else robot_keys[0]
-        robot_key = _select_option(title="Select robot", options=robot_keys, default_value=default_robot)
-        robot_entry = registry[robot_key]
-
-        if entry_kind == "interactive_chain":
-            chain_segments = _prompt_chain_segments(robot_entry=robot_entry)
-            num_runs = prompt_positive_int(
-                "How many full-chain motion runs? (Enter = 1): ",
-                default=1,
-                min_value=1,
+        print(t("motion.title"))
+        print(t("motion.current_language", lang=_language_display_name(get_language())))
+        record_on = _load_record_object_resolution_pref(workspace_dir)
+        print(
+            t(
+                "motion.current_record_object_resolution",
+                value=t("motion.reset.yes") if record_on else t("motion.reset.no"),
             )
-            if num_runs > 1:
-                reset_env = True
-                print(
-                    "[info] Multiple chain runs: each run resets on the first segment only "
-                    "(same pattern as multi-scene motion)."
-                )
-            else:
-                reset_env = _select_option(
-                    title="Reset environment on first segment only?",
-                    options=["yes", "no"],
-                    default_value="yes",
-                ) == "yes"
+        )
+        print("=" * 70)
+
+        last = _load_motion_last(workspace_dir)
+        entry_kind = _prompt_interactive_entry_kind(
+            workspace_dir=workspace_dir,
+            last=last,
+            registry=registry,
+        )
+
+        robot_key_sel: str
+        num_runs: int
+        reset_env: bool
+        robot_entry: dict[str, Any]
+        task_key = ""
+        scene = ""
+        task_entry: dict[str, Any] | None = None
+        chain_segments = []
+
+        if entry_kind == "last_single" and last:
+            robot_key_sel = str(last["robot_key"])
+            task_key = str(last["task_key"])
+            scene = str(last["scene"])
+            num_runs = int(last.get("num_runs", 1))
+            reset_env = bool(last.get("reset_env", True))
+            robot_entry = registry[robot_key_sel]
+            task_entry = robot_entry["tasks"][task_key]
+            robot_key = robot_key_sel
+            _print_using_last_summary(last, registry=registry)
+        elif entry_kind == "last_chain" and last:
+            robot_key_sel = str(last["robot_key"])
+            num_runs = int(last.get("num_runs", 1))
+            reset_env = bool(last.get("reset_env", True))
+            robot_entry = registry[robot_key_sel]
+            robot_key = robot_key_sel
+            raw_segs = last.get("chain_segments")
+            if not isinstance(raw_segs, list):
+                raise RuntimeError("Last chain selection is invalid (missing chain_segments)")
+            chain_segments = [
+                {"task_key": str(s["task_key"]), "scene": str(s["scene"])}
+                for s in raw_segs
+                if isinstance(s, dict) and "task_key" in s and "scene" in s
+            ]
+            if not chain_segments:
+                raise RuntimeError("Last chain selection is empty")
+            _print_using_last_summary(last, registry=registry)
         else:
-            tasks_map = robot_entry["tasks"]
-            task_options = {
-                key: {"label": str(meta.get("label", key))}
-                for key, meta in tasks_map.items()
-            }
-            default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
-            while True:
-                task_key = select_task_with_optional_group(
-                    title_group="Select task folder",
-                    title_task="Select task",
-                    tasks=task_options,
-                    task_groups=robot_entry.get("task_groups", {}),
-                    default_task_key=default_task_key,
-                )
-                task_entry = robot_entry["tasks"][task_key]
-
-                scene_presets = task_entry["scene_presets"]
-                scene_names = list(scene_presets.keys())
-                default_scene = task_entry["default_scene"]
-                if default_scene not in scene_names and scene_names:
-                    default_scene = scene_names[0]
-                scene = _select_option(
-                    title="Select config",
-                    options=(scene_names + ["__all__"]),
-                    default_value=default_scene,
-                    allow_back=True,
-                )
-                if scene == "__back__":
-                    continue
-                break
-
-            num_runs = prompt_positive_int(
-                "How many motion runs? (Enter = 1): ",
-                default=1,
-                min_value=1,
+            robot_keys = list(registry.keys())
+            default_robot = "dobot_cr5" if "dobot_cr5" in registry else robot_keys[0]
+            robot_key_sel = _select_option(
+                title=t("motion.select_robot"),
+                options=robot_keys,
+                default_value=default_robot,
             )
+            robot_entry = registry[robot_key_sel]
+            robot_key = robot_key_sel
 
-            if num_runs > 1:
-                reset_env = True
-                print(
-                    "[info] Multiple motion runs: each run will reset the environment "
-                    "& randomize the object (same as record episodes)."
+            if entry_kind == "interactive_chain":
+                chain_segments = _prompt_chain_segments(robot_entry=robot_entry)
+                num_runs = prompt_positive_int(
+                    t("motion.chain_runs"),
+                    default=1,
+                    min_value=1,
                 )
+                if num_runs > 1:
+                    reset_env = True
+                    print(t("motion.chain_multi_reset"))
+                else:
+                    reset_env = _select_yes_no(
+                        title=t("motion.reset_first_segment"),
+                        default_yes=True,
+                    )
             else:
-                reset_env = _select_option(
-                    title="Reset environment & randomize object?",
-                    options=["yes", "no"],
-                    default_value="yes",
-                ) == "yes"
+                tasks_map = robot_entry["tasks"]
+                task_options = {
+                    key: {"label": str(meta.get("label", key))}
+                    for key, meta in tasks_map.items()
+                }
+                default_task_key = "pick_place" if "pick_place" in task_options else next(iter(task_options))
+                while True:
+                    task_key = select_task_with_optional_group(
+                        title_group=t("motion.select_task_folder"),
+                        title_task=t("motion.select_task"),
+                        tasks=task_options,
+                        task_groups=robot_entry.get("task_groups", {}),
+                        default_task_key=default_task_key,
+                    )
+                    task_entry = robot_entry["tasks"][task_key]
+
+                    scene_presets = task_entry["scene_presets"]
+                    scene_names = list(scene_presets.keys())
+                    default_scene = task_entry["default_scene"]
+                    if default_scene not in scene_names and scene_names:
+                        default_scene = scene_names[0]
+                    scene = _select_option(
+                        title=t("motion.select_scene_config"),
+                        options=(scene_names + ["__all__"]),
+                        default_value=default_scene,
+                        allow_back=True,
+                    )
+                    if scene == "__back__":
+                        continue
+                    break
+
+                num_runs = prompt_positive_int(
+                    t("motion.motion_runs"),
+                    default=1,
+                    min_value=1,
+                )
+
+                if num_runs > 1:
+                    reset_env = True
+                    print(t("motion.multi_run_reset"))
+                else:
+                    reset_env = _select_yes_no(
+                        title=t("motion.reset_randomize"),
+                        default_yes=True,
+                    )
 
     if entry_kind in ("last_chain", "interactive_chain"):
         _save_motion_last(
-            isaac_dir=isaac_dir,
+            workspace_dir=workspace_dir,
             robot_key=robot_key,
             num_runs=num_runs,
             reset_env=reset_env,
@@ -773,7 +965,7 @@ def run_motion_generation(
     else:
         assert task_entry is not None
         _save_motion_last(
-            isaac_dir=isaac_dir,
+            workspace_dir=workspace_dir,
             robot_key=robot_key,
             task_key=task_key,
             scene=scene,
@@ -802,7 +994,7 @@ def run_motion_generation(
         scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
         scenes_to_run = list(scene_presets.keys()) if scene == "__all__" else [scene]
         json_path = _prompt_object_resolution_json_path(
-            isaac_dir=isaac_dir,
+            workspace_dir=workspace_dir,
             robot_entry=robot_entry,
             robot_key=robot_key,
             task_key=task_key,
@@ -813,7 +1005,7 @@ def run_motion_generation(
             mode="replay",
             replay_json_path=str(json_path),
         )
-        print(f"[ObjectResolution] Real replay from: {json_path}")
+        print(t("motion.real_replay", path=json_path))
         use_stamped = task_entry.get("use_stamped", True)
         interface = build_ros2_interface_from_robot_cfg(robot_entry["robot_cfg"])
         sim_time = WallTimeHelper()
@@ -821,10 +1013,10 @@ def run_motion_generation(
         try:
             interface.connect()
             connected = True
-            label = "real object-resolution replay"
+            label = t("motion.real_replay_label")
             if scene == "__all__":
                 label += " (__all__)"
-            print(f"[OK] Robot connected ({label})")
+            print(t("motion.robot_connected", label=label))
             for scene_idx, scene_name in enumerate(scenes_to_run):
                 runtime, merged_queue = _build_runtime_for_scene(
                     task_entry=task_entry,
@@ -833,11 +1025,17 @@ def run_motion_generation(
                 )
                 print(format_merged_queue_summary(scene_name, runtime))
                 print(
-                    f"\n{'=' * 70}\nReal replay "
-                    f"(scene {scene_idx + 1}/{len(scenes_to_run)}: {scene_name})\n{'=' * 70}"
+                    _section_header(
+                        t(
+                            "motion.real_replay_header",
+                            index=scene_idx + 1,
+                            total=len(scenes_to_run),
+                            scene=scene_name,
+                        )
+                    )
                 )
                 if scene_idx > 0:
-                    print("[info] REAL __all__ replay: continuing to next scene without env reset.")
+                    print(t("motion.real_all_no_reset"))
                 run_task_queue_interactive_on_connected_interface(
                     interface=interface,
                     sim_time=sim_time,
@@ -856,10 +1054,13 @@ def run_motion_generation(
             sim_time.shutdown()
             if connected:
                 interface.disconnect()
-                print("[OK] Robot disconnected")
+                print(t("motion.robot_disconnected"))
         return
 
-    record_object_resolution_json = object_resolution_json is not None or _prompt_record_object_resolution_json()
+    record_object_resolution_json = _resolve_record_object_resolution_json(
+        workspace_dir=workspace_dir,
+        object_resolution_json=object_resolution_json,
+    )
 
     if entry_kind in ("last_chain", "interactive_chain"):
         for run_idx in range(num_runs):
@@ -869,7 +1070,7 @@ def run_motion_generation(
             try:
                 interface.connect()
                 connected = True
-                print("[OK] Robot connected (multi-segment chain)")
+                print(t("motion.chain_connected"))
                 prev_chain_task_key: str | None = None
                 for seg_idx, seg in enumerate(chain_segments):
                     tk = seg["task_key"]
@@ -879,7 +1080,7 @@ def run_motion_generation(
                     object_resolution = None
                     if record_object_resolution_json:
                         record_json_path = object_resolution_json or _default_object_resolution_json_output(
-                            isaac_dir=isaac_dir,
+                            workspace_dir=workspace_dir,
                             robot_entry=robot_entry,
                             robot_key=robot_key,
                             task_key=tk,
@@ -890,7 +1091,7 @@ def run_motion_generation(
                             mode="live",
                             record_json_path=str(record_json_path),
                         )
-                        print(f"[ObjectResolution] Sim live recording to: {record_json_path}")
+                        print(t("motion.sim_recording", path=record_json_path))
                     consecutive_same_task_in_chain = (
                         prev_chain_task_key is not None and tk == prev_chain_task_key
                     )
@@ -902,19 +1103,27 @@ def run_motion_generation(
                     print(format_merged_queue_summary(scene_name, runtime))
                     should_reset_env = reset_env and (seg_idx == 0)
                     print(
-                        f"\n{'=' * 70}\nChain run {run_idx + 1}/{num_runs} — "
-                        f"segment {seg_idx + 1}/{len(chain_segments)}  "
-                        f"task={tk!r}  scene={scene_name}\n{'=' * 70}"
+                        _section_header(
+                            t(
+                                "motion.chain_run_title",
+                                run=run_idx + 1,
+                                total_runs=num_runs,
+                                seg=seg_idx + 1,
+                                total_seg=len(chain_segments),
+                                task=tk,
+                                scene=scene_name,
+                            )
+                        )
                     )
                     if seg_idx > 0 and reset_env:
-                        print(
-                            "[info] Chain: skipping env reset for segments after the first "
-                            "(robot state continues across segments)."
-                        )
+                        print(t("motion.chain_skip_reset_detail"))
                     if consecutive_same_task_in_chain:
                         print(
-                            "[info] Chain: consecutive same task "
-                            f"{tk!r} (scene {scene_name!r}) — skip_when_not_first_scene blocks will be skipped."
+                            t(
+                                "motion.chain_skip_blocks_detail",
+                                task=tk,
+                                scene=scene_name,
+                            )
                         )
                     run_task_queue_on_connected_interface(
                         interface=interface,
@@ -934,7 +1143,7 @@ def run_motion_generation(
                 sim_time.shutdown()
                 if connected:
                     interface.disconnect()
-                    print("[OK] Robot disconnected")
+                    print(t("motion.robot_disconnected"))
         return
 
     assert task_entry is not None
@@ -947,7 +1156,7 @@ def run_motion_generation(
         object_resolution = None
         if record_object_resolution_json:
             record_json_path = object_resolution_json or _default_object_resolution_json_output(
-                isaac_dir=isaac_dir,
+                workspace_dir=workspace_dir,
                 robot_entry=robot_entry,
                 robot_key=robot_key,
                 task_key=task_key,
@@ -958,7 +1167,7 @@ def run_motion_generation(
                 mode="live",
                 record_json_path=str(record_json_path),
             )
-            print(f"[ObjectResolution] Sim live recording to: {record_json_path}")
+            print(t("motion.sim_recording", path=record_json_path))
 
         if run_all_scenes:
             interface = build_ros2_interface_from_robot_cfg(robot_entry["robot_cfg"])
@@ -967,23 +1176,28 @@ def run_motion_generation(
             try:
                 interface.connect()
                 connected = True
-                print("[OK] Robot connected (shared session for ALL_SCENES)")
+                print(t("motion.all_scenes_connected"))
                 for scene_idx, scene_name in enumerate(scenes_to_run):
                     runtime, merged_queue = _build_runtime_for_scene(task_entry=task_entry, scene=scene_name, allowed=allowed)
                     print(format_merged_queue_summary(scene_name, runtime))
                     should_reset_env = reset_env and (scene_idx == 0)
                     not_first_scene_in_batch = scene_idx > 0
                     print(
-                        f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} "
-                        f"(scene {scene_idx + 1}/{len(scenes_to_run)}: {scene_name})\n{'=' * 70}"
+                        _section_header(
+                            t(
+                                "motion.all_scenes_header",
+                                run=run_idx + 1,
+                                total=num_runs,
+                                index=scene_idx + 1,
+                                total_scenes=len(scenes_to_run),
+                                scene=scene_name,
+                            )
+                        )
                     )
                     if scene_idx > 0 and reset_env:
-                        print("[info] ALL_SCENES mode: skip env reset for sub-scenes after the first one.")
+                        print(t("motion.all_scenes_skip_reset"))
                     if not_first_scene_in_batch:
-                        print(
-                            "[info] ALL_SCENES: not first scene in batch — "
-                            "skip_when_not_first_scene blocks will be skipped."
-                        )
+                        print(t("motion.all_scenes_skip_blocks"))
                     run_task_queue_on_connected_interface(
                         interface=interface,
                         sim_time=sim_time,
@@ -1001,14 +1215,20 @@ def run_motion_generation(
                 sim_time.shutdown()
                 if connected:
                     interface.disconnect()
-                    print("[OK] Robot disconnected")
+                    print(t("motion.robot_disconnected"))
         else:
             scene_name = scenes_to_run[0]
             runtime, merged_queue = _build_runtime_for_scene(task_entry=task_entry, scene=scene_name, allowed=allowed)
             print(format_merged_queue_summary(scene_name, runtime))
             print(
-                f"\n{'=' * 70}\nMotion run {run_idx + 1}/{num_runs} "
-                f"(scene 1/1: {scene_name})\n{'=' * 70}"
+                _section_header(
+                    t(
+                        "motion.single_scene_header",
+                        run=run_idx + 1,
+                        total=num_runs,
+                        scene=scene_name,
+                    )
+                )
             )
             run_task_queue(
                 robot_cfg=robot_entry["robot_cfg"],
@@ -1020,3 +1240,64 @@ def run_motion_generation(
                 scene=scene_name,
                 object_resolution=object_resolution,
             )
+
+
+def resolve_workspace_dir(path: Path | None) -> Path:
+    if path is None:
+        return Path.cwd()
+    return path.expanduser().resolve()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Motion generation launcher")
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        default=None,
+        help="Workspace root containing robots/ (default: current working directory)",
+    )
+    parser.add_argument("--robot", type=str, default=None, help="Robot key (e.g. dobot_cr5)")
+    parser.add_argument("--task-key", type=str, default=None, help="Task key (e.g. pick_place)")
+    parser.add_argument(
+        "--scene",
+        type=str,
+        default=None,
+        help="Scene preset name (defaults to task default_scene)",
+    )
+    parser.add_argument(
+        "--object-resolution-json",
+        dest="object_resolution_json",
+        type=str,
+        default=None,
+        help="Optional override path for object-resolution JSON (sim: write; real: read)",
+    )
+    parser.add_argument("--no-reset", action="store_true", help="Skip environment reset (CLI mode only)")
+    parser.add_argument(
+        "--lang",
+        type=str,
+        default=None,
+        choices=("zh", "en"),
+        help="UI language: zh (Chinese) or en (English); default from MOTION_GENERATION_LANG or LANG",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    workspace_dir = resolve_workspace_dir(Path(args.workspace) if args.workspace else None)
+    json_path = (
+        Path(args.object_resolution_json).expanduser() if args.object_resolution_json else None
+    )
+    run_motion_generation(
+        workspace_dir=workspace_dir,
+        robot_key=args.robot,
+        task_key=args.task_key,
+        scene=args.scene,
+        object_resolution_json=json_path,
+        no_reset=args.no_reset,
+        lang=args.lang,
+    )
+
+
+if __name__ == "__main__":
+    main()

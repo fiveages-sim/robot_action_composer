@@ -24,6 +24,9 @@ recording = [
 # Recording (ROS2Robot + datasets): pip install -e "submodules/robot_action_composer[recording]"
 # lerobot_robot_ros2：仅录制等可选能力；抽屉/仿真四元数已用 ros2_robot_interface.utils.quat_pose。
 
+[project.scripts]
+motion-generation = "robot_action_composer.cli.motion_main:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["robot_action_composer*"]

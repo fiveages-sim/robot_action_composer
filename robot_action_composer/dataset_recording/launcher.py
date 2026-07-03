@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from robot_action_composer.cli.i18n import t
+
 
 def prompt_positive_int(
     message: str,
@@ -27,7 +29,7 @@ def prompt_positive_int(
         value = int(raw)
         return max(min_value, value)
     except Exception:
-        print(f"[info] invalid input, using default {default}")
+        print(t("prompt.invalid_int", default=default))
         return default
 
 
@@ -42,17 +44,13 @@ def select_option(
     keys = list(options.keys())
     print(f"\n{title}")
     if allow_back:
-        print("  0. « Back (previous menu)")
+        print(t("option.back"))
     for idx, key in enumerate(keys, start=1):
         label = options[key].get("label", key)
-        suffix = " (default)" if key == default_key else ""
+        suffix = t("option.default_suffix") if key == default_key else ""
         bracket = key if key else "top-level"
         print(f"  {idx}. {label} [{bracket}]{suffix}")
-    prompt = (
-        "Select option (0/b/back = previous, Enter = default): "
-        if allow_back
-        else "Select option (press Enter for default): "
-    )
+    prompt = t("option.select_with_back") if allow_back else t("option.select")
     raw = input(prompt).strip()
     if raw == "":
         return default_key
@@ -69,13 +67,13 @@ def select_option(
             return keys[idx]
     if raw in options:
         return raw
-    print(f"[info] Invalid option '{raw}', using default '{default_key}'.")
+    print(t("option.invalid", raw=raw, default=default_key))
     return default_key
 
 
 def task_group_menu_label(group_id: str) -> str:
     """Human label for a ``task_groups`` key (``\"\"`` = YAML directly under ``task_configs/``)."""
-    return "Top level" if group_id == "" else group_id
+    return t("group.top_level") if group_id == "" else group_id
 
 
 def select_task_with_optional_group(

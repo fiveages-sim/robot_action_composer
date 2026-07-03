@@ -40,6 +40,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# motion-generation last selection cache (per workspace cwd)
+.motion_last.json
+
 # Local datasets / recordings (large; keep out of repo by default)
 dataset/
 datasets/

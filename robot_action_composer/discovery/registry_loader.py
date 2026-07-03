@@ -20,19 +20,22 @@ def _load_module(module_name: str, file_path: Path) -> Any:
     return module
 
 
-def _ensure_package_paths(isaac_dir: Path) -> None:
+def _ensure_package_paths(workspace_dir: Path) -> None:
     """Best-effort: allow running from source tree without pip install of sibling packages."""
-    repo_root = isaac_dir.parents[1]
+    if workspace_dir.name == "IsaacSim" and len(workspace_dir.parents) > 1:
+        repo_root = workspace_dir.parents[1]
+    else:
+        repo_root = workspace_dir.parent
     for pkg_root in (repo_root / "lerobot_camera_ros2", repo_root / "lerobot_robot_ros2"):
         if pkg_root.is_dir() and str(pkg_root) not in sys.path:
             sys.path.insert(0, str(pkg_root))
 
 
-def load_motion_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
-    _ensure_package_paths(isaac_dir)
+def load_motion_entries(workspace_dir: Path) -> dict[str, dict[str, Any]]:
+    _ensure_package_paths(workspace_dir)
     from robot_action_composer.task_config_io import discover_task_configs
 
-    robots_root = isaac_dir / "robots"
+    robots_root = workspace_dir / "robots"
     entries: dict[str, dict[str, Any]] = {}
     if not robots_root.is_dir():
         return entries
@@ -49,9 +52,12 @@ def load_motion_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
         robot_cfg = getattr(robot_mod, "ROBOT_CFG")
 
         discovery = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir.name)
+        if not discovery.tasks:
+            continue
 
         entries[robot_key] = {
             "label": robot_label,
+            "robot_dir_name": robot_dir.name,
             "robot_cfg": robot_cfg,
             "tasks": discovery.tasks,
             "task_groups": discovery.task_groups,
@@ -59,12 +65,12 @@ def load_motion_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
     return entries
 
 
-def load_robot_entries(isaac_dir: Path) -> dict[str, dict[str, Any]]:
-    _ensure_package_paths(isaac_dir)
+def load_robot_entries(workspace_dir: Path) -> dict[str, dict[str, Any]]:
+    _ensure_package_paths(workspace_dir)
 
     from robot_action_composer.dataset_recording.runner import DEFAULT_RECORD_CFG, run_recording
 
-    motion_entries = load_motion_entries(isaac_dir)
+    motion_entries = load_motion_entries(workspace_dir)
     runner = run_recording
     base_record_cfg = DEFAULT_RECORD_CFG
     entries: dict[str, dict[str, Any]] = {}

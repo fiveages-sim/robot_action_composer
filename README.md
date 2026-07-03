@@ -171,6 +171,26 @@ flowchart TB
 | **`isaac_sim/`** | 仿真 reset、实体位姿服务、`SimTimeHelper` 等 |
 | **`ros_interface_utils.py`** | 从机器人配置构造 **`ROS2RobotInterface`**、handler 辅助 |
 | **`cli/motion_main.py` / `record_main.py`** | 运动与录制入口（`MergedQueueConfig` → `run_task_queue` 或录制管线） |
+
+**CLI（安装后可用）**
+
+```bash
+# 在含 robots/ 的工作区目录下（如 examples/IsaacSim）
+cd examples/IsaacSim
+motion-generation
+
+# 非交互
+motion-generation --robot dobot_cr5 --task-key pick_place --scene default
+
+# 指定工作区根（默认 cwd）
+motion-generation --workspace /path/to/workspace --robot dobot_cr5 --task-key pick_place
+
+# 界面语言（zh / en；也可用环境变量 MOTION_GENERATION_LANG）
+motion-generation --lang zh
+# 交互模式：配置菜单选 3「偏好设置」（有上次选择时为 4），可配置语言与 object-resolution JSON 录制
+```
+
+`motion-generation` 扫描 `workspace_dir/robots/*/robot_config.py` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。上次选择与偏好（`lang`、`record_object_resolution_json` 等）缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。
 | **`dataset_recording/`** | `[recording]` extra：**`ROS2Robot`**、episode 写入；运动中仍走 **`robot.ros2_interface`** |
 
 ### 2.6 依赖关系要点
