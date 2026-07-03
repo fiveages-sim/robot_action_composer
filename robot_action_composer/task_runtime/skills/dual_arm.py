@@ -351,6 +351,134 @@ def _carry_full_stages(
     )
 
 
+_CARRY_SPLIT_CACHE_KEY = "__dual_arm_carry_split_stages"
+
+
+def _resolve_carry_object_position(
+    ctx: QueueRuntimeContext,
+    cfg: BimanualCarryTaskConfig,
+) -> tuple[Any, str]:
+    include_orientation = _carry_needs_object_orientation(cfg)
+    if ctx.object_resolution is not None:
+        oc_base = resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=cfg.object_prim_path,
+            include_orientation=include_orientation,
+            arm_side="none",
+            object_role="carry_object",
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    else:
+        oc_base = get_object_pose_from_service(
+            ctx.base_world_pos,
+            ctx.base_world_quat,
+            cfg.object_prim_path,
+            include_orientation=include_orientation,
+        )
+    oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
+    ctx.carry_object_position = oc
+    return oc, _carry_execution_frame_id(cfg, ctx)
+
+
+def _carry_split_stages(
+    ctx: QueueRuntimeContext,
+    cfg: BimanualCarryTaskConfig,
+) -> tuple[list[StageTarget], str]:
+    cached = ctx.scratch_get(_CARRY_SPLIT_CACHE_KEY)
+    if isinstance(cached, Mapping):
+        raw_stages = cached.get("stages")
+        raw_frame = cached.get("frame_id")
+        if isinstance(raw_stages, list) and isinstance(raw_frame, str) and raw_stages:
+            return raw_stages, raw_frame
+
+    oc, exec_f = _resolve_carry_object_position(ctx, cfg)
+    stages = _carry_full_stages(ctx, cfg, oc, output_frame_id=exec_f)
+    ctx.scratch_put(_CARRY_SPLIT_CACHE_KEY, {"stages": stages, "frame_id": exec_f})
+    return stages, exec_f
+
+
+def _carry_stage_by_suffix(stages: list[StageTarget], suffix: str) -> StageTarget:
+    needle = f"-{suffix}"
+    for stage in stages:
+        if str(stage.name).endswith(needle):
+            return stage
+    available = ", ".join(str(s.name) for s in stages)
+    raise ValueError(
+        f"dual_arm.carry.{suffix.lower()}: stage {suffix!r} missing; available stages: {available}"
+    )
+
+
+def _skill_carry_split_stage(
+    ctx: QueueRuntimeContext,
+    _params: Mapping[str, Any],
+    *,
+    suffix: str,
+    label: str,
+    reset_cache: bool = False,
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    cfg = _require_carry(ctx)
+    _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label=label)
+    if reset_cache and _CARRY_SPLIT_CACHE_KEY in ctx.scratch:
+        del ctx.scratch[_CARRY_SPLIT_CACHE_KEY]
+    stages, exec_f = _carry_split_stages(ctx, cfg)
+    return [_carry_stage_by_suffix(stages, suffix)], ExecutionMeta(
+        send_mode=_dual_mode(ctx),
+        frame_id=exec_f,
+        warn_prefix=f"TaskQ {label} timeout",
+    )
+
+
+def skill_carry_forward(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any],
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运拆分段 1：张开到 Forward 预接近位。"""
+    return _skill_carry_split_stage(
+        ctx,
+        params,
+        suffix="Forward",
+        label="dual_arm.carry.forward",
+        reset_cache=True,
+    )
+
+
+def skill_carry_closein(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any],
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运拆分段 2：从 Forward 合拢到 CloseIn 抓取位。"""
+    return _skill_carry_split_stage(
+        ctx,
+        params,
+        suffix="CloseIn",
+        label="dual_arm.carry.closein",
+    )
+
+
+def skill_carry_grasp(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any],
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运拆分段 3：闭合夹爪抓住物体。"""
+    return _skill_carry_split_stage(
+        ctx,
+        params,
+        suffix="Grasp",
+        label="dual_arm.carry.grasp",
+    )
+
+
+def skill_carry_lift(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any],
+) -> tuple[list[StageTarget], ExecutionMeta]:
+    """双臂搬运拆分段 4：抓住后抬升物体。"""
+    return _skill_carry_split_stage(
+        ctx,
+        params,
+        suffix="Lift",
+        label="dual_arm.carry.lift",
+    )
+
+
 def _require_handover_sync(ctx: QueueRuntimeContext):
     h = ctx.handover_sync
     if h is None:
@@ -725,28 +853,7 @@ def skill_carry(ctx: QueueRuntimeContext, _params: Mapping[str, Any]) -> tuple[l
     """双臂搬运：一次执行完整搬运序列。"""
     cfg = _require_carry(ctx)
     _apply_arm_movel_duration_from_carry_cfg(ctx, cfg, label="dual_arm.carry")
-    include_orientation = _carry_needs_object_orientation(cfg)
-    if ctx.object_resolution is not None:
-        oc_base = resolve_object_pose_for_task(
-            ctx,
-            object_prim_path=cfg.object_prim_path,
-            include_orientation=include_orientation,
-            arm_side="none",
-            object_role="carry_object",
-            entity_state_timeout=SERVICE_CALL_TIMEOUT,
-            retries=SERVICE_CALL_RETRIES,
-            retry_delay=SERVICE_RETRY_DELAY,
-        )
-    else:
-        oc_base = get_object_pose_from_service(
-            ctx.base_world_pos,
-            ctx.base_world_quat,
-            cfg.object_prim_path,
-            include_orientation=include_orientation,
-        )
-    oc = _object_position_in_carry_execution_frame(ctx, cfg, oc_base)
-    ctx.carry_object_position = oc
-    exec_f = _carry_execution_frame_id(cfg, ctx)
+    oc, exec_f = _resolve_carry_object_position(ctx, cfg)
     stages = _carry_full_stages(ctx, cfg, oc, output_frame_id=exec_f)
     return stages, ExecutionMeta(
         send_mode=_dual_mode(ctx),
@@ -864,6 +971,10 @@ def skill_handover_sync(
 
 def register_dual_arm_skills() -> None:
     register_skill("dual_arm.carry", skill_carry)
+    register_skill("dual_arm.carry.forward", skill_carry_forward)
+    register_skill("dual_arm.carry.closein", skill_carry_closein)
+    register_skill("dual_arm.carry.grasp", skill_carry_grasp)
+    register_skill("dual_arm.carry.lift", skill_carry_lift)
     register_skill("dual_arm.parallel_pick", skill_parallel_pick)
     register_skill("dual_arm.bimanual_align", skill_bimanual_align)
     register_skill("dual_arm.place", skill_place)
