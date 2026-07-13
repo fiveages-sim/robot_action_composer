@@ -633,7 +633,11 @@ def _group_task_keys(robot_entry: dict[str, Any], group_key: str) -> list[str]:
 
 
 def _prompt_chain_group(*, robot_entry: dict[str, Any]) -> str:
-    """Pick one task folder (``task_groups`` key) for the entire chain."""
+    """Pick one leaf task folder (``task_groups`` key) for the entire chain."""
+    from robot_action_composer.cli.interactive import (  # pyright: ignore[reportMissingImports]
+        select_task_group_drill_down,
+    )
+
     task_groups: dict[str, list[str]] = robot_entry.get("task_groups") or {}
     group_keys = sorted((gk for gk, keys in task_groups.items() if keys), key=lambda gk: (gk == "", gk))
     if not group_keys:
@@ -642,16 +646,22 @@ def _prompt_chain_group(*, robot_entry: dict[str, Any]) -> str:
         only = group_keys[0]
         print(t("motion.chain_locked_folder", folder=_group_display_name(only)))
         return only
-    labels = [_group_display_name(gk) for gk in group_keys]
-    preferred = "siemens" if "siemens" in group_keys else group_keys[0]
-    default_label = _group_display_name(preferred)
-    picked = _select_option(
+
+    preferred = ""
+    for gk in group_keys:
+        if gk == "Factory Poc" or gk.startswith("Factory Poc/"):
+            preferred = gk
+            break
+    if not preferred:
+        preferred = group_keys[0]
+
+    chosen = select_task_group_drill_down(
+        task_groups=task_groups,
         title=t("motion.select_chain_folder"),
-        options=labels,
-        default_value=default_label,
-        allow_back=False,
+        default_group=preferred,
     )
-    return group_keys[labels.index(picked)]
+    print(t("motion.chain_locked_folder", folder=_group_display_name(chosen)))
+    return chosen
 
 
 def _scenes_for_chain_segment(

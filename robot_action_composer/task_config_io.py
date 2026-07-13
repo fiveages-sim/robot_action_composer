@@ -89,30 +89,66 @@ def _should_skip_task_cfg_path(path: Path, *, root: Path) -> bool:
 
 
 def _task_group_id(yaml_path: Path, task_cfg_dir: Path) -> str:
-    """First-level folder under ``task_configs``; direct children use ``\"\"`` (root group)."""
+    """Parent directory relative to ``task_configs`` (posix); root files use ``\"\"``."""
     rel = yaml_path.relative_to(task_cfg_dir)
     if len(rel.parts) <= 1:
         return ""
-    return rel.parts[0]
+    return "/".join(rel.parts[:-1])
+
+
+def _group_path_parts(group_id: str) -> tuple[str, ...]:
+    if not group_id:
+        return ()
+    return tuple(p for p in group_id.replace("\\", "/").split("/") if p)
+
+
+def _is_strict_path_prefix(prefix: str, path: str) -> bool:
+    """True when ``prefix`` is a strict directory prefix of ``path`` (posix segments)."""
+    pref = _group_path_parts(prefix)
+    full = _group_path_parts(path)
+    if len(pref) >= len(full):
+        return False
+    return full[: len(pref)] == pref
+
+
+def _validate_leaf_only_task_groups(
+    task_groups: dict[str, list[str]],
+    *,
+    robot_dir_name: str,
+) -> None:
+    """Reject YAML in a directory that also has YAML under a subdirectory."""
+    group_ids = [gid for gid, keys in task_groups.items() if keys]
+    for a in group_ids:
+        for b in group_ids:
+            if a == b:
+                continue
+            if _is_strict_path_prefix(a, b):
+                a_label = a if a else "(task_configs root)"
+                raise ValueError(
+                    f"Robot {robot_dir_name!r}: task YAML in {a_label!r} and under "
+                    f"{b!r} — only leaf directories may contain task YAML "
+                    f"(move files out of intermediate dirs)."
+                )
 
 
 @dataclass(frozen=True)
 class TaskConfigDiscovery:
-    """YAML task registry plus one-level folder grouping for interactive menus."""
+    """YAML task registry plus leaf-folder grouping for interactive menus."""
 
     tasks: dict[str, dict[str, Any]]
     """Flat ``task_key -> config`` (unique keys across the tree)."""
 
     task_groups: dict[str, list[str]]
-    """Group id (``\"\"`` = files directly under ``task_configs/``) -> task_key list."""
+    """Leaf group id (``\"\"`` = files directly under ``task_configs/``) -> task_key list."""
 
 
 def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskConfigDiscovery:
-    """Load all task YAML under ``task_cfg_dir`` and assign each task to a first-level group.
+    """Load all task YAML under ``task_cfg_dir`` and assign each to its parent-dir group.
 
-    Recursively loads ``*.yaml`` / ``*.yml``. Files directly in ``task_cfg_dir`` belong to
-    group ``\"\"``; ``task_cfg_dir / <folder> / ...`` uses group id ``<folder>`` (deeper
-    paths still count under that folder). In each directory, a basename may use either
+    Recursively loads ``*.yaml`` / ``*.yml``. Group id is the parent directory relative
+    to ``task_cfg_dir`` (posix path); files directly in ``task_cfg_dir`` use ``\"\"``.
+    YAML may only live in leaf directories: a directory with YAML must not also have
+    YAML in any subdirectory. In each directory, a basename may use either
     ``.yaml`` or ``.yml``, not both. Python task modules (``*.py``) are not loaded.
     Paths under hidden segments or ``__pycache__`` are ignored.
     """
@@ -165,6 +201,7 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskCon
             group_keys[_task_group_id(path, task_cfg_dir)].append(task_key)
 
     task_groups = {gid: sorted(keys) for gid, keys in sorted(group_keys.items(), key=lambda x: (x[0] != "", x[0]))}
+    _validate_leaf_only_task_groups(task_groups, robot_dir_name=robot_dir_name)
     return TaskConfigDiscovery(tasks=tasks, task_groups=task_groups)
 
 

@@ -163,7 +163,7 @@ flowchart TB
 
 ### 2.5 配置发现与其它模块
 
-- **`task_config_io.py`**：扫描 **`task_configs/*.yaml`**，**`queue_root_overrides`**（禁止根级嵌套 `pick`/`place`/`handover`/`carry`/`drawer` 等）。
+- **`task_config_io.py`**：递归扫描 **`task_configs/**/*.yaml`**（叶子目录分组 + 非叶子 YAML 校验），**`queue_root_overrides`**（禁止根级嵌套 `pick`/`place`/`handover`/`carry`/`drawer` 等）。
 - **`discovery/registry_loader.py`**：扫描 **`robots/*/`** 与 **`robots/*/*/`**（一层厂商分组）下的 `robot.yaml` + `task_configs/`，供 CLI / inference。
 
 | 路径 | 作用 |

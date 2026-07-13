@@ -34,6 +34,10 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
     "option.no": {"en": "no", "zh": "否"},
     "group.top_level": {"en": "Top level", "zh": "顶层"},
     "group.robots_root": {"en": "Root", "zh": "根目录"},
+    "group.drill_title": {
+        "en": "{title} — current: {path}",
+        "zh": "{title} — 当前: {path}",
+    },
     "prompt.invalid_int": {
         "en": "[info] invalid input, using default {default}",
         "zh": "[info] 输入无效，使用默认值 {default}",

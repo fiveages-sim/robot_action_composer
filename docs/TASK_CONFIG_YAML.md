@@ -75,19 +75,22 @@ scene_presets:
 - 忽略隐藏路径段（`.` 开头）与 `__pycache__`
 - 返回 `TaskConfigDiscovery`：
   - `tasks`：全局 `task_key -> 配置`
-  - `task_groups`：按一级子目录分组
+  - `task_groups`：按**叶子目录**相对路径分组（posix，如 `siemens/nested`）
 
 ### 唯一性约束
 
 - 同目录下，同基名不能同时有 `.yaml` 与 `.yml`
 - 不同子目录可有同名文件
 - 同机器人范围内，`task_key` 必须全局唯一
+- **仅叶子目录可放 YAML**：若某目录既有任务 YAML，其子目录下也有任务 YAML，发现阶段报错  
+  （例如同时存在 `siemens/a.yaml` 与 `siemens/nested/b.yaml` 非法；应把 YAML 只放在叶子，如仅保留 `siemens/nested/`）
 
 ### 分组交互
 
 - 根目录文件属于 `task_groups[""]`（CLI 显示 Top level）
-- `task_configs/<folder>/...` 属于 `<folder>` 分组（更深层仍归该一级分组）
-- 有多个分组时，CLI 先选 folder 再选 task
+- `task_configs/<a>/<b>/foo.yaml` 属于分组 `a/b`（完整父目录路径）
+- 有多个叶子分组时，CLI **逐级下钻**选目录（每层只显示下一段名），再到叶子后选 task；单层仅一个子节点时自动进入
+- 链式任务整链锁定同一个叶子分组
 - 非交互入口（例如 `--task`）仍按 `task_key` 定位
 
 ---
@@ -189,7 +192,7 @@ task_queue:
 
 - `skip_when_not_first_scene`（`bool`，默认 `false`）：写在 block 顶层，与 `skill` / `id` 同级。
 - **单任务 + `__all__`**：同一会话内从第 2 个 scene preset 起跳过（如 `default` → `box2`，`box2` 会跳过带 flag 的块）。
-- **多段 chain**：先选 **task folder**（整链锁定同一目录），再逐段选 task + scene；某段可选 ``__all__`` 展开该任务尚未用过的 scene（如 ``black_box_pick/__all__`` → ``default``、``box2``）。仅当本 segment 与前一段**连续且 task_key 相同**时跳过预备块；**不同 task**（搬运 → 黑盒）不跳过。同 task+scene 可重复加入（如首尾各一段搬运）。
+- **多段 chain**：逐级下钻选 **叶子 task folder**（整链锁定同一叶子目录），再逐段选 task + scene；某段可选 ``__all__`` 展开该任务尚未用过的 scene（如 ``black_box_pick/__all__`` → ``default``、``box2``）。仅当本 segment 与前一段**连续且 task_key 相同**时跳过预备块；**不同 task**（搬运 → 黑盒）不跳过。同 task+scene 可重复加入（如首尾各一段搬运）。
 - 单 scene、单段首次执行时照常运行；并行块中可对子步骤分别设置。
 
 ### real/object-resolution replay 中的导航跳过

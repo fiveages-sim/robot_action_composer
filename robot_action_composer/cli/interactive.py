@@ -70,6 +70,113 @@ def task_group_menu_label(group_id: str) -> str:
     return t("group.top_level") if group_id == "" else group_id
 
 
+def _group_path_parts(group_id: str) -> tuple[str, ...]:
+    if not group_id:
+        return ()
+    return tuple(p for p in group_id.replace("\\", "/").split("/") if p)
+
+
+def _join_group_path(*parts: str) -> str:
+    return "/".join(p for p in parts if p)
+
+
+def _child_segments_under_prefix(leaf_groups: list[str], prefix: str) -> list[str]:
+    """Next path segments under ``prefix`` among leaf group ids."""
+    pref = _group_path_parts(prefix)
+    children: set[str] = set()
+    for gid in leaf_groups:
+        parts = _group_path_parts(gid)
+        if len(parts) <= len(pref):
+            continue
+        if parts[: len(pref)] != pref:
+            continue
+        children.add(parts[len(pref)])
+    return sorted(children)
+
+
+def _default_child_segment(children: list[str], *, preferred_leaf: str, prefix: str) -> str:
+    if not children:
+        raise ValueError("_default_child_segment: empty children")
+    pref_parts = _group_path_parts(preferred_leaf)
+    cur = _group_path_parts(prefix)
+    if len(pref_parts) > len(cur) and pref_parts[: len(cur)] == cur:
+        nxt = pref_parts[len(cur)]
+        if nxt in children:
+            return nxt
+    if prefix == "" and "Factory Poc" in children:
+        return "Factory Poc"
+    return children[0]
+
+
+def select_task_group_drill_down(
+    *,
+    task_groups: dict[str, list[str]],
+    title: str,
+    default_group: str = "",
+) -> str:
+    """Drill down folder segments until a leaf ``task_groups`` key is chosen."""
+    leaf_groups = sorted(
+        (gid for gid, keys in task_groups.items() if keys),
+        key=lambda g: (g != "", g),
+    )
+    if not leaf_groups:
+        raise ValueError("select_task_group_drill_down: no non-empty task_groups")
+    if len(leaf_groups) == 1:
+        return leaf_groups[0]
+
+    preferred = default_group if default_group in task_groups and task_groups[default_group] else ""
+    if not preferred:
+        for gid in leaf_groups:
+            if gid == "Factory Poc" or gid.startswith("Factory Poc/"):
+                preferred = gid
+                break
+        if not preferred:
+            preferred = leaf_groups[0]
+
+    # Root leaf "" coexists only when it is the sole leaf (leaf-only rule); handled above.
+    prefix = ""
+    allow_auto = True
+    while True:
+        if prefix in task_groups and task_groups[prefix]:
+            return prefix
+
+        children = _child_segments_under_prefix(leaf_groups, prefix)
+        if not children:
+            raise ValueError(
+                f"select_task_group_drill_down: no children under {prefix!r} "
+                f"and {prefix!r} is not a leaf group"
+            )
+
+        while allow_auto and len(children) == 1:
+            prefix = _join_group_path(prefix, children[0]) if prefix else children[0]
+            if prefix in task_groups and task_groups[prefix]:
+                return prefix
+            children = _child_segments_under_prefix(leaf_groups, prefix)
+            if not children:
+                raise ValueError(
+                    f"select_task_group_drill_down: dead-end under {prefix!r}"
+                )
+
+        crumb = task_group_menu_label(prefix) if prefix else t("group.top_level")
+        level_title = t("group.drill_title", title=title, path=crumb)
+        default_seg = _default_child_segment(children, preferred_leaf=preferred, prefix=prefix)
+        options = {seg: {"label": seg} for seg in children}
+        allow_back = bool(prefix)
+        chosen = select_option(
+            title=level_title,
+            options=options,
+            default_key=default_seg,
+            allow_back=allow_back,
+        )
+        if chosen == "__back__":
+            parts = _group_path_parts(prefix)
+            prefix = _join_group_path(*parts[:-1]) if len(parts) > 1 else ""
+            allow_auto = False
+            continue
+        allow_auto = True
+        prefix = _join_group_path(prefix, chosen) if prefix else chosen
+
+
 def robot_vendor_id(entry: dict[str, Any], robot_key: str) -> str:
     """Vendor folder under ``robots/``; empty string when the profile is directly under ``robots/``."""
     relpath = str(entry.get("robot_dir_relpath") or entry.get("robot_dir_name") or robot_key)
@@ -182,17 +289,11 @@ def select_task_with_optional_group(
             break
 
     while True:
-        group_options = {
-            gid: {"label": task_group_menu_label(gid)}
-            for gid in sorted(filtered.keys(), key=lambda g: (g != "", g))
-        }
-        chosen_group = select_option(
+        chosen_group = select_task_group_drill_down(
+            task_groups=filtered,
             title=title_group,
-            options=group_options,
-            default_key=default_group,
-            allow_back=False,
+            default_group=default_group,
         )
-
         subset = filtered[chosen_group]
         sub = {k: tasks[k] for k in subset}
         options = {k: {"label": str(sub[k].get("label", k))} for k in subset}
