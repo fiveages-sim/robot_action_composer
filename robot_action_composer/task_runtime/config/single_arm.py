@@ -41,6 +41,11 @@ class QueueSlicePick:
     motion_frame_id: str | None = None
     tf_lookup_timeout: float | None = None
     arm_movel_duration: float | None = None
+    # 标定语义：ee_base / 工具系偏移假定机物 X 对齐；object 时按物体姿态（默认仅 yaw）左乘。
+    ee_orientation_frame: str = "motion"
+    object_orientation_mode: str = "yaw"
+    # 标称物体 yaw：数值（弧度）或 "auto"（吸附到最近的 k·π/2）
+    aligned_object_yaw: float | str = "auto"
 
 
 @dataclass(frozen=True)

@@ -43,6 +43,14 @@ from robot_action_composer.motion_generation.tasks.pick_place import (  # pyrigh
 )
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
+from robot_action_composer.task_runtime.ee_motion_frame import (
+    bimanual_pose_source_frame,
+    bimanual_poses_in_motion_frame,
+    clone_pose,
+    param_vec3,
+    pose_quat_xyzw,
+    set_pose_quat_xyzw,
+)
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.skills.single_arm import (
@@ -105,107 +113,6 @@ def _apply_arm_movel_duration_from_carry_cfg(
     _apply_arm_movel_duration(ctx, duration=cfg.arm_movel_duration, label=label)
 
 
-def _ee_pose_source_frame(lh: Any, rh: Any, ctx_frame_id: str, *, label: str) -> str:
-    """推断 ``get_pose()`` 数值所在的坐标系（优先用订阅 ``PoseStamped.header.frame_id``）。"""
-
-    def _fid(h: Any) -> str | None:
-        gf = getattr(h, "get_frame_id", None)
-        if not callable(gf):
-            return None
-        raw = gf()
-        if raw is None:
-            return None
-        s = str(raw).strip()
-        return s or None
-
-    lf, rf = _fid(lh), _fid(rh)
-    fallback = str(ctx_frame_id).strip() or "base_link"
-    if lf and rf and lf != rf:
-        raise RuntimeError(f"{label}: left EE frame_id {lf!r} != right EE frame_id {rf!r}")
-    if lf:
-        return lf
-    if rf:
-        return rf
-    return fallback
-
-
-def _motion_frame_poses_from_params(
-    iface: Any,
-    l0_raw: Pose,
-    r0_raw: Pose,
-    pose_frame: str,
-    params: Mapping[str, Any],
-    *,
-    label: str,
-) -> tuple[Pose, Pose, str]:
-    """将当前左右末端位姿变到 ``motion_frame_id``（与 ``pose_frame`` 相同时直接拷贝）。"""
-    raw_mf = params.get("motion_frame_id", params.get("relative_frame_id"))
-    if raw_mf is None or (isinstance(raw_mf, str) and not str(raw_mf).strip()):
-        motion_frame = pose_frame
-    else:
-        motion_frame = str(raw_mf).strip()
-
-    try:
-        tft = float(params.get("tf_lookup_timeout", 2.0))
-    except (TypeError, ValueError):
-        tft = 2.0
-
-    if motion_frame == pose_frame:
-        return _clone_pose(l0_raw), _clone_pose(r0_raw), motion_frame
-    if not hasattr(iface, "transform_pose"):
-        raise TypeError(f"{label}: motion_frame_id requires ROS2RobotInterface.transform_pose (TF buffer)")
-    l0 = iface.transform_pose(l0_raw, pose_frame, motion_frame, timeout=tft)
-    r0 = iface.transform_pose(r0_raw, pose_frame, motion_frame, timeout=tft)
-    if l0 is None or r0 is None:
-        raise RuntimeError(
-            f"{label}: TF {pose_frame!r} -> {motion_frame!r} failed (timeout={tft}s). "
-            "Check frames and that the interface is connected with TF listener."
-        )
-    return l0, r0, motion_frame
-
-
-def _clone_pose(p: Pose) -> Pose:
-    q = Pose()
-    q.position.x = p.position.x
-    q.position.y = p.position.y
-    q.position.z = p.position.z
-    q.orientation.x = p.orientation.x
-    q.orientation.y = p.orientation.y
-    q.orientation.z = p.orientation.z
-    q.orientation.w = p.orientation.w
-    return q
-
-
-def _param_vec3(
-    params: Mapping[str, Any],
-    key: str,
-    default: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    v = params.get(key)
-    if v is None:
-        return default
-    if not isinstance(v, (list, tuple)) or len(v) != 3:
-        raise ValueError(f"{key} must be a length-3 list [x, y, z]")
-    return (float(v[0]), float(v[1]), float(v[2]))
-
-
-def _pose_quat_xyzw(p: Pose) -> tuple[float, float, float, float]:
-    return (
-        float(p.orientation.x),
-        float(p.orientation.y),
-        float(p.orientation.z),
-        float(p.orientation.w),
-    )
-
-
-def _set_pose_quat_xyzw(p: Pose, q: tuple[float, float, float, float]) -> None:
-    x, y, z, w = q
-    p.orientation.x = x
-    p.orientation.y = y
-    p.orientation.z = z
-    p.orientation.w = w
-
-
 def _reference_target_xyz_from_params(
     ctx: QueueRuntimeContext,
     params: Mapping[str, Any],
@@ -219,7 +126,7 @@ def _reference_target_xyz_from_params(
         return None
 
     ref_path = ref_path_raw.strip()
-    ref_off_obj = _param_vec3(params, "object_position_offset", (0.0, 0.0, 0.0))
+    ref_off_obj = param_vec3(params, "object_position_offset", (0.0, 0.0, 0.0))
     if ctx.object_resolution is not None:
         ref_pose = resolve_object_pose_for_task(
             ctx,
@@ -478,8 +385,8 @@ def skill_place(
     if l0_raw is None or r0_raw is None:
         raise RuntimeError("dual_arm.place: could not read current left/right EE poses")
 
-    pose_frame = _ee_pose_source_frame(lh, rh, ctx.frame_id, label="dual_arm.place")
-    l0, r0, motion_frame = _motion_frame_poses_from_params(
+    pose_frame = bimanual_pose_source_frame(lh, rh, ctx.frame_id, label="dual_arm.place")
+    l0, r0, motion_frame = bimanual_poses_in_motion_frame(
         iface, l0_raw, r0_raw, pose_frame, params, label="dual_arm.place",
     )
 
@@ -492,7 +399,7 @@ def skill_place(
         else:
             default_retreat = (-0.2, 0.0, 0.0)
 
-    tr = _param_vec3(params, "translation_xyz", (0.0, 0.0, 0.0))
+    tr = param_vec3(params, "translation_xyz", (0.0, 0.0, 0.0))
     ref_target = _reference_target_xyz_from_params(
         ctx,
         params,
@@ -508,10 +415,10 @@ def skill_place(
         tr = (tx - mid_x, ty - mid_y, tz - mid_z)
 
     spread_half = float(params.get("spread_half", params.get("spread_y_half", default_spread)))
-    ret = _param_vec3(params, "retreat_xyz", default_retreat)
+    ret = param_vec3(params, "retreat_xyz", default_retreat)
     post_release_lower = None
     if "post_release_lower_xyz" in params:
-        post_release_lower = _param_vec3(params, "post_release_lower_xyz", (0.0, 0.0, 0.0))
+        post_release_lower = param_vec3(params, "post_release_lower_xyz", (0.0, 0.0, 0.0))
     elif carry is not None and getattr(carry, "ee_pregrasp_lift_offset", None) is not None:
         pr = tuple(float(x) for x in carry.ee_pregrasp_lift_offset)
         # 对称于 carry 的 pregrasp-lift：place 在开爪后默认下移同等位移。
@@ -537,12 +444,12 @@ def skill_place(
         post_release_lower = None
     orientation_delta = None
     if "orientation_delta_rpy" in params:
-        orientation_delta = _param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
+        orientation_delta = param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
         if max(abs(orientation_delta[0]), abs(orientation_delta[1]), abs(orientation_delta[2])) < 1e-12:
             orientation_delta = None
     post_release_right_delta = None
     if "post_release_right_delta_xyz" in params:
-        post_release_right_delta = _param_vec3(
+        post_release_right_delta = param_vec3(
             params,
             "post_release_right_delta_xyz",
             (0.0, 0.0, 0.0),
@@ -555,7 +462,7 @@ def skill_place(
             post_release_right_delta = None
     post_release_right_orientation_delta = None
     if "post_release_right_orientation_delta_rpy" in params:
-        post_release_right_orientation_delta = _param_vec3(
+        post_release_right_orientation_delta = param_vec3(
             params,
             "post_release_right_orientation_delta_rpy",
             (0.0, 0.0, 0.0),
@@ -616,8 +523,8 @@ def skill_bimanual_align(
     if l0_raw is None or r0_raw is None:
         raise RuntimeError(f"{label}: could not read current left/right EE poses")
 
-    pose_frame = _ee_pose_source_frame(lh, rh, ctx.frame_id, label=label)
-    l0, r0, motion_frame = _motion_frame_poses_from_params(
+    pose_frame = bimanual_pose_source_frame(lh, rh, ctx.frame_id, label=label)
+    l0, r0, motion_frame = bimanual_poses_in_motion_frame(
         iface, l0_raw, r0_raw, pose_frame, params, label=label,
     )
 
@@ -661,7 +568,7 @@ def skill_bimanual_align(
     delta_y = target_mid_y - mid_y
     delta_z = target_mid_z - mid_z
 
-    dr, dp, dyaw = _param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
+    dr, dp, dyaw = param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
     try:
         min_abs_ori = float(params.get("min_abs_orientation_rpy", 1e-4))
     except (TypeError, ValueError):
@@ -684,8 +591,8 @@ def skill_bimanual_align(
         label=label,
     )
 
-    l1 = _clone_pose(l0)
-    r1 = _clone_pose(r0)
+    l1 = clone_pose(l0)
+    r1 = clone_pose(r0)
     if move_y:
         l1.position.y += delta_y
         r1.position.y += delta_y
@@ -697,10 +604,10 @@ def skill_bimanual_align(
         r1.position.z += delta_z
     if has_ori:
         qd = quat_normalize(euler_rpy_to_quat_xyzw(dr, dp, dyaw))
-        ql = quat_normalize(quat_multiply(qd, _pose_quat_xyzw(l1)))
-        qr = quat_normalize(quat_multiply(qd, _pose_quat_xyzw(r1)))
-        _set_pose_quat_xyzw(l1, ql)
-        _set_pose_quat_xyzw(r1, qr)
+        ql = quat_normalize(quat_multiply(qd, pose_quat_xyzw(l1)))
+        qr = quat_normalize(quat_multiply(qd, pose_quat_xyzw(r1)))
+        set_pose_quat_xyzw(l1, ql)
+        set_pose_quat_xyzw(r1, qr)
 
     g_cmd = float(ctx.gripper_closed)
 

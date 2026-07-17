@@ -40,7 +40,7 @@ monorepo 内 **Isaac Sim 环境、USD、工作空间** 步骤见 **`examples/Isa
 ```mermaid
 flowchart TB
   subgraph entry [入口]
-    CLI[motion_main / record_main]
+    CLI[motion_main / record_main / check_isaac_pose / check_robot_status]
     INF[inference 等调用方]
   end
 
@@ -111,6 +111,8 @@ flowchart TB
 **运行时入口**
 
 - **`runner.run_task_queue`**：连接机器人 → FSM → 可选环境 reset → 构造 **`QueueRuntimeContext`** → 顺序执行 `task_queue` 各块（支持 **`ParallelSpec`** 并行子块）→ 每块 **`get_skill` → `execute_stage_sequence`**。
+- 笛卡尔到位：``runtime_defaults.max_stage_duration`` 覆盖机器人 ``arrival_timeout``；``pose_tol_ori``（四元数距离）在 ``execute_stage_sequence`` 内换算为度后再交给 ``check_arrival``（见 [SKILLS_REFERENCE §6.1](docs/SKILLS_REFERENCE.md)）。
+- 抓取机物偏航：``ee_orientation_frame`` / ``aligned_object_yaw``（含 ``auto`` 吸附到 ``k·π/2``、斜抓显式角度）见 [SKILLS_REFERENCE §6.2](docs/SKILLS_REFERENCE.md)。
 
 **技能与注册表**
 
@@ -121,15 +123,16 @@ flowchart TB
 
 | 注册名（`task_queue` → `skill`） | 定义文件（`task_runtime/skills/`） | 概要 |
 |----------------------------------|--------------------------------------|------|
-| `single_arm.pick` | `single_arm.py` | 单臂抓取序列（接近 / 闭合 / 回撤等） |
+| `single_arm.pick` | `single_arm.py` | 单臂抓取（支持机物 yaw 对齐 / 斜抓标定） |
 | `single_arm.move_to_object` | `single_arm.py` | 单臂移动到物体相对笛卡尔目标（无抓取序列） |
 | `single_arm.place` | `single_arm.py` | 单臂放置序列 |
 | `single_arm.move_to_pose` | `single_arm.py` | 单臂显式笛卡尔位姿（MoveL） |
+| `single_arm.move_relative` | `single_arm.py` | 相对当前末端平移/转向（增量在 `motion_frame_id` 下解释） |
 | `single_arm.goto_cache_pose` | `single_arm.py` | 单臂回到 `robot.cache_ee_pose` 缓存（含从双臂缓存选侧） |
 | `single_arm.drawer.pull_open` | `drawer.py` | 拉开抽屉 |
 | `single_arm.drawer.close_push` | `drawer.py` | 推合抽屉 |
 | `dual_arm.carry` | `dual_arm.py` | 双臂搬运完整序列 |
-| `dual_arm.parallel_pick` | `dual_arm.py` | 双臂并行抓取 |
+| `dual_arm.parallel_pick` | `dual_arm.py` | 双臂并行抓取（支持机物 yaw 对齐 / `aligned_object_yaw: auto`） |
 | `dual_arm.bimanual_align` | `dual_arm.py` | 持箱双臂对齐（中点 + 可选姿态增量） |
 | `dual_arm.place` | `dual_arm.py` | 双臂相对放置（平移 / 外张 / 后撤等） |
 | `dual_arm.handover` | `dual_arm.py` | 双臂交接同步段 |
@@ -139,13 +142,14 @@ flowchart TB
 | `nav.navigate_to_pose` | `navigation.py` | 导航到给定位姿（封装发送 + 等待） |
 | `nav.navigate_to_object` | `navigation.py` | 导航到物体附近位姿 |
 | `nav.navigate_relative` | `navigation.py` | 相对当前机器人位姿的平面运动 |
-| `joint.movej_to_config` | `joint.py` | MoveJ 到给定关节配置 |
+| `joint.movej_to_config` | `joint.py` | MoveJ 到给定/部分/相对关节配置 |
 | `joint.goto_cached_joints` | `joint.py` | 回到 `robot.cache_joint_state` 缓存关节角 |
 | `session.scratch_put` | `session.py` | 写入通用 `scratch` 键值 |
 | `session.scratch_clear` | `session.py` | 清空 `scratch` |
 | `robot.cache_ee_pose` | `session.py` | 缓存末端位姿（供 `goto_cache_pose`） |
 | `robot.cache_joint_state` | `session.py` | 缓存关节状态（供 `joint.goto_cached_joints`） |
 | `robot.snapshot_state` | `session.py` | 机器人状态快照（调试用） |
+| `robot.send_mode_command` | `session.py` | 发布 `/mode_command`（如 WBC `ARMS_COUPLED`） |
 | `env.randomize_object_local_xyz` | `env.py` | 仿真中物体局部位置随机化 |
 
 每个 skill 的函数签名约定：**`(ctx, params) -> (list[StageTarget], ExecutionMeta)`**；无笛卡尔阶段时返回空列表（例如纯导航、纯 MoveJ / 仅副作用块）。
@@ -170,7 +174,7 @@ flowchart TB
 |------|------|
 | **`isaac_sim/`** | 仿真 reset、实体位姿服务、`SimTimeHelper` 等 |
 | **`ros_interface_utils.py`** | 从机器人配置构造 **`ROS2RobotInterface`**、handler 辅助 |
-| **`cli/motion_main.py` / `record_main.py`** | 运动与录制入口（`MergedQueueConfig` → `run_task_queue` 或录制管线） |
+| **`cli/motion_main.py` / `record_main.py` / `check_isaac_pose_main.py` / `check_robot_status_main.py`** | 运动、录制、Isaac 实体位姿查询、机器人状态查询入口 |
 
 **CLI（安装后可用）**
 
@@ -188,9 +192,28 @@ motion-generation --workspace /path/to/workspace --robot dobot_cr5 --task-key pi
 # 界面语言（zh / en；也可用环境变量 MOTION_GENERATION_LANG）
 motion-generation --lang zh
 # 交互模式：配置菜单选 3「偏好设置」（有上次选择时为 4），可配置语言与 object-resolution JSON 录制
+
+# 查询 Isaac Sim 中实体世界位姿（需仿真在跑且 /get_entity_state 可用）
+check-isaac-pose /World/robot/FiveAges_W2/LinkHou_S2/base_footprint/base_link
+
+# 相对某参考 prim 打印位姿（与任务 YAML 中相对 base_link 的偏移同一坐标系）
+check-isaac-pose /World/scene/boxes/white_box_05 \
+  --relative-to /World/robot/FiveAges_W2/LinkHou_S2/base_footprint/base_link
+
+# 一次查询多个 prim
+check-isaac-pose /World/scene/wind_turbo_blade/turbo_blade /World/scene/boxes/white_box_05
+
+# 查询机器人当前关节角与末端位姿（便于复制到 task YAML）
+check-robot-status
+check-robot-status --robot fiveages_w2 --workspace examples/IsaacSim
+check-robot-status --wait 3.0 --show-joint-names
 ```
 
 `motion-generation` 扫描 `workspace_dir/robots/` 下扁平或一层分组（`robots/<Vendor>/<Robot>/`）的 `robot.yaml` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。上次选择与偏好（`lang`、`record_object_resolution_json` 等）缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。
+
+`check-isaac-pose` 通过 `/get_entity_state` 查询 prim 的 position（xyz）、orientation（xyzw 与 rpy）；`--relative-to` 时输出相对参考实体坐标系的位姿。
+
+`check-robot-status` 连接 `ROS2RobotInterface` 后打印当前 `body_positions` / `left_arm_positions` / `right_arm_positions` / `head_positions` 以及左右臂 `position` + `ee_base_orientation`，格式可直接粘贴进 `skill_defaults` 或 `joint.movej_to_config` 块。默认按 ROS topic 自动检测单/双臂；`--robot` 时从 `robot.yaml` 加载接口配置。
 | **`dataset_recording/`** | `[recording]` extra：**`ROS2Robot`**、episode 写入；运动中仍走 **`robot.ros2_interface`** |
 
 ### 2.6 依赖关系要点

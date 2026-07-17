@@ -25,14 +25,6 @@ from robot_action_composer.task_runtime.context import QueueRuntimeContext  # py
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 
-def _apply_target_pose_offset(pose: Any, offset: tuple[float, float, float]) -> Any:
-    ox, oy, oz = offset
-    pose.position.x += ox
-    pose.position.y += oy
-    pose.position.z += oz
-    return pose
-
-
 def apply_object_local_offset_to_pose(pose: Any, offset: tuple[float, float, float]) -> Any:
     """Apply ``offset`` in object local frame to ``pose`` position."""
     q = (
@@ -56,10 +48,10 @@ def resolve_place_skill_from_entity(
     ctx: QueueRuntimeContext | None = None,
 ) -> QueueSlicePlace:
     """When ``object_prim_path`` is set, fill ``place_position`` from the Isaac
-    entity service (plus ``object_position_offset``).
+    entity service (plus ``object_position_offset`` in **object local frame**).
 
-    Place orientation is resolved by caller (``single_arm.place``) via
-    ``ee_base_orientation`` / pick fallback.
+    Place orientation: when unset, ``single_arm.place`` uses current EE orientation
+    (see ``skill_place``); not inherited from pick.
     """
     if not place.object_prim_path:
         return place
@@ -67,7 +59,7 @@ def resolve_place_skill_from_entity(
         place_pose = resolve_object_pose_for_task(
             ctx,
             object_prim_path=place.object_prim_path,
-            include_orientation=False,
+            include_orientation=True,
             arm_side="none",
             object_role="place_target",
             entity_state_timeout=SERVICE_CALL_TIMEOUT,
@@ -79,9 +71,9 @@ def resolve_place_skill_from_entity(
             base_world_pos,
             base_world_quat,
             place.object_prim_path,
-            include_orientation=False,
+            include_orientation=True,
         )
-    place_pose = _apply_target_pose_offset(place_pose, place.object_position_offset)
+    place_pose = apply_object_local_offset_to_pose(place_pose, place.object_position_offset)
     resolved_place_position = (
         place_pose.position.x,
         place_pose.position.y,

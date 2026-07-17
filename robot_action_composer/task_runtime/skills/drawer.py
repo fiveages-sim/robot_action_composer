@@ -27,6 +27,7 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
     SendMode,
     StageTarget,
     execute_stage_sequence,
+    pose_tol_ori_to_orient_deg,
 )
 
 from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
@@ -154,7 +155,7 @@ def _wait_pick_arm_arrive(ctx: QueueRuntimeContext) -> None:
         time_now_fn=ctx.sim_time.now_seconds,
         sleep_fn=ctx.sim_time.sleep,
         arm_pose_threshold=pose_tol_pos,
-        arm_orient_threshold=pose_tol_ori,
+        arm_orient_threshold=pose_tol_ori_to_orient_deg(pose_tol_ori),
     )
 
 

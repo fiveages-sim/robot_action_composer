@@ -35,26 +35,30 @@
 
 ### 1.1b 相对当前末端平移旋转（`single_arm.move_relative`）
 
-- **效果**：读取当前末端位姿，在 ``motion_frame_id`` 下叠加位置增量并左乘姿态增量（单段 MoveL）。
+- **效果**：读取当前末端位姿，变换到 ``motion_frame_id`` 后叠加位置增量并左乘姿态增量（单段 MoveL）。
 - **参数**：
   - **执行控制**
     - `arm`：`left|right`，必填。
   - **运动系配置**
-    - `position_delta`：`[dx, dy, dz]`（米），默认 `[0,0,0]`。
+    - `position_delta`：`[dx, dy, dz]`（米），默认 `[0,0,0]`。**沿 ``motion_frame_id`` 的坐标轴叠加**，不是末端工具系。
     - `orientation_delta_rpy`：`[roll, pitch, yaw]`（弧度），在 ``motion_frame_id`` 下定义，左乘当前四元数；例如绕 Y 轴 +90° 为 `[0, 1.5708, 0]`。
-    - `motion_frame_id`：增量解释坐标系，默认与末端反馈 frame 一致（常为 `arm_base`）。
+    - `motion_frame_id`：增量解释坐标系；默认与末端反馈 frame 一致。写 `arm_base` / `base_footprint` / `base_link` 等可相对基座平移（需 TF 可达）。
     - `tf_lookup_timeout`：与任务 frame 不一致时的 TF 超时（秒）。
   - **执行控制**
     - `gripper`：目标夹爪值，默认 ``gripper_for_return_home``。
-    - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
+    - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`（轨迹规划时长，**不是**到位等待超时；后者见 `runtime_defaults.max_stage_duration`）。
+- **备注**：
+  - WBC 双臂耦合（`ARMS_COUPLED`）后，通常只发左臂目标，右臂由耦合跟随：`arm: left`。
+  - `arm_movel_duration` 与到位等待是两套时间；慢轨迹时请同时加大 `max_stage_duration`。
 - **YAML 示例**：
   ```yaml
   - skill: single_arm.move_relative
     params:
-      arm: right
-      motion_frame_id: arm_base
-      position_delta: [0.05, 0.0, 0.05]
-      orientation_delta_rpy: [0.0, 1.5708, 0.0]
+      arm: left
+      motion_frame_id: base_footprint
+      position_delta: [0.2, 0.0, 0.3]
+      orientation_delta_rpy: [0.0, -1.57, 0.0]
+      arm_movel_duration: 4.0
       gripper: 0.0
   ```
 
@@ -82,20 +86,26 @@
     - `object_prim_path`：抓取对象 Prim 路径。
     - `object_position_offset`：相对物体中心的抓取偏移（物体局部坐标系；会按物体当前姿态旋转后叠加到抓取目标）。
   - **运动系配置**
-    - `ee_base_orientation`：抓取姿态四元数 `xyzw`。
+    - `ee_base_orientation`：抓取姿态四元数 `xyzw`。语义为**某一标称机物相对朝向下的期望抓取方向**（可含斜抓；见 §6.2）。
+    - `ee_orientation_frame`：`motion`（默认，直接用标定姿态）| `object`（按相对标称的物体姿态偏差左乘）。
+    - `object_orientation_mode`：配合 `object` 帧；默认 `yaw`（仅绕竖直 Z）；亦可 `full` / `tilt` / `pitch` / `none`。
+    - `aligned_object_yaw`：标称物体 yaw。数值（弧度），或 `auto`（吸附到最近的 `k·π/2`）。详见 §6.2。
     - `motion_frame_id`：抓取目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
   - **末端系配置**
     - `pick_clearance`：闭合抓取阶段偏移（工具系位移，沿末端局部轴向解释）。
     - `prepare_offset`：预接近偏移（工具系向量，语义与 `dual_arm.carry.carry_prepare_offset` 一致）。
-    - `ee_lift_offset`：抓取后抬升位移（工具系向量；会按 `ee_base_orientation` 旋转后用于抬升段）。
-    - `ee_retreat_offset`：抬升后后撤位移（工具系向量；会按 `ee_base_orientation` 旋转后用于后撤段）。
+    - `ee_lift_offset`：抓取后抬升位移（工具系向量；按**有效**末端姿态旋转后用于抬升段）。
+    - `ee_retreat_offset`：抬升后后撤位移（工具系向量；按**有效**末端姿态旋转后用于后撤段）。
     - `ee_pick_axis`：末端抓取轴向字符串（与 `ee_place_axis` 对称）；`+x/-x/+y/-y/+z/-z`，默认 `+z`。
     - `ee_pick_direction_vector`：抓取后撤等所用的方向单位向量 `[x,y,z]`（可选；非空时覆盖 `ee_pick_axis`）。
   - **执行控制**
     - `arm`：`left|right`。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
-- **备注**：`object_prim_path` 必填。
+- **备注**：
+  - `object_prim_path` 必填；`object_position_offset` 始终在物体系。
+  - `runtime_defaults.use_object_orientation: true` 时，若未写 `ee_orientation_frame`，等价于 `object`（兼容旧字段）。
+  - 机物偏航对齐推荐配置见 §6.2。
 
 ### 1.4 放置（`single_arm.place`）
 
@@ -106,7 +116,7 @@
     - `object_position_offset`：相对参考物体中心的放置偏移（物体局部坐标系；会按物体当前姿态旋转后叠加到放置目标）。
   - **运动系配置**
     - `place_position`：显式放置位置（运动系坐标；当未设置 `object_prim_path` 时，直接按该坐标放置）。
-    - `ee_base_orientation`：放置姿态四元数 `xyzw`（未设置时默认继承 `single_arm.pick.ee_base_orientation`）。
+    - `ee_base_orientation`：放置姿态四元数 `xyzw`（**未设置时默认保持当前末端姿态**，与 `dual_arm.place` 一致）。
     - `motion_frame_id`：放置目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
   - **末端系配置**
@@ -119,7 +129,7 @@
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **备注**：
   - 放置位置必须可解析；
-  - 未设置 `ee_base_orientation` 时，默认继承 `single_arm.pick.ee_base_orientation`；
+  - 未设置 `ee_base_orientation` 时，读取当前末端姿态（`motion_frame_id` 下）作为放置姿态；
   - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick.ee_pick_axis`（默认 `+z`）。
 
 ### 1.5 回程缓存末端（`single_arm.goto_cache_pose`）
@@ -223,12 +233,15 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
 - **运动系配置**
   - `motion_frame_id`：该侧物体位姿解析后的输出坐标系（可选；不写则沿用任务 `frame_id`）。**左右两侧解析后必须相同**，否则双臂同步下发无法共用一个坐标系。
   - `tf_lookup_timeout`：TF 查询超时（秒）；本块取左右两侧的较大值用于两侧物体位姿变换。
+  - `ee_orientation_frame`（块级或每侧，默认 `motion`）：`motion` 直接用标定 `ee_base_orientation`；`object` 则按相对标称的物体姿态偏差左乘。
+  - `object_orientation_mode`（块级或每侧，默认 `yaw`）：配合 `ee_orientation_frame=object`。推荐 `yaw`；亦可 `full` / `tilt` / `pitch` / `none`。
+  - `aligned_object_yaw`（块级或每侧，默认 `auto`）：标称物体 yaw。`auto` = 吸附到最近的 `k·π/2`（0 / ±1.57 / ±3.14）；也可写显式弧度。校正量 = `wrap(yaw_object − aligned)`。
 
 - **末端系配置**
-  - `ee_base_orientation`：抓取姿态四元数 `xyzw`。
+  - `ee_base_orientation`：抓取姿态四元数 `xyzw`。语义为**标称机物相对朝向下的期望抓取方向**（含导航到位后的固定转角关系）；开启 `ee_orientation_frame: object` 后只再乘相对 `aligned_object_yaw` 的偏差。
   - `pick_clearance`：闭合抓取阶段偏移（工具系，沿末端局部 +Z 解释，与 `build_single_arm_pick_sequence` 一致）。
   - `prepare_offset`：预接近偏移（工具系三维向量；全 0 或省略时可省略预接近段）。
-  - `ee_lift_offset` / `ee_retreat_offset`：抬升与后撤（工具系向量；会分别按该侧 `ee_base_orientation` 旋转到世界系后写入序列，与 `single_arm.pick` 一致）。
+  - `ee_lift_offset` / `ee_retreat_offset`：抬升与后撤（工具系向量；按**有效**末端姿态旋到运动系，与 `single_arm.pick` 一致）。
   - `ee_pick_axis` / `ee_pick_direction_vector`：与单臂 `QueueSlicePick` 相同（轴向或显式单位向量）。
 
 - **执行控制**
@@ -237,8 +250,29 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
 #### `dual_arm.parallel_pick`
 
 - **效果**：一次执行完整双臂同时抓取序列（两侧各走一条 `build_single_arm_pick_sequence`，再按阶段同步合成）。
-- **参数**：读取 `left_pick` / `right_pick`（见上方字段列表）。
-- **备注**：执行完成后会将 `gripper_for_return_home` 置为闭合值（与单臂 pick 行为一致）。
+- **参数**：读取 `left_pick` / `right_pick`（见上方字段列表）；块级 `ee_orientation_frame` / `object_orientation_mode` / `aligned_object_yaw` 可两侧共用。
+- **备注**：
+  - 执行完成后会将 `gripper_for_return_home` 置为闭合值（与单臂 pick 行为一致）。
+  - `object_position_offset` 始终在物体系；抓取点位置本身已随物体朝向变。
+  - 机物偏航对齐、斜抓与 `aligned_object_yaw` 用法见 **§6.2**。
+  - 常用写法：
+    ```yaml
+    # 导航 0/90/180° 档位：自动吸附标称偏航
+    dual_arm.parallel_pick:
+      ee_orientation_frame: object
+      object_orientation_mode: yaw
+      aligned_object_yaw: auto
+      left_pick: { ... ee_base_orientation: [1,0,0,0], ... }
+      right_pick: { ... }
+
+    # 斜向接近（如标称相对偏航 45°）：显式角度，勿用 auto
+    dual_arm.parallel_pick:
+      ee_orientation_frame: object
+      object_orientation_mode: yaw
+      aligned_object_yaw: 0.7854
+      left_pick: { ... }   # ee_base_orientation 在该 45° 标称下标定（可含斜抓姿态）
+      right_pick: { ... }
+    ```
 
 
 
@@ -394,28 +428,47 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
 
 ### 4.1 `joint.movej_to_config`
 
-- **效果**：发送关节目标（躯干/左臂/右臂任意组合），等待到位，可选恢复 OCS2。
+- **效果**：合并绝对/相对目标后经 `send_coordinated_joint_positions` 下发（躯干/左臂/右臂/头任意组合），等待到位。FSM 由 `ROS2RobotInterface` 按 WBC/分体自动切换；**不**主动恢复 OCS2（后续笛卡尔 skill 会自行切换）。
 - **参数**：
-  - **关节目标配置**
-    - `body_positions`（`list[float]`）：躯干关节目标。
-    - `left_arm_positions` / `right_arm_positions`（`list[float]`）：左右臂关节目标。
+  - **绝对目标**（整组或局部）
+    - `body_positions` / `left_arm_positions` / `right_arm_positions` / `head_positions`：绝对目标列表。
+      元素可为 `null`，表示**该关节保持当前值**（部分关节设定）。
+  - **相对增量**（相对**当前**关节角，rad）
+    - `body_position_deltas` / `left_arm_position_deltas` / `right_arm_position_deltas` / `head_position_deltas`：与绝对列表同长；`null` = 该关节增量 0。
+    - `body_joint_deltas` / `left_arm_joint_deltas` / `right_arm_joint_deltas` / `head_joint_deltas`：稀疏写法 `{关节索引: delta}`（**0-based**），便于只动一两个关节。
   - **到达判定配置**
     - `arrival_timeout`（`float`，默认 `30.0`）：关节到达超时（秒）。
     - `joint_tolerance`（`float`，默认 `0.05`）：关节到达容差（弧度）。
   - **执行控制**
-    - `resume_ocs2`（`bool`，默认 `false`）：完成后是否切回 OCS2。
-    - `skip_fsm_change`（`bool`，默认 `false`）：是否跳过开头 FSM 切换。
+    - `skip_fsm_change`（`bool`，默认 `false`）：为 true 时传 `auto_switch_fsm=False`，跳过 interface 自动 FSM。
     - `body_movej_duration`（`float`）：动态设置 body 控制器 `movej_duration`。
-- **备注**：`resume_ocs2=true` 常用于后续紧接笛卡尔技能。
+- **合并规则**：先读当前角；绝对目标（`null` 用当前值填）与 deltas / sparse deltas 合并为**同一组**下发目标；到位判断使用合并后的目标，且**只检查 YAML 显式写过的关节索引**（`null` 保持位不参与判到位）；旋转关节用最短角距离。
+- **备注**：WBC 抓取后腰角往往不是标称 0；腰转 180° 应用相对增量，不要写死绝对角。
+- **YAML 示例**：
+  ```yaml
+  # 只相对转动腰偏航（第 4 关节，index=3）+π
+  - skill: joint.movej_to_config
+    params:
+      body_joint_deltas: {3: 3.1416}
+      body_movej_duration: 3.0
+
+  # 等价列表写法
+  - skill: joint.movej_to_config
+    params:
+      body_position_deltas: [null, null, null, 3.1416]
+
+  # 部分绝对：只把腰偏航设到 π，其余腰关节保持当前
+  - skill: joint.movej_to_config
+    params:
+      body_positions: [null, null, null, 3.1416]
+  ```
 
 ### 4.2 `joint.goto_cached_joints`
 
 - **效果**：回到 `robot.cache_joint_state` 缓存的关节角。
 - **参数**：
-  - **缓存与执行控制**
-    - `key`（`str`，默认 `saved_joint_state`）：缓存键。
-    - `resume_ocs2`（`bool`，默认 `false`）：完成后是否切回 OCS2。
-- **备注**：缓存键必须与 `robot.cache_joint_state` 对应。
+  - `key`（`str`，默认 `saved_joint_state`）：缓存键。
+- **备注**：缓存键必须与 `robot.cache_joint_state` 对应；不主动恢复 OCS2。
 
 ---
 
@@ -473,9 +526,107 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
     - `include_body_target`（`bool`，默认 `true`）：是否记录 body target。
     - `include_fsm`（`bool`，默认 `true`）：是否记录 FSM 命令值。
 
+### 5.6 `robot.send_mode_command`
+
+- **效果**：向 `/mode_command` 发布 WBC / 底盘模式字符串（无笛卡尔阶段，仅副作用）。
+- **参数**：
+  - **模式配置**
+    - `command` / `mode`（`str` 或 `list`）：单条或列表。如 `ARMS_COUPLED`、`BODY_TRACKING`、`BODY_FREE`、`BODY_LOCK`、`BODY_HEAD_COUPLED`、`BASE_LOCK`、`BASE_UNLOCK`。
+    - `commands`（`list`，可选）：多条模式命令，按顺序发布（适合「追踪 + 双臂耦合」）。
+    - `wait_for_state`（`bool`，默认 `true`）：发完全部命令后，一次性轮询 `/ocs2_wbc_controller/current_state`，要求所有期望字段同时满足。
+    - `wait_timeout`（`float`，默认 `5.0`）：整批确认超时（秒）；超时打 WARN 后继续。
+    - `settle_time`（`float`，可选）：确认后额外固定等待；接口内置约 `0.1s`，更大时补睡差额。
+- **备注**：
+  - 只发 `/mode_command`，不切换 FSM；后续笛卡尔 skill 会按需自动切 OCS2。
+  - `BODY_TRACKING` → `body_state==BODY_TRACKING`；`ARMS_COUPLED` → `bimanual_state==BIMANUAL_COUPLED`；多条合并检查（同字段以后者为准）。
+  - 命令字符串需与底层控制器约定一致；接口对未知命令原样发布（无 current_state 映射则跳过等待）。
+- **YAML 示例**：
+  ```yaml
+  skill_defaults:
+    enable_arms_coupled:
+      command: ARMS_COUPLED
+    enable_tracking_and_coupled:
+      commands: [BODY_TRACKING, ARMS_COUPLED]
+
+  task_queue:
+    - skill: dual_arm.parallel_pick
+    - skill: robot.send_mode_command
+      id: enable_arms_coupled
+    - skill: single_arm.move_relative
+      id: coupled_left_move_relative
+  ```
+
 ---
 
 ## 6. 配置项放在哪一层（速查）
 
 与 § 开头「约定」一致：**默认** → `skill_defaults`；**按场景覆盖** → `scene_presets.<scene>.skill_params`；**仅本块** → `task_queue` 里该块的 `params`；**与具体技能无关、整任务共用** → `runtime_defaults`（仅 `base_link_entity_path` / `max_stage_duration` / `pose_tol_pos` / `pose_tol_ori`）。  
 **合并顺序、禁止项与示例**以 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md) 为准（本节不展开）。
+
+### 6.1 笛卡尔到位判定（`runtime_defaults`）
+
+笛卡尔 skill（pick / move_relative / parallel_pick 等）由 `runner` 调用 `execute_stage_sequence` 等待到位：
+
+| 字段 | 含义 | 注意 |
+|------|------|------|
+| `max_stage_duration` | **覆盖**机器人配置里的 `arrival_timeout`，作为每段笛卡尔到位等待上限（秒） | 与 `arm_movel_duration`（轨迹规划时长）无关；慢轨迹时两者都要够大 |
+| `pose_tol_pos` | 位置容差（米），传给 `check_arrival` | 直接使用 |
+| `pose_tol_ori` | 姿态容差，语义为四元数距离 `1-\|dot\|`（无量纲，通常 `0.03`～`0.08`） | 运行时会换算成**度**再交给 handler；切勿把 `0.03` 当成 0.03° |
+
+> 关节 skill（`joint.movej_to_config`）仍用块内自己的 `arrival_timeout`，不受 `max_stage_duration` 覆盖。
+
+### 6.2 机物偏航对齐（`single_arm.pick` / `dual_arm.parallel_pick`）
+
+实现：`motion_generation/tasks/object_orientation.py`（`compose_aligned_ee_orientation`）。
+
+**标定语义**
+
+- `ee_base_orientation`、`prepare_offset`、抬升/后撤等，按某一**标称机物相对朝向**标定（常见：正对、侧对 π/2，或斜向如 π/4）。
+- `object_position_offset` 始终在**物体系**，抓点位置本身会随物体转。
+- 开启 `ee_orientation_frame: object` 后，运行时只补偿**相对标称的偏差**，不把「导航带来的固定转角」再乘一遍。
+
+**公式（`object_orientation_mode: yaw`）**
+
+```text
+aligned = aligned_object_yaw        # 或 auto → snap(yaw_object) 到最近的 k·π/2
+yaw_corr = wrap(yaw_object − aligned)
+q_ee     = R_z(yaw_corr) ⊗ ee_base
+```
+
+工具系偏移（prepare / lift / retreat）用 **有效** `q_ee` 旋到运动系。
+
+**`aligned_object_yaw` 怎么填**
+
+| 取值 | 含义 | 适用 |
+|------|------|------|
+| `auto`（推荐默认） | 把物体在运动系的 yaw 吸附到最近的 `0 / ±π/2 / ±π` | 导航朝向落在 0°/90°/180° 档 |
+| 显式弧度（如 `0.7854`、`-1.5708`） | 固定标称相对偏航 | 斜向接近、或不要自动吸附时 |
+| `0` | 标称即机物 X 对齐（旧语义） | 无固定导航转角时 |
+
+**斜抓**
+
+- **手指斜向**：写进 `ee_base_orientation`（在选定的标称相对偏航下标定）。
+- **斜向接近**（标称不是 90° 网格）：`aligned_object_yaw: <弧度>`，**不要**用 `auto`（否则会吸到 0/±90/180）。
+
+**完整示例**
+
+```yaml
+# 侧对抓取（nav yaw≈1.57）+ 自动档位
+dual_arm.parallel_pick:
+  ee_orientation_frame: object
+  object_orientation_mode: yaw
+  aligned_object_yaw: auto
+  left_pick:
+    object_prim_path: /World/obj
+    object_position_offset: [0.0, -0.05, -0.06]
+    ee_base_orientation: [1.0, 0.0, 0.0, 0.0]
+  right_pick: { ... }
+
+# 斜 45° 标称接近 + 斜抓姿态
+single_arm.pick:
+  ee_orientation_frame: object
+  object_orientation_mode: yaw
+  aligned_object_yaw: 0.7854
+  ee_base_orientation: [<斜抓四元数>]
+  object_prim_path: /World/obj
+```

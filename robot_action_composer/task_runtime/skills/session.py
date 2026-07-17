@@ -278,8 +278,112 @@ def skill_robot_snapshot_state(
     return [], _session_meta(ctx)
 
 
+def skill_send_mode_command(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> tuple[list[Any], ExecutionMeta]:
+    """向 ``/mode_command`` 发布 WBC / 底盘模式命令（无运动阶段）。
+
+    全身控制下开启双臂耦合示例：``command: ARMS_COUPLED``。
+    追踪 + 双臂耦合可写 ``commands: [BODY_TRACKING, ARMS_COUPLED]``（按序发送）。
+    本技能只发布 mode，不切换 FSM。默认先发完所有命令，再一次性等待
+    ``/ocs2_wbc_controller/current_state`` 同时满足全部期望字段。
+
+    params:
+        command / mode (str | list): 单条或列表；也可用 ``commands``。
+            如 ``ARMS_COUPLED``、``BODY_TRACKING``、``BODY_FREE``、``BASE_LOCK``。
+        commands (list, 可选): 多条模式命令，按顺序发布（与 ``command`` 二选一或合并）。
+        wait_for_state (bool, 可选): 是否等 current_state 确认，默认 True。
+        wait_timeout (float, 可选): 全部命令确认超时（秒），默认 5.0。
+        settle_time (float, 可选): 确认后（或跳过确认时）额外固定等待；
+            接口内置约 0.1s，更大时补睡差额。
+    """
+    import time
+
+    cmds: list[str] = []
+    raw_list = params.get("commands")
+    if raw_list is not None:
+        if not isinstance(raw_list, (list, tuple)):
+            raise ValueError("robot.send_mode_command: params.commands must be a list of strings")
+        cmds.extend(str(x).strip().upper() for x in raw_list if x is not None and str(x).strip())
+    raw = params.get("command", params.get("mode"))
+    if raw is not None:
+        if isinstance(raw, (list, tuple)):
+            cmds.extend(str(x).strip().upper() for x in raw if x is not None and str(x).strip())
+        elif str(raw).strip():
+            cmds.append(str(raw).strip().upper())
+    if not cmds:
+        raise ValueError(
+            "robot.send_mode_command requires non-empty params.command / params.mode "
+            "or params.commands"
+        )
+
+    wait_for_state = bool(params.get("wait_for_state", True))
+    wait_timeout = float(params.get("wait_timeout", 5.0))
+    if wait_timeout < 0.0:
+        raise ValueError("robot.send_mode_command: wait_timeout must be >= 0")
+
+    settle_extra = 0.0
+    settle_raw = params.get("settle_time")
+    if settle_raw is not None:
+        settle_target = float(settle_raw)
+        if settle_target < 0.0:
+            raise ValueError("robot.send_mode_command: settle_time must be >= 0")
+        iface_settle = float(getattr(ctx.interface, "MODE_SWITCH_SETTLE_TIME_SEC", 0.1) or 0.0)
+        settle_extra = max(0.0, settle_target - iface_settle)
+
+    iface = ctx.interface
+    if not hasattr(iface, "send_mode_command"):
+        raise RuntimeError("robot.send_mode_command: interface has no send_mode_command")
+    sim_time = getattr(ctx, "sim_time", None)
+    sleep_fn = sim_time.sleep if sim_time else time.sleep
+    time_now_fn = sim_time.now_seconds if sim_time else None
+
+    for command in cmds:
+        iface.send_mode_command(command)
+        print(f"[Session] robot.send_mode_command command={command!r}")
+
+    ok = True
+    if wait_for_state and hasattr(iface, "wait_until_mode_commands_applied"):
+        ok = bool(
+            iface.wait_until_mode_commands_applied(
+                cmds,
+                timeout=wait_timeout,
+                time_now_fn=time_now_fn,
+                sleep_fn=sleep_fn,
+            )
+        )
+        if not ok:
+            print(
+                f"[Session] WARN: modes {cmds!r} not confirmed on "
+                f"/ocs2_wbc_controller/current_state within {wait_timeout:.1f}s"
+            )
+        else:
+            print(f"[Session] robot.send_mode_command wait_ok=True modes={cmds!r}")
+    elif wait_for_state and hasattr(iface, "wait_until_mode_command_applied"):
+        # 旧接口兜底：仍按批末一次确认最后一条
+        ok = bool(
+            iface.wait_until_mode_command_applied(
+                cmds[-1],
+                timeout=wait_timeout,
+                time_now_fn=time_now_fn,
+                sleep_fn=sleep_fn,
+            )
+        )
+        if not ok:
+            print(
+                f"[Session] WARN: mode {cmds[-1]!r} not confirmed on "
+                f"/ocs2_wbc_controller/current_state within {wait_timeout:.1f}s"
+            )
+
+    if settle_extra > 0.0:
+        sleep_fn(settle_extra)
+        print(f"[Session] robot.send_mode_command settle_extra={settle_extra:.3f}s")
+    return [], _session_meta(ctx)
+
+
 register_skill("session.scratch_put", skill_scratch_put)
 register_skill("session.scratch_clear", skill_scratch_clear)
 register_skill("robot.cache_ee_pose", skill_cache_ee_pose)
 register_skill("robot.cache_joint_state", skill_cache_joint_state)
 register_skill("robot.snapshot_state", skill_robot_snapshot_state)
+register_skill("robot.send_mode_command", skill_send_mode_command)

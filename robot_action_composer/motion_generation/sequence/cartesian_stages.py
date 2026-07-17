@@ -1414,6 +1414,25 @@ def _send_gripper_commands(
 # Main executor
 # ---------------------------------------------------------------------------
 
+def pose_tol_ori_to_orient_deg(pose_tol_ori: float | None) -> float | None:
+    """将 ``QueueSliceCommon.pose_tol_ori``（四元数距离 ``1-|dot|``）转为 handler 使用的角度（度）。
+
+    ``ArmHandler.check_arrival`` 的 ``orient_threshold`` 单位是度。
+    若传入值 ``> 1``，视为已是度（兼容误填），原样返回。
+    """
+    if pose_tol_ori is None:
+        return None
+    try:
+        d = float(pose_tol_ori)
+    except (TypeError, ValueError):
+        return None
+    if d > 1.0:
+        return d
+    d = max(0.0, min(1.0, d))
+    abs_dot = max(0.0, min(1.0, 1.0 - d))
+    return math.degrees(2.0 * math.acos(abs_dot))
+
+
 def execute_stage_sequence(
     *,
     interface: ROS2RobotInterface,
@@ -1446,7 +1465,9 @@ def execute_stage_sequence(
 
     ``pose_tol_pos`` / ``pose_tol_ori``（米 / 无量纲姿态距离，与 ``QueueSliceCommon`` 一致）若给出，
     则传给 ``ROS2RobotInterface.wait_until_arrive`` 用于左右臂笛卡尔到位判定；否则使用接口默认阈值。
+    ``pose_tol_ori`` 会换算成度再交给 handler（见 :func:`pose_tol_ori_to_orient_deg`）。
     """
+    arm_orient_threshold = pose_tol_ori_to_orient_deg(pose_tol_ori)
     for stage in sequence:
         logger.info("[Stage] %s", stage.name)
         if on_stage_start is not None:
@@ -1467,7 +1488,7 @@ def execute_stage_sequence(
                     time_now_fn=time_now_fn,
                     sleep_fn=sleep_fn,
                     arm_pose_threshold=pose_tol_pos,
-                    arm_orient_threshold=pose_tol_ori,
+                    arm_orient_threshold=arm_orient_threshold,
                     on_poll=(
                         (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "left_arm", _r, _e))
                         if on_stage_poll is not None
@@ -1482,7 +1503,7 @@ def execute_stage_sequence(
                     time_now_fn=time_now_fn,
                     sleep_fn=sleep_fn,
                     arm_pose_threshold=pose_tol_pos,
-                    arm_orient_threshold=pose_tol_ori,
+                    arm_orient_threshold=arm_orient_threshold,
                     on_poll=(
                         (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "right_arm", _r, _e))
                         if on_stage_poll is not None
@@ -1554,4 +1575,5 @@ __all__ = [
     "build_single_arm_return_home_sequence",
     "compose_bimanual_synchronized_sequence",
     "execute_stage_sequence",
+    "pose_tol_ori_to_orient_deg",
 ]

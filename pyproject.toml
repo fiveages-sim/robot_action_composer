@@ -26,6 +26,8 @@ recording = [
 
 [project.scripts]
 motion-generation = "robot_action_composer.cli.motion_main:main"
+check-isaac-pose = "robot_action_composer.cli.check_isaac_pose_main:main"
+check-robot-status = "robot_action_composer.cli.check_robot_status_main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

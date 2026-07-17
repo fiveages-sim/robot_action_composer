@@ -140,6 +140,14 @@ def _execute_block(
     task_slice = getattr(ctx, "task_cfg", None)
     common = getattr(task_slice, "common", None) if task_slice is not None else None
     if common is not None:
+        # runtime_defaults.max_stage_duration 覆盖机器人默认 arrival_timeout
+        # （否则 arm_movel_duration=4 时仍会在默认 3s 就判超时）
+        msd = getattr(common, "max_stage_duration", None)
+        if msd is not None:
+            try:
+                exec_kw["arrival_timeout"] = float(msd)
+            except (TypeError, ValueError):
+                pass
         exec_kw["pose_tol_pos"] = common.pose_tol_pos
         exec_kw["pose_tol_ori"] = common.pose_tol_ori
     if execute_stage_kwargs:

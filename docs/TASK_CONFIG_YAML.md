@@ -141,7 +141,68 @@ scene_presets:
 
 - pick/place 都有 `arm` 时：全局主臂以 pick 为准；place 的 `arm` 只作用于其块执行。
 - `base_link_entity_path` 可在 `runtime_defaults` 或场景根覆盖机器人默认 base prim。
-- `pose_tol_pos` / `pose_tol_ori` / `max_stage_duration` 可在 `runtime_defaults` 或场景根配置，作用于流程级判定。
+- `pose_tol_pos` / `pose_tol_ori` / `max_stage_duration` 可在 `runtime_defaults` 或场景根配置，作用于**笛卡尔**流程级判定：
+  - `max_stage_duration`：覆盖机器人默认 `arrival_timeout`，作为每段笛卡尔到位等待上限（秒）。**不等于** `arm_movel_duration`（后者只改控制器轨迹时长）。
+  - `pose_tol_pos`：位置容差（米）。
+  - `pose_tol_ori`：姿态容差，单位是四元数距离 `1-|dot|`（无量纲）；runner 会换算成度再交给 `check_arrival`。常见写法 `0.03`～`0.08`，**不要**当成角度度数值。
+  - 关节 skill（`joint.*`）仍用块内 `arrival_timeout`，不受 `max_stage_duration` 覆盖。
+
+### 机物偏航对齐（pick / parallel_pick）
+
+导航到位后，机物常有固定相对偏航（如侧对 `±π/2`）。`ee_base_orientation` 按该**标称**标定；运行时只补相对偏差。细节见 [SKILLS_REFERENCE §6.2](SKILLS_REFERENCE.md)。
+
+```yaml
+# 0/90/180° 档：自动吸附
+dual_arm.parallel_pick:
+  ee_orientation_frame: object
+  object_orientation_mode: yaw
+  aligned_object_yaw: auto
+  left_pick: { object_prim_path: /World/obj, ee_base_orientation: [1,0,0,0], ... }
+  right_pick: { ... }
+
+# 斜向标称（如 45°）：显式角度；斜抓姿态写在 ee_base_orientation
+dual_arm.parallel_pick:
+  ee_orientation_frame: object
+  object_orientation_mode: yaw
+  aligned_object_yaw: 0.7854
+  left_pick: { ... }
+  right_pick: { ... }
+```
+
+### WBC 双臂耦合示例
+
+抓取后切耦合，再只发左臂相对移动（右臂跟随）：
+
+```yaml
+runtime_defaults:
+  max_stage_duration: 8.0
+  pose_tol_pos: 0.05
+  pose_tol_ori: 0.03
+
+skill_defaults:
+  dual_arm.parallel_pick:
+    ee_orientation_frame: object
+    object_orientation_mode: yaw
+    aligned_object_yaw: auto
+    left_pick: { ... }
+    right_pick: { ... }
+  enable_arms_coupled:
+    command: ARMS_COUPLED
+  coupled_left_move_relative:
+    arm: left
+    motion_frame_id: base_footprint
+    position_delta: [0.2, 0.0, 0.3]
+    orientation_delta_rpy: [0.0, -1.57, 0.0]
+    arm_movel_duration: 4.0
+    gripper: 0.0
+
+task_queue:
+  - skill: dual_arm.parallel_pick
+  - skill: robot.send_mode_command
+    id: enable_arms_coupled
+  - skill: single_arm.move_relative
+    id: coupled_left_move_relative
+```
 
 ---
 
