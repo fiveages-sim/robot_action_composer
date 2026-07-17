@@ -16,6 +16,7 @@ https://github.com/user-attachments/assets/4c3bcf28-f2cd-4c47-83a0-ecccb30c1891
 | [docs/SKILLS_REFERENCE.md](docs/SKILLS_REFERENCE.md) | 各技能参数、默认值与 YAML 示例 |
 | [docs/TASK_CONFIG_YAML.md](docs/TASK_CONFIG_YAML.md) | 任务 YAML 格式、`skill_defaults` / `skill_params`、加载与合并规则 |
 | [docs/ROBOT_CONFIG.md](docs/ROBOT_CONFIG.md) | `robot.yaml` / `lerobot_config.py` 与 `robots/` 目录约定 |
+| [docs/ROS2_STACK.md](docs/ROS2_STACK.md) | 场景级运控/导航启动（`.meta/ros2_stack.yaml`、`ros2-stack` CLI） |
 
 monorepo 内 **Isaac Sim 环境、USD、工作空间** 步骤见 **`examples/IsaacSim/README.md`**。
 
@@ -40,7 +41,7 @@ monorepo 内 **Isaac Sim 环境、USD、工作空间** 步骤见 **`examples/Isa
 ```mermaid
 flowchart TB
   subgraph entry [入口]
-    CLI[motion_main / record_main / check_isaac_pose / check_robot_status]
+    CLI[motion_main / ros2_stack_main / record_main / check_isaac_pose / check_robot_status]
     INF[inference 等调用方]
   end
 
@@ -207,9 +208,17 @@ check-isaac-pose /World/scene/wind_turbo_blade/turbo_blade /World/scene/boxes/wh
 check-robot-status
 check-robot-status --robot fiveages_w2 --workspace examples/IsaacSim
 check-robot-status --wait 3.0 --show-joint-names
+
+# 场景级运控/导航启动（见 docs/ROS2_STACK.md；语言与 motion-generation 共用）
+# tab 补全：./init.sh ros2-workspace 后随 activate 自动注册；或 eval "$(ros2-stack completion bash)"
+ros2-stack --lang zh start
+ros2-stack logs --robot fiveages_w2 -f          # 看后台日志
+ros2-stack stop --robot fiveages_w2             # 关掉栈
+ros2-stack status --robot fiveages_w2 --group "projets/siemens/Wind turbo blade"
+motion-generation --robot fiveages_w2 --task-key transfer_blade --ensure-ros2-stack
 ```
 
-`motion-generation` 扫描 `workspace_dir/robots/` 下扁平或一层分组（`robots/<Vendor>/<Robot>/`）的 `robot.yaml` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。上次选择与偏好（`lang`、`record_object_resolution_json` 等）缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。
+`motion-generation` 扫描 `workspace_dir/robots/` 下扁平或一层分组（`robots/<Vendor>/<Robot>/`）的 `robot.yaml` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。上次选择与偏好（`lang`、`record_object_resolution_json`、`ensure_ros2_stack` 等）缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。是否在运动前检查/启动 ROS2 栈由偏好 `ensure_ros2_stack` 决定（默认 `false`）；`--ensure-ros2-stack` / `--no-ensure-ros2-stack` 可覆盖。
 
 `check-isaac-pose` 通过 `/get_entity_state` 查询 prim 的 position（xyz）、orientation（xyzw 与 rpy）；`--relative-to` 时输出相对参考实体坐标系的位姿。
 

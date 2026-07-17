@@ -77,6 +77,8 @@ scene_presets:
   - `tasks`：全局 `task_key -> 配置`
   - `task_groups`：按**叶子目录**相对路径分组（posix，如 `siemens/nested`）
 
+**与 ROS2 栈启动配置的边界**：运控 / 导航启动写在叶子目录 **`.meta/ros2_stack.yaml`**（或 `robot.yaml` 的 `ros2_stack:`），**不是**任务编排文件。隐藏 `.meta/` 不会进入任务发现，也不触发叶子目录规则冲突。详见 [`ROS2_STACK.md`](ROS2_STACK.md)。
+
 ### 唯一性约束
 
 - 同目录下，同基名不能同时有 `.yaml` 与 `.yml`

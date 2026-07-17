@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from robot_action_composer.cli.i18n import Lang, get_language, normalize_lang, resolve_language, set_language, t
-from robot_action_composer.cli.interactive import select_robot_from_registry
+from robot_action_composer.cli.interactive import (
+    select_from_list,
+    select_robot_from_registry,
+    select_yes_no,
+)
 from robot_action_composer.discovery.registry_loader import load_motion_entries, resolve_robot_profile_dir
 
 
@@ -21,14 +25,8 @@ def _section_header(title: str) -> str:
 
 
 def _select_yes_no(*, title: str, default_yes: bool = True) -> bool:
-    yes = t("option.yes")
-    no = t("option.no")
-    picked = _select_option(
-        title=title,
-        options=[yes, no],
-        default_value=yes if default_yes else no,
-    )
-    return picked == yes
+    """Compat wrapper — prefer :func:`select_yes_no` from interactive."""
+    return select_yes_no(title=title, default_yes=default_yes)
 
 
 def _select_option(
@@ -38,33 +36,13 @@ def _select_option(
     default_value: str,
     allow_back: bool = False,
 ) -> str:
-    """List-based menu. With ``allow_back=True``, ``0`` / ``b`` / ``back`` returns ``\"__back__\"``."""
-    print(f"\n{title}")
-    if allow_back:
-        print(t("option.back"))
-    for idx, name in enumerate(options, start=1):
-        suffix = t("option.default_suffix") if name == default_value else ""
-        print(f"  {idx}. {name}{suffix}")
-    prompt = t("option.select_with_back") if allow_back else t("option.select")
-    raw = input(prompt).strip()
-    if raw == "":
-        return default_value
-    if allow_back:
-        rl = raw.lower()
-        if raw == "0" or rl in ("b", "back"):
-            return "__back__"
-    if raw.isdigit():
-        n = int(raw)
-        if allow_back and n == 0:
-            return "__back__"
-        index = n - 1
-        if 0 <= index < len(options):
-            return options[index]
-    if raw in options:
-        return raw
-    print(t("option.invalid", raw=raw, default=default_value))
-    return default_value
-
+    """Compat wrapper — prefer :func:`select_from_list` from interactive."""
+    return select_from_list(
+        title=title,
+        options=options,
+        default_value=default_value,
+        allow_back=allow_back,
+    )
 
 class _ChainSegmentDict(TypedDict):
     task_key: str
@@ -74,6 +52,7 @@ class _ChainSegmentDict(TypedDict):
 class _MotionLastDict(TypedDict, total=False):
     lang: str
     record_object_resolution_json: bool
+    ensure_ros2_stack: bool
     robot_key: str
     """Single-task mode (default when ``mode`` is absent or ``single``)."""
     task_key: str
@@ -144,12 +123,24 @@ def _load_record_object_resolution_pref(workspace_dir: Path) -> bool:
     return raw is True
 
 
+def _load_ensure_ros2_stack_pref(workspace_dir: Path) -> bool:
+    last = _load_motion_last(workspace_dir)
+    if not last:
+        return False
+    raw = last.get("ensure_ros2_stack")
+    return raw is True
+
+
 def _save_motion_lang(workspace_dir: Path, lang: Lang) -> None:
     _merge_motion_prefs(workspace_dir, lang=lang)
 
 
 def _save_record_object_resolution_pref(workspace_dir: Path, enabled: bool) -> None:
     _merge_motion_prefs(workspace_dir, record_object_resolution_json=bool(enabled))
+
+
+def _save_ensure_ros2_stack_pref(workspace_dir: Path, enabled: bool) -> None:
+    _merge_motion_prefs(workspace_dir, ensure_ros2_stack=bool(enabled))
 
 
 def _language_display_name(lang: Lang) -> str:
@@ -178,6 +169,14 @@ def _prompt_record_object_resolution_pref(*, workspace_dir: Path) -> None:
     _save_record_object_resolution_pref(workspace_dir, enabled)
     value = t("motion.reset.yes") if enabled else t("motion.reset.no")
     print(t("motion.record_object_resolution_saved", value=value))
+
+
+def _prompt_ensure_ros2_stack_pref(*, workspace_dir: Path) -> None:
+    current = _load_ensure_ros2_stack_pref(workspace_dir)
+    enabled = _select_yes_no(title=t("motion.ensure_ros2_stack"), default_yes=current)
+    _save_ensure_ros2_stack_pref(workspace_dir, enabled)
+    value = t("motion.reset.yes") if enabled else t("motion.reset.no")
+    print(t("motion.ensure_ros2_stack_saved", value=value))
 
 
 def _print_menu_divider() -> None:
@@ -283,9 +282,13 @@ def _prompt_settings(*, workspace_dir: Path) -> None:
         record_current = t("motion.reset.yes") if _load_record_object_resolution_pref(workspace_dir) else t(
             "motion.reset.no"
         )
+        ensure_current = t("motion.reset.yes") if _load_ensure_ros2_stack_pref(workspace_dir) else t(
+            "motion.reset.no"
+        )
         print(t("motion.settings_menu"))
         print(t("motion.settings_language"))
         print(t("motion.settings_object_resolution", current=record_current))
+        print(t("motion.settings_ensure_ros2_stack", current=ensure_current))
         print(t("motion.settings_back"))
         raw = input(t("motion.settings_select")).strip().lower()
         if raw in ("", "0", "b", "back"):
@@ -295,6 +298,9 @@ def _prompt_settings(*, workspace_dir: Path) -> None:
             continue
         if raw == "2":
             _prompt_record_object_resolution_pref(workspace_dir=workspace_dir)
+            continue
+        if raw == "3":
+            _prompt_ensure_ros2_stack_pref(workspace_dir=workspace_dir)
             continue
 
 
@@ -363,6 +369,7 @@ def _save_motion_last(
                 data["scene"] = scene
         data["lang"] = get_language()
         data["record_object_resolution_json"] = _load_record_object_resolution_pref(workspace_dir)
+        data["ensure_ros2_stack"] = _load_ensure_ros2_stack_pref(workspace_dir)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     except OSError:
         pass
@@ -775,6 +782,10 @@ def run_motion_generation(
     object_resolution_json: Path | None = None,
     no_reset: bool = False,
     lang: str | None = None,
+    ensure_ros2_stack: bool | None = None,
+    motion_preset: str | None = None,
+    nav_profile: str | None = None,
+    new_terminal: bool = False,
 ) -> None:
     set_language(resolve_language(cli_lang=lang, cached_lang=_load_cached_lang(workspace_dir)))
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
@@ -839,6 +850,13 @@ def run_motion_generation(
             t(
                 "motion.current_record_object_resolution",
                 value=t("motion.reset.yes") if record_on else t("motion.reset.no"),
+            )
+        )
+        ensure_on = _load_ensure_ros2_stack_pref(workspace_dir)
+        print(
+            t(
+                "motion.current_ensure_ros2_stack",
+                value=t("motion.reset.yes") if ensure_on else t("motion.reset.no"),
             )
         )
         print("=" * 70)
@@ -991,6 +1009,40 @@ def run_motion_generation(
         run_task_queue_interactive_on_connected_interface,
     )
     from robot_action_composer.record.time_helpers import WallTimeHelper
+    from robot_action_composer.ros2_stack.ensure import ensure_ros2_stack_for_motion
+
+    # Ensure ROS2 motion/nav stack (if configured) before connecting
+    ensure_task_key = task_key
+    ensure_task_cfg: dict[str, Any] | None = task_entry
+    if entry_kind in ("last_chain", "interactive_chain") and chain_segments:
+        ensure_task_key = chain_segments[0]["task_key"]
+        ensure_task_cfg = robot_entry["tasks"][ensure_task_key]
+    if ensure_task_key and ensure_task_cfg is not None:
+        # CLI --ensure / --no-ensure wins; otherwise preference (default: off).
+        ensure_flag = (
+            ensure_ros2_stack
+            if ensure_ros2_stack is not None
+            else _load_ensure_ros2_stack_pref(workspace_dir)
+        )
+        if ensure_flag:
+            interactive_ensure = cli_robot_key is None or cli_task_key is None
+            try:
+                ensure_ros2_stack_for_motion(
+                    workspace_dir=workspace_dir,
+                    robot_dir=resolve_robot_profile_dir(workspace_dir, robot_entry),
+                    robot_key=robot_key,
+                    task_groups=robot_entry.get("task_groups") or {},
+                    task_key=ensure_task_key,
+                    task_cfg=ensure_task_cfg,
+                    interactive=interactive_ensure,
+                    ensure=True,
+                    motion_preset=motion_preset,
+                    nav_profile=nav_profile,
+                    new_terminal=new_terminal,
+                )
+            except Exception as exc:
+                print(f"[ros2-stack] ensure failed: {exc}")
+                raise
 
     motion_environment = detect_motion_environment_from_ros()
     if motion_environment == "real":
@@ -1285,6 +1337,41 @@ def _parse_args() -> argparse.Namespace:
         choices=("zh", "en"),
         help="UI language: zh (Chinese) or en (English); default from MOTION_GENERATION_LANG or LANG",
     )
+    parser.set_defaults(ensure_ros2_stack=None)
+    ensure_group = parser.add_mutually_exclusive_group()
+    ensure_group.add_argument(
+        "--ensure-ros2-stack",
+        dest="ensure_ros2_stack",
+        action="store_const",
+        const=True,
+        help="Ensure motion/navigation ROS2 launches before connecting",
+    )
+    ensure_group.add_argument(
+        "--no-ensure-ros2-stack",
+        dest="ensure_ros2_stack",
+        action="store_const",
+        const=False,
+        help="Do not auto-start motion/navigation ROS2 launches",
+    )
+    parser.add_argument(
+        "--motion-preset",
+        type=str,
+        default=None,
+        choices=("ocs2-fullbody", "ocs2-split-body", "ocs2-demo"),
+        help="Override motion.preset when ensuring ros2_stack",
+    )
+    parser.add_argument(
+        "--nav-profile",
+        type=str,
+        default=None,
+        choices=("default", "map_only"),
+        help="Override navigation.profile when ensuring ros2_stack",
+    )
+    parser.add_argument(
+        "--new-terminal",
+        action="store_true",
+        help="Try spawning ros2_stack launches in a GUI terminal",
+    )
     return parser.parse_args()
 
 
@@ -1302,6 +1389,10 @@ def main() -> None:
         object_resolution_json=json_path,
         no_reset=args.no_reset,
         lang=args.lang,
+        ensure_ros2_stack=args.ensure_ros2_stack,
+        motion_preset=args.motion_preset,
+        nav_profile=args.nav_profile,
+        new_terminal=args.new_terminal,
     )
 
 

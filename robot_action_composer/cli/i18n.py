@@ -1,4 +1,4 @@
-"""Lightweight zh/en strings for motion-generation CLI."""
+"""Lightweight zh/en strings for motion-generation and ros2-stack CLIs."""
 
 from __future__ import annotations
 
@@ -293,20 +293,255 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
         "en": "[info] Object-resolution JSON recording: {value}",
         "zh": "[info] Object-resolution JSON 录制: {value}",
     },
+    "motion.current_ensure_ros2_stack": {
+        "en": "[info] Check ROS2 stack before run: {value}",
+        "zh": "[info] 运行前检查 ROS2 栈: {value}",
+    },
     "motion.settings_menu": {"en": "\nPreferences:", "zh": "\n偏好设置："},
     "motion.settings_language": {"en": "  1. Language", "zh": "  1. 语言"},
     "motion.settings_object_resolution": {
         "en": "  2. Object-resolution JSON recording (current: {current})",
         "zh": "  2. Object-resolution JSON 录制（当前: {current}）",
     },
+    "motion.settings_ensure_ros2_stack": {
+        "en": "  3. Check ROS2 stack before run (current: {current})",
+        "zh": "  3. 运行前检查 ROS2 栈（当前: {current}）",
+    },
     "motion.settings_back": {"en": "  0. « Back", "zh": "  0. « 返回"},
     "motion.settings_select": {
-        "en": "Select [0/1/2] (Enter = back): ",
-        "zh": "请选择 [0/1/2]（回车=返回）: ",
+        "en": "Select [0/1/2/3] (Enter = back): ",
+        "zh": "请选择 [0/1/2/3]（回车=返回）: ",
     },
     "motion.record_object_resolution_saved": {
         "en": "[info] Object-resolution JSON recording set to {value}.",
         "zh": "[info] Object-resolution JSON 录制已设为 {value}。",
+    },
+    "motion.ensure_ros2_stack": {
+        "en": "Check / ensure ROS2 motion & navigation stack before motion run?",
+        "zh": "运动运行前是否检查并确保 ROS2 运控/导航栈已启动？",
+    },
+    "motion.ensure_ros2_stack_saved": {
+        "en": "[info] ROS2 stack check set to {value}.",
+        "zh": "[info] ROS2 栈检查已设为 {value}。",
+    },
+    # ros2-stack (shared UI language with motion-generation)
+    "ros2_stack.title": {"en": "ROS2 Stack", "zh": "ROS2 栈启动"},
+    "ros2_stack.select_robot": {"en": "Select robot", "zh": "选择机器人"},
+    "ros2_stack.load_meta": {
+        "en": "Load task-folder .meta/ros2_stack.yaml?",
+        "zh": "是否加载任务文件夹下的 .meta/ros2_stack.yaml？",
+    },
+    "ros2_stack.load_meta_yes": {
+        "en": "Yes — select task folder",
+        "zh": "是 — 选择任务文件夹",
+    },
+    "ros2_stack.load_meta_no": {
+        "en": "No — robot.yaml only",
+        "zh": "否 — 仅使用 robot.yaml",
+    },
+    "ros2_stack.select_task_folder": {"en": "Select task folder", "zh": "选择任务文件夹"},
+    "ros2_stack.motion_header": {
+        "en": "\n[ros2-stack] Motion launch configuration",
+        "zh": "\n[ros2-stack] 运控启动配置",
+    },
+    "ros2_stack.nav_header": {
+        "en": "\n[ros2-stack] Navigation launch configuration",
+        "zh": "\n[ros2-stack] 导航启动配置",
+    },
+    "ros2_stack.configured_default": {
+        "en": "  configured default: {value}",
+        "zh": "  配置默认: {value}",
+    },
+    "ros2_stack.command": {"en": "  command: {value}", "zh": "  命令: {value}"},
+    "ros2_stack.select_motion_preset": {
+        "en": "Select motion preset",
+        "zh": "选择运控启动形态",
+    },
+    "ros2_stack.select_nav_profile": {
+        "en": "Select navigation profile",
+        "zh": "选择导航 profile",
+    },
+    "ros2_stack.preset.ocs2-fullbody": {
+        "en": "ocs2-fullbody (full body / WBC)",
+        "zh": "ocs2-fullbody（全身 / WBC）",
+    },
+    "ros2_stack.preset.ocs2-split-body": {
+        "en": "ocs2-split-body (split body / arm)",
+        "zh": "ocs2-split-body（分体 / 臂控）",
+    },
+    "ros2_stack.preset.ocs2-demo": {
+        "en": "ocs2-demo (demo launch)",
+        "zh": "ocs2-demo（Demo）",
+    },
+    "ros2_stack.profile.default": {"en": "default", "zh": "default（完整导航）"},
+    "ros2_stack.profile.map_only": {"en": "map_only", "zh": "map_only（仅地图）"},
+    "ros2_stack.nav_map_prompt": {
+        "en": "Navigation map [{default}] (Enter to keep): ",
+        "zh": "导航地图 [{default}]（回车保持）: ",
+    },
+    "ros2_stack.start_nav_also": {
+        "en": "Start navigation as well?",
+        "zh": "是否同时启动导航？",
+    },
+    "ros2_stack.change_options": {
+        "en": "Change launch options (preset / profile / map)?",
+        "zh": "是否修改启动选项（preset / profile / 地图）？",
+    },
+    "ros2_stack.how_to_start": {"en": "\nHow to start?", "zh": "\n如何启动？"},
+    "ros2_stack.last_selection_header": {
+        "en": "  1. Last selection",
+        "zh": "  1. 上次选择",
+    },
+    "ros2_stack.new_selection": {
+        "en": "  2. New selection",
+        "zh": "  2. 重新选择",
+    },
+    "ros2_stack.select_start_mode": {
+        "en": "Select [1/2] (Enter = 1): ",
+        "zh": "请选择 [1/2]（回车=1）: ",
+    },
+    "ros2_stack.using_last": {
+        "en": "\n[info] Using last selection:",
+        "zh": "\n[info] 使用上次选择：",
+    },
+    "ros2_stack.brief.robot": {"en": "    robot: {value}", "zh": "    机器人: {value}"},
+    "ros2_stack.brief.group": {"en": "    group: {value}", "zh": "    任务组: {value}"},
+    "ros2_stack.brief.motion": {"en": "    motion: {value}", "zh": "    运控: {value}"},
+    "ros2_stack.brief.nav": {"en": "    navigation: {value}", "zh": "    导航: {value}"},
+    "ros2_stack.brief.nav_yes": {
+        "en": "yes ({detail})",
+        "zh": "是（{detail}）",
+    },
+    "ros2_stack.brief.nav_no": {"en": "no", "zh": "否"},
+    "ros2_stack.confirm_start": {
+        "en": "Start with this configuration?",
+        "zh": "按此配置启动？",
+    },
+    "ros2_stack.ensure_prompt": {
+        "en": "Ensure ROS2 motion/navigation stack is running?",
+        "zh": "是否确保运控/导航 ROS2 栈已启动？",
+    },
+    "ros2_stack.ensure_skipped": {
+        "en": "[ros2-stack] ensure skipped",
+        "zh": "[ros2-stack] 已跳过自动启动",
+    },
+    "ros2_stack.ensure_hint_cli": {
+        "en": (
+            "[ros2-stack] config present; pass --ensure-ros2-stack to auto-start "
+            "(or use ros2-stack start)"
+        ),
+        "zh": (
+            "[ros2-stack] 已有配置；请加 --ensure-ros2-stack 以自动启动"
+            "（或使用 ros2-stack start）"
+        ),
+    },
+    "ros2_stack.no_components": {
+        "en": "[ros2-stack] no components required for this task",
+        "zh": "[ros2-stack] 本任务无需启动额外组件",
+    },
+    "ros2_stack.resolved_header": {
+        "en": "\n[ros2-stack] Resolved launch configuration:",
+        "zh": "\n[ros2-stack] 解析后的启动配置：",
+    },
+    "ros2_stack.will_ensure": {
+        "en": "[ros2-stack] Will ensure:",
+        "zh": "[ros2-stack] 将确保启动：",
+    },
+    "ros2_stack.nothing_to_start": {
+        "en": "[ros2-stack] nothing to start",
+        "zh": "[ros2-stack] 无需启动",
+    },
+    "ros2_stack.all_ready": {
+        "en": "[ros2-stack] all required components already ready",
+        "zh": "[ros2-stack] 所需组件均已就绪",
+    },
+    "ros2_stack.robot_group": {
+        "en": "[ros2-stack] robot={robot} group={group}",
+        "zh": "[ros2-stack] 机器人={robot} 任务组={group}",
+    },
+    "ros2_stack.group_none": {"en": "(none)", "zh": "（无）"},
+    "ros2_stack.ready": {"en": "READY", "zh": "就绪"},
+    "ros2_stack.not_ready": {"en": "NOT READY", "zh": "未就绪"},
+    "ros2_stack.warning": {"en": "[ros2-stack] warning: {msg}", "zh": "[ros2-stack] 警告: {msg}"},
+    "ros2_stack.no_config": {
+        "en": (
+            "No ros2_stack config for robot={robot!r} group={group!r}. "
+            "Add ros2_stack to robot.yaml and/or <leaf>/.meta/ros2_stack.yaml"
+        ),
+        "zh": (
+            "机器人 {robot!r} 任务组 {group!r} 无 ros2_stack 配置。"
+            "请在 robot.yaml 和/或 <leaf>/.meta/ros2_stack.yaml 中添加。"
+        ),
+    },
+    "ros2_stack.no_robots": {
+        "en": "No robots under {path}",
+        "zh": "未在 {path} 下找到机器人",
+    },
+    "ros2_stack.list_nodes_failed": {
+        "en": "[ros2-stack] failed to list nodes: {exc}",
+        "zh": "[ros2-stack] 列举节点失败: {exc}",
+    },
+    "ros2_stack.stop_result": {
+        "en": "[ros2-stack] stop {name}: {result}",
+        "zh": "[ros2-stack] 停止 {name}: {result}",
+    },
+    "ros2_stack.stop_signalled": {"en": "signalled", "zh": "已发信号"},
+    "ros2_stack.stop_no_pid": {"en": "no managed pid", "zh": "无托管 PID"},
+    "ros2_stack.stop_auto_robot": {
+        "en": "[ros2-stack] Stopping managed stack for robot={robot}",
+        "zh": "[ros2-stack] 正在停止机器人 {robot} 的托管栈",
+    },
+    "ros2_stack.stop_nothing": {
+        "en": (
+            "[ros2-stack] No managed stack running. "
+            "Pass --robot <key> or start with ros2-stack start first."
+        ),
+        "zh": (
+            "[ros2-stack] 当前没有由本工具托管的运行中栈。"
+            "请先 ros2-stack start，或加 --robot <key>。"
+        ),
+    },
+    "ros2_stack.unknown_robot": {
+        "en": "Unknown robot key: {robot!r}",
+        "zh": "未知机器人: {robot!r}",
+    },
+    "ros2_stack.component_line": {
+        "en": "  {name}: {status}",
+        "zh": "  {name}: {status}",
+    },
+    "ros2_stack.logs_header": {
+        "en": "[ros2-stack] Log files under {path}:",
+        "zh": "[ros2-stack] 日志目录 {path}：",
+    },
+    "ros2_stack.logs_empty": {
+        "en": "[ros2-stack] No log files yet for robot={robot}. Start the stack first.",
+        "zh": "[ros2-stack] 机器人 {robot} 尚无日志。请先 ros2-stack start。",
+    },
+    "ros2_stack.logs_auto_robot": {
+        "en": "[ros2-stack] Showing logs for robot={robot}",
+        "zh": "[ros2-stack] 显示机器人 {robot} 的日志",
+    },
+    "ros2_stack.logs_nothing": {
+        "en": (
+            "[ros2-stack] No current stack robot. "
+            "Pass --robot <key> or start with ros2-stack start first."
+        ),
+        "zh": (
+            "[ros2-stack] 未找到当前栈对应的机器人。"
+            "请先 ros2-stack start，或加 --robot <key>。"
+        ),
+    },
+    "ros2_stack.logs_follow_hint": {
+        "en": "[ros2-stack] Following logs (Ctrl+C to stop following, stack keeps running)…",
+        "zh": "[ros2-stack] 正在跟踪日志（Ctrl+C 仅退出跟踪，不会停止栈）…",
+    },
+    "ros2_stack.logs_tail_hint": {
+        "en": "[ros2-stack] Tip: ros2-stack logs --robot {robot} -f",
+        "zh": "[ros2-stack] 跟踪日志: ros2-stack logs --robot {robot} -f",
+    },
+    "ros2_stack.stop_hint": {
+        "en": "[ros2-stack] Tip: ros2-stack stop --robot {robot}",
+        "zh": "[ros2-stack] 停止栈: ros2-stack stop --robot {robot}",
     },
 }
 

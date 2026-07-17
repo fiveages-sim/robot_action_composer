@@ -20,8 +20,9 @@ robots/galbot/Galbot_One/    # 按厂商分组
 
 | 文件 | 内容 | 依赖 | 用途 |
 |------|------|------|------|
-| `robot.yaml` | `key`、`label`、motion 字段、`ros2_interface` | `pyyaml`；构建时懒加载 `ros2_robot_interface` | `motion-generation`、任务队列执行 |
+| `robot.yaml` | `key`、`label`、motion 字段、`ros2_interface`、可选 `ros2_stack` | `pyyaml`；构建时懒加载 `ros2_robot_interface` | `motion-generation`、任务队列执行、`ros2-stack` |
 | `lerobot_config.py` | `LEROBOT_CFG` | 无（类型定义在 composer 内） | `record_datasets`、IsaacSim `inference.py` |
+| `task_configs/<leaf>/.meta/ros2_stack.yaml` | 场景级运控/导航启动覆盖 | `pyyaml` | `ros2-stack`、`motion-generation --ensure-ros2-stack`（见 [`ROS2_STACK.md`](ROS2_STACK.md)） |
 
 解析结果为 `MotionRobotConfig`（见 `robot_action_composer.config.robot_profiles`）。
 
@@ -37,6 +38,18 @@ ros2_interface:                               # 可选；省略则 preset=auto
   preset: auto                                # auto | single_arm | ocs2_single_arm
   pose_position_threshold: 0.02
   pose_orientation_threshold: 0.05
+
+ros2_stack:                                   # 可选；场景运控/导航启动默认，见 ROS2_STACK.md
+  defaults:
+    args:
+      robot: my_robot
+      hardware: isaac
+  motion:
+    required: true
+    preset: ocs2-fullbody                     # ocs2-fullbody | ocs2-split-body | ocs2-demo
+  navigation:
+    required: auto
+    profile: default                          # default | map_only
 ```
 
 motion 相关字段可写在根级，或集中在 `motion:` 下（与根级合并，根级优先）：

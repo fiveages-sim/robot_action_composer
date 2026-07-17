@@ -1,12 +1,62 @@
 #!/usr/bin/env python3
-"""Shared interactive CLI helpers for motion and recording entry points."""
+"""Shared interactive CLI helpers for motion, ros2-stack, and recording entry points."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from robot_action_composer.cli.i18n import t
+
+
+def select_yes_no(*, title: str, default_yes: bool = True) -> bool:
+    """Yes/no menu using shared i18n labels (same UX as motion-generation)."""
+    yes = t("option.yes")
+    no = t("option.no")
+    options = {yes: {"label": yes}, no: {"label": no}}
+    default_key = yes if default_yes else no
+    picked = select_option(title=title, options=options, default_key=default_key)
+    return picked == yes
+
+
+def select_from_list(
+    *,
+    title: str,
+    options: Sequence[str],
+    default_value: str,
+    allow_back: bool = False,
+) -> str:
+    """List-based menu (values displayed as labels). ``allow_back`` → ``\"__back__\"``."""
+    values = list(options)
+    if not values:
+        raise ValueError("select_from_list: empty options")
+    if default_value not in values:
+        default_value = values[0]
+    print(f"\n{title}")
+    if allow_back:
+        print(t("option.back"))
+    for idx, name in enumerate(values, start=1):
+        suffix = t("option.default_suffix") if name == default_value else ""
+        print(f"  {idx}. {name}{suffix}")
+    prompt = t("option.select_with_back") if allow_back else t("option.select")
+    raw = input(prompt).strip()
+    if raw == "":
+        return default_value
+    if allow_back:
+        rl = raw.lower()
+        if raw == "0" or rl in ("b", "back"):
+            return "__back__"
+    if raw.isdigit():
+        n = int(raw)
+        if allow_back and n == 0:
+            return "__back__"
+        index = n - 1
+        if 0 <= index < len(values):
+            return values[index]
+    if raw in values:
+        return raw
+    print(t("option.invalid", raw=raw, default=default_value))
+    return default_value
 
 
 def prompt_positive_int(
@@ -308,3 +358,45 @@ def select_task_with_optional_group(
             if task_key == "__back__":
                 break
             return task_key
+
+
+def motion_preset_option_label(preset_key: str) -> str:
+    i18n_key = f"ros2_stack.preset.{preset_key}"
+    try:
+        return t(i18n_key)
+    except KeyError:
+        return preset_key
+
+
+def nav_profile_option_label(profile_key: str) -> str:
+    i18n_key = f"ros2_stack.profile.{profile_key}"
+    try:
+        return t(i18n_key)
+    except KeyError:
+        return profile_key
+
+
+def select_motion_preset(*, default_key: str, preset_keys: Sequence[str] | None = None) -> str:
+    """Interactive motion preset picker (shared by motion-generation ensure and ros2-stack)."""
+    from robot_action_composer.ros2_stack.presets import list_motion_preset_keys
+
+    keys = list(preset_keys) if preset_keys is not None else list_motion_preset_keys()
+    options = {k: {"label": motion_preset_option_label(k)} for k in keys}
+    default = default_key if default_key in options else keys[0]
+    return select_option(
+        title=t("ros2_stack.select_motion_preset"),
+        options=options,
+        default_key=default,
+    )
+
+
+def select_nav_profile(*, default_key: str = "default") -> str:
+    """Interactive navigation profile picker."""
+    keys = ["default", "map_only"]
+    options = {k: {"label": nav_profile_option_label(k)} for k in keys}
+    default = default_key if default_key in options else "default"
+    return select_option(
+        title=t("ros2_stack.select_nav_profile"),
+        options=options,
+        default_key=default,
+    )

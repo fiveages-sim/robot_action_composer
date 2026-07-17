@@ -79,6 +79,10 @@ def motion_profile_from_robot_yaml(path: Path) -> tuple[MotionRobotConfig, str, 
     if ros2_section is not None and not isinstance(ros2_section, dict):
         raise TypeError(f"{path}: 'ros2_interface' must be a mapping if present")
 
+    ros2_stack_section = data.get("ros2_stack")
+    if ros2_stack_section is not None and not isinstance(ros2_stack_section, dict):
+        raise TypeError(f"{path}: 'ros2_stack' must be a mapping if present")
+
     motion_kwargs: dict[str, Any] = {}
     for source in (data, motion_section or {}):
         for name in _MOTION_FIELD_NAMES:
@@ -88,7 +92,15 @@ def motion_profile_from_robot_yaml(path: Path) -> tuple[MotionRobotConfig, str, 
     unknown_root = [
         k
         for k in data
-        if k not in {"key", "label", "motion", "ros2_interface", *_MOTION_FIELD_NAMES}
+        if k
+        not in {
+            "key",
+            "label",
+            "motion",
+            "ros2_interface",
+            "ros2_stack",
+            *_MOTION_FIELD_NAMES,
+        }
     ]
     if unknown_root:
         raise ValueError(f"{path}: unknown root keys: {sorted(unknown_root)}")
