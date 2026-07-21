@@ -52,6 +52,8 @@ class QueueSlicePick:
     object_orientation_mode: str = "yaw"
     # 标称物体 yaw：数值（弧度）或 "auto"（吸附到最近的 k·π/2）
     aligned_object_yaw: float | str = "auto"
+    # 标称物体 roll：仅 object_orientation_mode=yaw_roll 时生效；数值或 "auto"
+    aligned_object_roll: float | str = "auto"
 
 
 @dataclass(frozen=True)

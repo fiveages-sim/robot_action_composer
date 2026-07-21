@@ -89,8 +89,9 @@
   - **运动系配置**
     - `ee_base_orientation`：抓取姿态四元数 `xyzw`。语义为**某一标称机物相对朝向下的期望抓取方向**（可含斜抓；见 §6.2）。
     - `ee_orientation_frame`：`motion`（默认，直接用标定姿态）| `object`（按相对标称的物体姿态偏差左乘）。
-    - `object_orientation_mode`：配合 `object` 帧；默认 `yaw`（仅绕竖直 Z）；亦可 `full` / `tilt` / `pitch` / `none`。
+    - `object_orientation_mode`：配合 `object` 帧；默认 `yaw`（仅绕竖直 Z）；亦可 `yaw_roll` / `full` / `tilt` / `pitch` / `none`。
     - `aligned_object_yaw`：标称物体 yaw。数值（弧度），或 `auto`（吸附到最近的 `k·π/2`）。详见 §6.2。
+    - `aligned_object_roll`：标称物体 roll（仅 `yaw_roll` 时生效）。数值或 `auto`。详见 §6.2。
     - `motion_frame_id`：抓取目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
   - **末端系配置**
@@ -236,8 +237,9 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
   - `motion_frame_id`：该侧物体位姿解析后的输出坐标系（可选；不写则沿用任务 `frame_id`）。**左右两侧解析后必须相同**，否则双臂同步下发无法共用一个坐标系。
   - `tf_lookup_timeout`：TF 查询超时（秒）；本块取左右两侧的较大值用于两侧物体位姿变换。
   - `ee_orientation_frame`（块级或每侧，默认 `motion`）：`motion` 直接用标定 `ee_base_orientation`；`object` 则按相对标称的物体姿态偏差左乘。
-  - `object_orientation_mode`（块级或每侧，默认 `yaw`）：配合 `ee_orientation_frame=object`。推荐 `yaw`；亦可 `full` / `tilt` / `pitch` / `none`。
+  - `object_orientation_mode`（块级或每侧，默认 `yaw`）：配合 `ee_orientation_frame=object`。推荐 `yaw`；需拧轴对齐时用 `yaw_roll`；亦可 `full` / `tilt` / `pitch` / `none`。
   - `aligned_object_yaw`（块级或每侧，默认 `auto`）：标称物体 yaw。`auto` = 吸附到最近的 `k·π/2`（0 / ±1.57 / ±3.14）；也可写显式弧度。校正量 = `wrap(yaw_object − aligned)`。
+  - `aligned_object_roll`（块级或每侧，默认 `auto`）：标称物体 roll；仅 `yaw_roll` 时生效，语义同 yaw。
 
 - **末端系配置**
   - `ee_base_orientation`：抓取姿态四元数 `xyzw`。语义为**标称机物相对朝向下的期望抓取方向**（含导航到位后的固定转角关系）；开启 `ee_orientation_frame: object` 后只再乘相对 `aligned_object_yaw` 的偏差。
@@ -252,11 +254,11 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
 #### `dual_arm.parallel_pick`
 
 - **效果**：一次执行完整双臂同时抓取序列（两侧各走一条 `build_single_arm_pick_sequence`，再按阶段同步合成）。
-- **参数**：读取 `left_pick` / `right_pick`（见上方字段列表）；块级 `ee_orientation_frame` / `object_orientation_mode` / `aligned_object_yaw` 可两侧共用。
+- **参数**：读取 `left_pick` / `right_pick`（见上方字段列表）；块级 `ee_orientation_frame` / `object_orientation_mode` / `aligned_object_yaw` / `aligned_object_roll` 可两侧共用。
 - **备注**：
   - 执行完成后会将 `gripper_for_return_home` 置为闭合值（与单臂 pick 行为一致）。
   - `object_position_offset` 始终在物体系；抓取点位置本身已随物体朝向变。
-  - 机物偏航对齐、斜抓与 `aligned_object_yaw` 用法见 **§6.2**。
+  - 机物偏航/滚转对齐、斜抓与 `aligned_object_yaw` / `aligned_object_roll` 用法见 **§6.2**。
   - 常用写法：
     ```yaml
     # 导航 0/90/180° 档位：自动吸附标称偏航
@@ -265,6 +267,16 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
       object_orientation_mode: yaw
       aligned_object_yaw: auto
       left_pick: { ... ee_base_orientation: [1,0,0,0], ... }
+      right_pick: { ... }
+
+
+    # 叶片等需 yaw+roll 拧轴对齐
+    dual_arm.parallel_pick:
+      ee_orientation_frame: object
+      object_orientation_mode: yaw_roll
+      aligned_object_yaw: auto
+      aligned_object_roll: auto
+      left_pick: { ... }
       right_pick: { ... }
 
     # 斜向接近（如标称相对偏航 45°）：显式角度，勿用 auto
@@ -579,7 +591,7 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
 
 > 关节 skill（`joint.movej_to_config`）仍用块内自己的 `arrival_timeout`，不受 `max_stage_duration` 覆盖。
 
-### 6.2 机物偏航对齐（`single_arm.pick` / `dual_arm.parallel_pick`）
+### 6.2 机物朝向对齐（`single_arm.pick` / `dual_arm.parallel_pick`）
 
 实现：`motion_generation/tasks/object_orientation.py`（`compose_aligned_ee_orientation`）。
 
@@ -597,15 +609,30 @@ yaw_corr = wrap(yaw_object − aligned)
 q_ee     = R_z(yaw_corr) ⊗ ee_base
 ```
 
+**公式（`object_orientation_mode: yaw_roll`）**
+
+```text
+aligned_yaw  = aligned_object_yaw   # 或 auto → snap(yaw)
+aligned_roll = aligned_object_roll  # 或 auto → snap(roll)
+yaw_corr  = wrap(yaw_object  − aligned_yaw)
+roll_corr = wrap(roll_object − aligned_roll)
+q_corr    = euler_rpy(roll_corr, 0, yaw_corr)   # pitch 置 0
+q_ee      = q_corr ⊗ ee_base
+```
+
+在 **pitch≈0 / 水平抓**、且标定档落在物轴网格上时，`yaw_roll` 几何上等价于把夹爪运动轴（由 `ee_base` 标定，通常工具系 +Z）贴到物体最近的 ±X/±Y/±Z。不处理任意 3D 斜置物体的最近点积对齐。
+
 工具系偏移（prepare / lift / retreat）用 **有效** `q_ee` 旋到运动系。
 
-**`aligned_object_yaw` 怎么填**
+**`aligned_object_yaw` / `aligned_object_roll` 怎么填**
 
 | 取值 | 含义 | 适用 |
 |------|------|------|
-| `auto`（推荐默认） | 把物体在运动系的 yaw 吸附到最近的 `0 / ±π/2 / ±π` | 导航朝向落在 0°/90°/180° 档 |
-| 显式弧度（如 `0.7854`、`-1.5708`） | 固定标称相对偏航 | 斜向接近、或不要自动吸附时 |
+| `auto`（推荐默认） | 把物体在运动系的对应角吸附到最近的 `0 / ±π/2 / ±π` | 导航朝向落在 0°/90°/180° 档 |
+| 显式弧度（如 `0.7854`、`-1.5708`） | 固定标称相对角 | 斜向接近、或不要自动吸附时 |
 | `0` | 标称即机物 X 对齐（旧语义） | 无固定导航转角时 |
+
+`aligned_object_roll` 仅在 `yaw_roll` 模式下参与合成；`yaw` 模式忽略。
 
 **斜抓**
 
@@ -624,6 +651,15 @@ dual_arm.parallel_pick:
     object_prim_path: /World/obj
     object_position_offset: [0.0, -0.05, -0.06]
     ee_base_orientation: [1.0, 0.0, 0.0, 0.0]
+  right_pick: { ... }
+
+# 叶片等：yaw + roll 同时吸附（拧轴对齐）
+dual_arm.parallel_pick:
+  ee_orientation_frame: object
+  object_orientation_mode: yaw_roll
+  aligned_object_yaw: auto
+  aligned_object_roll: auto
+  left_pick: { ... }
   right_pick: { ... }
 
 # 斜 45° 标称接近 + 斜抓姿态

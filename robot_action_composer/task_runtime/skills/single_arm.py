@@ -264,6 +264,7 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         ee_orientation_frame=ee_frame,
         object_orientation_mode=ori_mode,
         aligned_object_yaw=pk.aligned_object_yaw,
+        aligned_object_roll=pk.aligned_object_roll,
     )
     retreat_offset = (
         rotate_vector_by_quat(pk.ee_lift_offset, ee_orientation)
@@ -329,6 +330,7 @@ def skill_move_to_object(ctx: QueueRuntimeContext, params: Mapping[str, Any]) ->
         ee_orientation_frame=ee_frame,
         object_orientation_mode=str(pk.object_orientation_mode or "yaw"),
         aligned_object_yaw=pk.aligned_object_yaw,
+        aligned_object_roll=pk.aligned_object_roll,
     )
     target.orientation.x = float(ee_orientation[0])
     target.orientation.y = float(ee_orientation[1])
