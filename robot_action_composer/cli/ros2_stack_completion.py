@@ -7,7 +7,7 @@ from pathlib import Path
 from robot_action_composer.cli.motion_main import resolve_workspace_dir
 from robot_action_composer.ros2_stack.presets import NAV_PROFILES, list_motion_preset_keys
 
-COMMANDS = ("status", "start", "stop", "logs", "completion")
+COMMANDS = ("status", "launch", "stop", "logs", "completion")
 GLOBAL_FLAGS = ("--workspace", "--lang", "-h", "--help")
 COMMON_FLAGS = (
     "--robot",
@@ -19,7 +19,7 @@ COMMON_FLAGS = (
     "-h",
     "--help",
 )
-START_EXTRA = ("--new-terminal", "--timeout", "--no-interactive-override", "--force-nav")
+LAUNCH_EXTRA = ("--new-terminal", "--timeout", "--no-interactive-override", "--force-nav")
 STOP_FLAGS = ("--robot", "--component", "-h", "--help")
 LOGS_FLAGS = ("--robot", "--component", "-f", "--follow", "-n", "--lines", "-h", "--help")
 COMPLETION_SHELLS = ("bash",)
@@ -101,7 +101,7 @@ def bash_completion_script() -> str:
     cmds = " ".join(COMMANDS)
     # NOTE: Never set IFS=$'\\n' around ``compgen -W`` — that prevents -W from
     # splitting on spaces, so the whole wordlist becomes ONE completion and bash
-    # inserts e.g. ``status start stop logs completion`` in one go.
+    # inserts e.g. ``status launch stop logs completion`` in one go.
     return f"""# ros2-stack bash completion — eval "$(ros2-stack completion bash)"
 _ros2_stack_completion() {{
   local cur prev words cword
@@ -118,7 +118,7 @@ _ros2_stack_completion() {{
   local i cmd="" workspace="" robot=""
   for ((i = 1; i < cword; i++)); do
     case "${{words[i]}}" in
-      status|start|stop|logs|completion) cmd="${{words[i]}}" ;;
+      status|launch|stop|logs|completion) cmd="${{words[i]}}" ;;
       --workspace)
         ((i++))
         workspace="${{words[i]}}"
@@ -192,7 +192,7 @@ _ros2_stack_completion() {{
   if [[ "$cur" == -* ]]; then
     case "$cmd" in
       status) _ros2_stack_reply "{' '.join(COMMON_FLAGS)}" ;;
-      start) _ros2_stack_reply "{' '.join(COMMON_FLAGS + START_EXTRA)}" ;;
+      launch) _ros2_stack_reply "{' '.join(COMMON_FLAGS + LAUNCH_EXTRA)}" ;;
       stop) _ros2_stack_reply "{' '.join(STOP_FLAGS)}" ;;
       logs) _ros2_stack_reply "{' '.join(LOGS_FLAGS)}" ;;
       completion) _ros2_stack_reply "-h --help" ;;

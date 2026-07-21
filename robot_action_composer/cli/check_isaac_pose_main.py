@@ -67,11 +67,11 @@ def _print_pose(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="check-isaac-pose",
-        description="Query Isaac Sim entity pose via /get_entity_state",
+        description="Query Isaac Sim entity pose via /get_entity_state (or grasp local offset)",
     )
     parser.add_argument(
         "prim_path",
-        nargs="+",
+        nargs="*",
         help="Isaac prim path(s), e.g. /World/robot/.../base_link",
     )
     parser.add_argument(
@@ -79,6 +79,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="BASE_PRIM",
         help="Print pose in this entity's frame instead of world",
+    )
+    parser.add_argument(
+        "--object-prim",
+        default=None,
+        metavar="OBJECT_PRIM",
+        help="With --grasp-prim: rigid-body prim used as object frame origin",
+    )
+    parser.add_argument(
+        "--grasp-prim",
+        default=None,
+        metavar="GRASP_PRIM",
+        help="Descendant grasp frame; print auto object-local offset via get_prim_attribute chain",
     )
     parser.add_argument(
         "--timeout",
@@ -99,13 +111,35 @@ def _run(argv: list[str] | None = None) -> int:
         get_entity_pose_world_service,
         get_object_pose_from_service,
     )
+    from robot_action_composer.task_runtime.object_binding import (  # pyright: ignore[reportMissingImports]
+        resolve_object_local_offset_from_grasp_prim,
+    )
 
     timeout = float(args.timeout)
+    if args.grasp_prim:
+        obj = str(args.object_prim or "").strip()
+        if not obj:
+            print("error: --grasp-prim requires --object-prim", file=sys.stderr)
+            return 2
+        try:
+            off = resolve_object_local_offset_from_grasp_prim(obj, str(args.grasp_prim))
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"object: {obj}")
+        print(f"grasp:  {args.grasp_prim}")
+        print(f"  object_position_offset xyz:  {_fmt_xyz(*off)}")
+        return 0
+
+    paths = [str(p) for p in (args.prim_path or [])]
+    if not paths:
+        print("error: provide prim_path(s) or --grasp-prim/--object-prim", file=sys.stderr)
+        return 2
+
     base_world: tuple[tuple[float, float, float], tuple[float, float, float, float]] | None = None
     if args.relative_to:
         base_world = get_entity_pose_world_service(str(args.relative_to), timeout=timeout)
 
-    paths = [str(p) for p in args.prim_path]
     for i, path in enumerate(paths):
         if i:
             print()

@@ -211,14 +211,14 @@ check-robot-status --wait 3.0 --show-joint-names
 
 # 场景级运控/导航启动（见 docs/ROS2_STACK.md；语言与 motion-generation 共用）
 # tab 补全：./init.sh ros2-workspace 后随 activate 自动注册；或 eval "$(ros2-stack completion bash)"
-ros2-stack --lang zh start
+ros2-stack --lang zh launch
 ros2-stack logs --robot fiveages_w2 -f          # 看后台日志
 ros2-stack stop --robot fiveages_w2             # 关掉栈
 ros2-stack status --robot fiveages_w2 --group "projets/siemens/Wind turbo blade"
 motion-generation --robot fiveages_w2 --task-key transfer_blade --ensure-ros2-stack
 ```
 
-`motion-generation` 扫描 `workspace_dir/robots/` 下扁平或一层分组（`robots/<Vendor>/<Robot>/`）的 `robot.yaml` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。上次选择与偏好（`lang`、`record_object_resolution_json`、`ensure_ros2_stack` 等）缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。是否在运动前检查/启动 ROS2 栈由偏好 `ensure_ros2_stack` 决定（默认 `false`）；`--ensure-ros2-stack` / `--no-ensure-ros2-stack` 可覆盖。
+`motion-generation` 扫描 `workspace_dir/robots/` 下扁平或一层分组（`robots/<Vendor>/<Robot>/`）的 `robot.yaml` 与 `task_configs/`；默认 `workspace_dir` 为当前工作目录。运行配置与偏好缓存在工作区根目录的 **`.motion_last.json`**（已加入 `.gitignore`）：每个机器人最多保留 **3** 条不重复历史（任务/场景或链式段、`num_runs`、`reset_env` 全相同视为重复；重复则提到最前），交互菜单展示最近用过的那个机器人的历史。偏好字段（`lang`、`record_object_resolution_json`、`ensure_ros2_stack`）仍在文件顶层。语言优先级：`--lang` > `MOTION_GENERATION_LANG` > `.motion_last.json` 中的 `lang` > 系统 `LANG`。仿真是否录制 object-resolution JSON 由偏好中的 `record_object_resolution_json` 决定（默认 `false`）；传入 `--object-resolution-json` 时仍会强制录制到指定路径。是否在运动前检查/启动 ROS2 栈由偏好 `ensure_ros2_stack` 决定（默认 `false`）；`--ensure-ros2-stack` / `--no-ensure-ros2-stack` 可覆盖。
 
 `check-isaac-pose` 通过 `/get_entity_state` 查询 prim 的 position（xyz）、orientation（xyzw 与 rpy）；`--relative-to` 时输出相对参考实体坐标系的位姿。
 

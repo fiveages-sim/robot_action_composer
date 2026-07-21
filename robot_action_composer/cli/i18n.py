@@ -48,7 +48,10 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
         "zh": "\n[info] CLI 选择: 机器人={robot} 任务={task} 场景={scene} 重置环境={reset}",
     },
     "motion.how_to_run": {"en": "\nHow to run?", "zh": "\n如何运行？"},
-    "motion.last_selection_header": {"en": "  1. Last selection", "zh": "  1. 上次选择"},
+    "motion.recent_selection_header": {
+        "en": "  {index}. Recent selection",
+        "zh": "  {index}. 最近选择",
+    },
     "motion.menu_divider": {
         "en": "  ──────────────────────────────────────────────────",
         "zh": "  ──────────────────────────────────────────────────",
@@ -68,27 +71,30 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
     },
     "motion.brief.runs": {"en": "       Runs: {value}", "zh": "       次数: {value}"},
     "motion.brief.reset_env": {"en": "       Reset env: {value}", "zh": "       重置环境: {value}"},
-    "motion.interactive_single": {
-        "en": "  2. New — single task",
-        "zh": "  2. 新建 — 单任务",
+    "motion.interactive_single_n": {
+        "en": "  {index}. New — single task",
+        "zh": "  {index}. 新建 — 单任务",
     },
-    "motion.interactive_chain": {
-        "en": "  3. New — multi-segment chain",
-        "zh": "  3. 新建 — 多段链式",
+    "motion.interactive_chain_n": {
+        "en": "  {index}. New — multi-segment chain",
+        "zh": "  {index}. 新建 — 多段链式",
     },
-    "motion.select_mode": {"en": "Select [1/2/3/4] (Enter = 1): ", "zh": "请选择 [1/2/3/4]（回车=1）: "},
+    "motion.preferences_n": {
+        "en": "  {index}. Preferences",
+        "zh": "  {index}. 偏好设置",
+    },
+    "motion.select_mode_n": {
+        "en": "Select [1-{max_n}] (Enter = 1): ",
+        "zh": "请选择 [1-{max_n}]（回车=1）: ",
+    },
     "motion.configure": {"en": "\nConfigure motion generation:", "zh": "\n配置运动生成："},
     "motion.single_task": {"en": "  1. Single task", "zh": "  1. 单任务"},
     "motion.multi_chain": {"en": "  2. Multi-segment chain", "zh": "  2. 多段链式"},
     "motion.language_settings": {"en": "  3. Preferences", "zh": "  3. 偏好设置"},
-    "motion.language_settings_how_to_run": {
-        "en": "  4. Preferences",
-        "zh": "  4. 偏好设置",
-    },
     "motion.select_config": {"en": "Select [1/2/3] (Enter = 1): ", "zh": "请选择 [1/2/3]（回车=1）: "},
     "motion.using_last": {
-        "en": "\n[info] Using last selection:",
-        "zh": "\n[info] 使用上次选择：",
+        "en": "\n[info] Using recent selection:",
+        "zh": "\n[info] 使用最近选择：",
     },
     "motion.select_robot": {"en": "Select robot", "zh": "选择机器人"},
     "motion.chain_runs": {
@@ -428,11 +434,11 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
     "ros2_stack.ensure_hint_cli": {
         "en": (
             "[ros2-stack] config present; pass --ensure-ros2-stack to auto-start "
-            "(or use ros2-stack start)"
+            "(or use ros2-stack launch)"
         ),
         "zh": (
             "[ros2-stack] 已有配置；请加 --ensure-ros2-stack 以自动启动"
-            "（或使用 ros2-stack start）"
+            "（或使用 ros2-stack launch）"
         ),
     },
     "ros2_stack.no_components": {
@@ -494,11 +500,11 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
     "ros2_stack.stop_nothing": {
         "en": (
             "[ros2-stack] No managed stack running. "
-            "Pass --robot <key> or start with ros2-stack start first."
+            "Pass --robot <key> or launch with ros2-stack launch first."
         ),
         "zh": (
             "[ros2-stack] 当前没有由本工具托管的运行中栈。"
-            "请先 ros2-stack start，或加 --robot <key>。"
+            "请先 ros2-stack launch，或加 --robot <key>。"
         ),
     },
     "ros2_stack.unknown_robot": {
@@ -514,8 +520,8 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
         "zh": "[ros2-stack] 日志目录 {path}：",
     },
     "ros2_stack.logs_empty": {
-        "en": "[ros2-stack] No log files yet for robot={robot}. Start the stack first.",
-        "zh": "[ros2-stack] 机器人 {robot} 尚无日志。请先 ros2-stack start。",
+        "en": "[ros2-stack] No log files yet for robot={robot}. Launch the stack first.",
+        "zh": "[ros2-stack] 机器人 {robot} 尚无日志。请先 ros2-stack launch。",
     },
     "ros2_stack.logs_auto_robot": {
         "en": "[ros2-stack] Showing logs for robot={robot}",
@@ -524,11 +530,11 @@ _MESSAGES: dict[str, dict[Lang, str]] = {
     "ros2_stack.logs_nothing": {
         "en": (
             "[ros2-stack] No current stack robot. "
-            "Pass --robot <key> or start with ros2-stack start first."
+            "Pass --robot <key> or launch with ros2-stack launch first."
         ),
         "zh": (
             "[ros2-stack] 未找到当前栈对应的机器人。"
-            "请先 ros2-stack start，或加 --robot <key>。"
+            "请先 ros2-stack launch，或加 --robot <key>。"
         ),
     },
     "ros2_stack.logs_follow_hint": {

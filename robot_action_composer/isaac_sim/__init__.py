@@ -26,6 +26,10 @@ from simulation_interfaces.srv import GetEntityState, SetSimulationState
 SERVICE_CALL_TIMEOUT = 8.0
 SERVICE_CALL_RETRIES = 3
 SERVICE_RETRY_DELAY = 0.2
+# Probe USD attrs via /get_prim_attribute: keep short — missing attrs are common and
+# should not burn retries×8s (that looked like a task-queue hang).
+PRIM_ATTR_PROBE_TIMEOUT = 2.0
+PRIM_ATTR_PROBE_RETRIES = 1
 T = TypeVar("T")
 
 _service_node: Node | None = None
@@ -33,6 +37,11 @@ _service_lock = threading.Lock()
 
 
 def _ensure_service_node() -> Node:
+    """Shared Isaac service client.
+
+    Uses **wall clock** (``use_sim_time=False``). ``wait_for_service`` under sim time
+    can block forever if this node is not spun on ``/clock`` while waiting.
+    """
     global _service_node
     with _service_lock:
         if _service_node is not None:
@@ -41,10 +50,20 @@ def _ensure_service_node() -> Node:
             rclpy.init()
         _service_node = rclpy.create_node(
             "lerobot_isaac_service_client",
-            parameter_overrides=[Parameter("use_sim_time", value=True)],
+            parameter_overrides=[Parameter("use_sim_time", value=False)],
             automatically_declare_parameters_from_overrides=True,
         )
         return _service_node
+
+
+def _wait_for_service_wall(client: object, node: Node, timeout: float) -> bool:
+    """Wait for a service using wall time + ``spin_once`` (discovery / responses)."""
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        if client.service_is_ready():
+            return True
+        rclpy.spin_once(node, timeout_sec=0.05)
+    return bool(client.service_is_ready())
 
 
 def _call_service_once(
@@ -57,7 +76,7 @@ def _call_service_once(
     node = _ensure_service_node()
     client = node.create_client(service_type, service_name)
     try:
-        if not client.wait_for_service(timeout_sec=max(0.1, timeout)):
+        if not _wait_for_service_wall(client, node, timeout):
             raise RuntimeError(f"Service '{service_name}' unavailable within {timeout:.1f}s")
         future = client.call_async(request)
         start = time.monotonic()
@@ -162,6 +181,54 @@ def set_simulation_state(
         )
 
 
+def _parse_prim_attr_vec(value: str, *, expected_len: int, path: str, attribute: str) -> np.ndarray:
+    vec = np.fromstring(value.strip().strip("[]"), sep=",")
+    if vec.shape[0] != expected_len:
+        raise RuntimeError(
+            f"Invalid {attribute} for '{path}': expected {expected_len} values, got {value!r}"
+        )
+    return vec
+
+
+def try_get_prim_attribute(
+    path: str,
+    attribute: str,
+    *,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+    retries: int = PRIM_ATTR_PROBE_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> str | None:
+    """Return attribute value string, or ``None`` if missing / service unsuccessful."""
+    request = GetPrimAttribute.Request()
+    request.path = path
+    request.attribute = attribute
+    try:
+        result = _call_service_with_retry(
+            lambda: _call_service_once(
+                GetPrimAttribute,
+                "/get_prim_attribute",
+                request,
+                timeout=timeout,
+            ),
+            f"try_get_prim_attribute('{path}', '{attribute}')",
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+    except Exception as exc:
+        print(
+            f"[Isaac] WARN: get_prim_attribute failed for {path!r} "
+            f"{attribute!r}: {exc}"
+        )
+        return None
+    if not getattr(result, "success", False):
+        return None
+    raw = getattr(result, "value", None)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
 def get_prim_translate_local(
     path: str,
     timeout: float = SERVICE_CALL_TIMEOUT,
@@ -186,10 +253,58 @@ def get_prim_translate_local(
         raise RuntimeError(
             f"get_prim_attribute unsuccessful for '{path}': {result.message or 'unknown error'}"
         )
-    vec = np.fromstring(result.value.strip().strip("[]"), sep=",")
-    if vec.shape[0] != 3:
-        raise RuntimeError(f"Invalid translate vector for '{path}': {result.value}")
+    vec = _parse_prim_attr_vec(result.value, expected_len=3, path=path, attribute="xformOp:translate")
     return float(vec[0]), float(vec[1]), float(vec[2])
+
+
+def try_get_prim_translate_local(
+    path: str,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+    retries: int = PRIM_ATTR_PROBE_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> tuple[float, float, float] | None:
+    """Local translate, or ``None`` if attribute missing (treat as identity translate)."""
+    raw = try_get_prim_attribute(
+        path,
+        "xformOp:translate",
+        timeout=timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    if raw is None:
+        return None
+    try:
+        vec = _parse_prim_attr_vec(raw, expected_len=3, path=path, attribute="xformOp:translate")
+    except RuntimeError:
+        return None
+    return float(vec[0]), float(vec[1]), float(vec[2])
+
+
+def try_get_prim_orient_local_xyzw(
+    path: str,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+    retries: int = PRIM_ATTR_PROBE_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> tuple[float, float, float, float] | None:
+    """Local ``xformOp:orient`` as xyzw, or ``None`` if missing (treat as identity).
+
+    Omniverse authors orient as **wxyz**; return value is ROS-style **xyzw**.
+    """
+    raw = try_get_prim_attribute(
+        path,
+        "xformOp:orient",
+        timeout=timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    if raw is None:
+        return None
+    try:
+        vec = _parse_prim_attr_vec(raw, expected_len=4, path=path, attribute="xformOp:orient")
+    except RuntimeError:
+        return None
+    w, x, y, z = float(vec[0]), float(vec[1]), float(vec[2]), float(vec[3])
+    return x, y, z, w
 
 
 def set_prim_translate_local(

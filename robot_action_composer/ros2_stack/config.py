@@ -41,7 +41,7 @@ class ResolvedComponent:
         for key, value in self.args.items():
             if value is None:
                 continue
-            argv.append(f"{key}:={value}")
+            argv.append(f"{key}:={_format_launch_arg_value(value)}")
         argv.extend(str(a) for a in self.extra_args)
         return argv
 
@@ -151,6 +151,57 @@ def warn_misplaced_ros2_stack(task_configs_dir: Path, group_id: str) -> str | No
     return None
 
 
+def _as_bool(raw: Any, *, field_name: str) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"true", "yes", "1"}:
+        return True
+    if text in {"false", "no", "0"}:
+        return False
+    raise ValueError(f"{field_name} must be true/false, got {raw!r}")
+
+
+def _format_launch_arg_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _apply_motion_headless(args: dict[str, Any], motion_raw: Mapping[str, Any]) -> None:
+    """Map ``motion.headless`` → OCS2 ``launch_mode`` (``control_only`` / ``full``).
+
+    Launch reference: ``robot_common_launch`` / ``ocs2_arm_controller`` ``launch_mode``
+    (``full`` | ``control_only`` | ``rviz_only``). Default when unset: headless
+    (``control_only``) unless ``args.launch_mode`` is already set.
+    """
+    if "headless" in motion_raw:
+        headless = _as_bool(motion_raw.get("headless"), field_name="motion.headless")
+        args["launch_mode"] = "control_only" if headless else "full"
+        return
+    if "launch_mode" not in args:
+        args["launch_mode"] = "control_only"
+
+
+def _apply_navigation_headless(args: dict[str, Any], nav_raw: Mapping[str, Any]) -> None:
+    """Map ``navigation.headless`` → ``use_rviz`` for ``navigation_isaac_gt.launch.py``.
+
+    ``headless: true`` → ``use_rviz:=false``; ``headless: false`` → ``use_rviz:=true``.
+    Default when unset: headless (``use_rviz:=false``) unless ``args.use_rviz`` is already set.
+    Deprecated alias: ``visualize: true`` ≡ ``headless: false``.
+    """
+    if "headless" in nav_raw:
+        headless = _as_bool(nav_raw.get("headless"), field_name="navigation.headless")
+        args["use_rviz"] = "false" if headless else "true"
+        return
+    if "visualize" in nav_raw:
+        visualize = _as_bool(nav_raw.get("visualize"), field_name="navigation.visualize")
+        args["use_rviz"] = "true" if visualize else "false"
+        return
+    if "use_rviz" not in args:
+        args["use_rviz"] = "false"
+
+
 def _normalize_required(raw: Any, *, default: RequiredMode) -> RequiredMode:
     if raw is None:
         return default
@@ -233,12 +284,14 @@ def resolve_ros2_stack(
         extra = motion_raw.get("extra_args") or []
         if not isinstance(extra, (list, tuple)):
             raise TypeError("motion.extra_args must be a list")
+        motion_args = _component_args(defaults_args, motion_raw)
+        _apply_motion_headless(motion_args, motion_raw)
         motion_out = ResolvedComponent(
             name="motion",
             required=_normalize_required(motion_raw.get("required"), default=True),
             package=spec.package,
             launch_file=spec.launch_file,
-            args=_component_args(defaults_args, motion_raw),
+            args=motion_args,
             extra_args=[str(x) for x in extra],
             ready_when=ready,
             preset=str(preset_name).strip(),
@@ -261,6 +314,7 @@ def resolve_ros2_stack(
             raise TypeError("navigation.extra_args must be a list")
         args = _component_args(defaults_args, nav_raw)
         args["nav2_profile"] = profile
+        _apply_navigation_headless(args, nav_raw)
         nav_out = ResolvedComponent(
             name="navigation",
             required=_normalize_required(nav_raw.get("required"), default="auto"),
@@ -330,6 +384,20 @@ def apply_set_overrides(
             parts = ["navigation", "args", "map"]
         if parts == ["motion", "type"]:
             parts = ["motion", "args", "type"]
+        # First-class UI flags (resolved into launch args):
+        #   motion.headless -> launch_mode control_only|full
+        #   navigation.headless -> use_rviz false|true
+        if parts == ["navigation", "use_rviz"]:
+            # --set navigation.use_rviz=true  =>  navigation.headless=false
+            parts = ["navigation", "headless"]
+            value = "false" if _coerce_set_value(value) else "true"
+        if parts == ["navigation", "visualize"]:
+            # Backward-compatible alias: visualize=true => headless=false
+            parts = ["navigation", "headless"]
+            value = "false" if _coerce_set_value(value) else "true"
+        if parts == ["motion", "launch_mode"]:
+            # Allow --set motion.launch_mode=control_only as args override
+            parts = ["motion", "args", "launch_mode"]
         cursor: dict[str, Any] = out
         for part in parts[:-1]:
             nxt = cursor.get(part)
@@ -337,6 +405,27 @@ def apply_set_overrides(
                 nxt = {}
                 cursor[part] = nxt
             cursor = nxt
+        # If setting args.launch_mode while headless also exists, drop headless so args win
+        if parts[:2] == ["motion", "args"] and parts[-1] == "launch_mode":
+            motion = out.setdefault("motion", {})
+            if isinstance(motion, dict):
+                motion.pop("headless", None)
+        if parts == ["motion", "headless"]:
+            motion = out.setdefault("motion", {})
+            if isinstance(motion, dict):
+                args = motion.get("args")
+                if isinstance(args, dict):
+                    args.pop("launch_mode", None)
+        if parts[:2] == ["navigation", "args"] and parts[-1] == "use_rviz":
+            nav = out.setdefault("navigation", {})
+            if isinstance(nav, dict):
+                nav.pop("headless", None)
+        if parts == ["navigation", "headless"]:
+            nav = out.setdefault("navigation", {})
+            if isinstance(nav, dict):
+                args = nav.get("args")
+                if isinstance(args, dict):
+                    args.pop("use_rviz", None)
         cursor[parts[-1]] = _coerce_set_value(value)
     return out
 
@@ -401,32 +490,37 @@ def with_motion_preset(resolved: ResolvedRos2Stack, preset: str) -> ResolvedRos2
         "motion": {
             "required": resolved.motion.required,
             "preset": preset,
+            "headless": str(resolved.motion.args.get("launch_mode", "control_only"))
+            == "control_only",
             "args": {
                 k: v
                 for k, v in resolved.motion.args.items()
-                if k not in resolved.defaults_args or resolved.defaults_args.get(k) != v
+                if k not in ("nav2_profile", "launch_mode")
             },
             "extra_args": list(resolved.motion.extra_args),
         },
     }
-    # Keep full motion args (including defaults) by passing them explicitly
-    merged["motion"]["args"] = {
-        k: v for k, v in resolved.motion.args.items() if k not in ("nav2_profile",)
-    }
-    # Strip defaults that will be re-applied
+    # Keep remaining motion args (including defaults-applied keys)
     for k in list(merged["motion"]["args"]):
         if k in resolved.defaults_args and merged["motion"]["args"][k] == resolved.defaults_args[k]:
-            # keep them in args for clarity — resolve will merge defaults anyway
             pass
     if resolved.navigation is not None:
         nav_args = {
-            k: v for k, v in resolved.navigation.args.items() if k != "nav2_profile"
+            k: v
+            for k, v in resolved.navigation.args.items()
+            if k not in ("nav2_profile", "use_rviz")
+        }
+        use_rviz = str(resolved.navigation.args.get("use_rviz", "false")).lower() in {
+            "true",
+            "1",
+            "yes",
         }
         merged["navigation"] = {
             "required": resolved.navigation.required,
             "package": resolved.navigation.package,
             "launch_file": resolved.navigation.launch_file,
             "profile": resolved.navigation.profile or "default",
+            "headless": not use_rviz,
             "args": nav_args,
             "extra_args": list(resolved.navigation.extra_args),
             "ready_when": {

@@ -9,7 +9,7 @@ from datetime import datetime
 import json
 import sys
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Mapping, Sequence, TypedDict
 
 from robot_action_composer.cli.i18n import Lang, get_language, normalize_lang, resolve_language, set_language, t
 from robot_action_composer.cli.interactive import (
@@ -50,9 +50,8 @@ class _ChainSegmentDict(TypedDict):
 
 
 class _MotionLastDict(TypedDict, total=False):
-    lang: str
-    record_object_resolution_json: bool
-    ensure_ros2_stack: bool
+    """One run-configuration snapshot (history entry or legacy flat file)."""
+
     robot_key: str
     """Single-task mode (default when ``mode`` is absent or ``single``)."""
     task_key: str
@@ -65,47 +64,133 @@ class _MotionLastDict(TypedDict, total=False):
 
 
 _MOTION_LAST_FILENAME = ".motion_last.json"
+_MOTION_HISTORY_MAX = 3
+_MOTION_PREF_KEYS = frozenset({"lang", "record_object_resolution_json", "ensure_ros2_stack"})
 
 
 def _motion_last_file(workspace_dir: Path) -> Path:
     return workspace_dir / _MOTION_LAST_FILENAME
 
 
-def _load_motion_last(workspace_dir: Path) -> _MotionLastDict | None:
+def _read_motion_last_raw(workspace_dir: Path) -> dict[str, Any]:
     path = _motion_last_file(workspace_dir)
     if not path.is_file():
-        return None
+        return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
-        return None
+        return {}
     if not isinstance(raw, dict):
-        return None
-    return raw  # type: ignore[return-value]
+        return {}
+    return dict(raw)
 
 
-def _merge_motion_prefs(workspace_dir: Path, **updates: Any) -> None:
+def _write_motion_last_raw(workspace_dir: Path, data: Mapping[str, Any]) -> None:
     path = _motion_last_file(workspace_dir)
-    data: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                data = dict(raw)
-        except (OSError, json.JSONDecodeError):
-            pass
-    data.update(updates)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        path.write_text(json.dumps(dict(data), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     except OSError:
         pass
 
 
+def _is_legacy_flat_motion_last(raw: Mapping[str, Any]) -> bool:
+    if "history_by_robot" in raw:
+        return False
+    return isinstance(raw.get("robot_key"), str) and (
+        "task_key" in raw or "chain_segments" in raw or raw.get("mode") == "chain"
+    )
+
+
+def _run_config_from_mapping(raw: Mapping[str, Any]) -> _MotionLastDict | None:
+    rk = raw.get("robot_key")
+    if not isinstance(rk, str) or not rk:
+        return None
+    entry: _MotionLastDict = {"robot_key": rk}
+    mode = raw.get("mode", "single")
+    if mode == "chain":
+        entry["mode"] = "chain"
+        segs = raw.get("chain_segments")
+        if isinstance(segs, list):
+            cleaned: list[_ChainSegmentDict] = []
+            for item in segs:
+                if not isinstance(item, dict):
+                    continue
+                tk = item.get("task_key")
+                sc = item.get("scene")
+                if isinstance(tk, str) and isinstance(sc, str):
+                    cleaned.append({"task_key": tk, "scene": sc})
+            entry["chain_segments"] = cleaned
+    else:
+        entry["mode"] = "single"
+        tk = raw.get("task_key")
+        sc = raw.get("scene")
+        if isinstance(tk, str):
+            entry["task_key"] = tk
+        if isinstance(sc, str):
+            entry["scene"] = sc
+    n = raw.get("num_runs", 1)
+    entry["num_runs"] = int(n) if isinstance(n, int) else 1
+    entry["reset_env"] = bool(raw.get("reset_env", True))
+    return entry
+
+
+def _normalize_motion_last_file(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Return prefs + ``history_by_robot`` / ``last_robot_key`` (migrate legacy flat files)."""
+    out: dict[str, Any] = {k: raw[k] for k in _MOTION_PREF_KEYS if k in raw}
+    history: dict[str, list[_MotionLastDict]] = {}
+    last_robot: str | None = None
+
+    if _is_legacy_flat_motion_last(raw):
+        entry = _run_config_from_mapping(raw)
+        if entry is not None:
+            rk = str(entry["robot_key"])
+            history[rk] = [entry]
+            last_robot = rk
+    else:
+        raw_hist = raw.get("history_by_robot")
+        if isinstance(raw_hist, dict):
+            for rk, items in raw_hist.items():
+                if not isinstance(rk, str) or not isinstance(items, list):
+                    continue
+                cleaned: list[_MotionLastDict] = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    entry = _run_config_from_mapping({**item, "robot_key": item.get("robot_key", rk)})
+                    if entry is not None:
+                        cleaned.append(entry)
+                if cleaned:
+                    history[rk] = cleaned[:_MOTION_HISTORY_MAX]
+        lr = raw.get("last_robot_key")
+        if isinstance(lr, str) and lr:
+            last_robot = lr
+        elif history:
+            # Prefer the robot whose first entry is "newest" when last_robot missing:
+            # keep insertion order of history_by_robot keys as fallback.
+            last_robot = next(iter(history))
+
+    out["history_by_robot"] = history
+    if last_robot:
+        out["last_robot_key"] = last_robot
+    return out
+
+
+def _load_motion_last(workspace_dir: Path) -> dict[str, Any]:
+    """Load normalized ``.motion_last.json`` (prefs + history). Empty dict if missing."""
+    return _normalize_motion_last_file(_read_motion_last_raw(workspace_dir))
+
+
+def _merge_motion_prefs(workspace_dir: Path, **updates: Any) -> None:
+    data = _load_motion_last(workspace_dir)
+    for key, value in updates.items():
+        if key in _MOTION_PREF_KEYS:
+            data[key] = value
+    _write_motion_last_raw(workspace_dir, data)
+
+
 def _load_cached_lang(workspace_dir: Path) -> Lang | None:
     last = _load_motion_last(workspace_dir)
-    if not last:
-        return None
     raw = last.get("lang")
     if not isinstance(raw, str):
         return None
@@ -117,18 +202,12 @@ def _load_cached_lang(workspace_dir: Path) -> Lang | None:
 
 def _load_record_object_resolution_pref(workspace_dir: Path) -> bool:
     last = _load_motion_last(workspace_dir)
-    if not last:
-        return False
-    raw = last.get("record_object_resolution_json")
-    return raw is True
+    return last.get("record_object_resolution_json") is True
 
 
 def _load_ensure_ros2_stack_pref(workspace_dir: Path) -> bool:
     last = _load_motion_last(workspace_dir)
-    if not last:
-        return False
-    raw = last.get("ensure_ros2_stack")
-    return raw is True
+    return last.get("ensure_ros2_stack") is True
 
 
 def _save_motion_lang(workspace_dir: Path, lang: Lang) -> None:
@@ -141,6 +220,66 @@ def _save_record_object_resolution_pref(workspace_dir: Path, enabled: bool) -> N
 
 def _save_ensure_ros2_stack_pref(workspace_dir: Path, enabled: bool) -> None:
     _merge_motion_prefs(workspace_dir, ensure_ros2_stack=bool(enabled))
+
+
+def _run_config_identity(entry: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Equality key for deduping history entries (full run config)."""
+    mode = entry.get("mode", "single")
+    n = int(entry.get("num_runs", 1) or 1)
+    reset = bool(entry.get("reset_env", True))
+    if mode == "chain":
+        segs = entry.get("chain_segments") or []
+        norm = tuple(
+            (str(s.get("task_key")), str(s.get("scene")))
+            for s in segs
+            if isinstance(s, dict)
+        )
+        return ("chain", norm, n, reset)
+    return ("single", str(entry.get("task_key")), str(entry.get("scene")), n, reset)
+
+
+def _list_valid_history_for_robot(
+    *,
+    workspace_dir: Path,
+    robot_key: str,
+    registry: dict[str, dict[str, Any]],
+) -> list[_MotionLastDict]:
+    data = _load_motion_last(workspace_dir)
+    history = data.get("history_by_robot") or {}
+    if not isinstance(history, dict):
+        return []
+    items = history.get(robot_key) or []
+    if not isinstance(items, list):
+        return []
+    out: list[_MotionLastDict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        entry = _run_config_from_mapping(item)
+        if entry is None:
+            continue
+        if _motion_last_applies(entry, registry=registry):
+            out.append(entry)
+        if len(out) >= _MOTION_HISTORY_MAX:
+            break
+    return out
+
+
+def _recent_robot_history(
+    *,
+    workspace_dir: Path,
+    registry: dict[str, dict[str, Any]],
+) -> list[_MotionLastDict]:
+    """Valid history entries for ``last_robot_key`` (MRU, max 3)."""
+    data = _load_motion_last(workspace_dir)
+    rk = data.get("last_robot_key")
+    if not isinstance(rk, str) or rk not in registry:
+        return []
+    return _list_valid_history_for_robot(
+        workspace_dir=workspace_dir,
+        robot_key=rk,
+        registry=registry,
+    )
 
 
 def _language_display_name(lang: Lang) -> str:
@@ -234,14 +373,15 @@ def _format_motion_last_brief(
     return lines
 
 
-def _print_last_selection_menu_option(
-    last: _MotionLastDict,
+def _print_recent_history_menu_options(
+    history: Sequence[_MotionLastDict],
     *,
     registry: dict[str, dict[str, Any]],
 ) -> None:
-    print(t("motion.last_selection_header"))
-    for line in _format_motion_last_brief(last, registry=registry):
-        print(line)
+    for idx, entry in enumerate(history, start=1):
+        print(t("motion.recent_selection_header", index=idx))
+        for line in _format_motion_last_brief(entry, registry=registry):
+            print(line)
 
 
 def _print_using_last_summary(
@@ -256,16 +396,22 @@ def _print_using_last_summary(
 
 def _print_how_to_run_menu(
     *,
-    last: _MotionLastDict,
+    history: Sequence[_MotionLastDict],
     registry: dict[str, dict[str, Any]],
-) -> None:
+) -> tuple[int, int, int]:
+    """Print history + new/settings options. Returns (single_idx, chain_idx, settings_idx)."""
+    k = len(history)
     print(t("motion.how_to_run"))
-    _print_last_selection_menu_option(last, registry=registry)
-    print(t("motion.interactive_single"))
-    print(t("motion.interactive_chain"))
+    _print_recent_history_menu_options(history, registry=registry)
+    single_idx = k + 1
+    chain_idx = k + 2
+    settings_idx = k + 3
+    print(t("motion.interactive_single_n", index=single_idx))
+    print(t("motion.interactive_chain_n", index=chain_idx))
     print()
     _print_menu_divider()
-    print(t("motion.language_settings_how_to_run"))
+    print(t("motion.preferences_n", index=settings_idx))
+    return single_idx, chain_idx, settings_idx
 
 
 def _print_configure_menu() -> None:
@@ -307,37 +453,50 @@ def _prompt_settings(*, workspace_dir: Path) -> None:
 def _prompt_interactive_entry_kind(
     *,
     workspace_dir: Path,
-    last: _MotionLastDict | None,
     registry: dict[str, dict[str, Any]],
-) -> Literal["last_single", "last_chain", "interactive_single", "interactive_chain"]:
+) -> tuple[
+    Literal["last_single", "last_chain", "interactive_single", "interactive_chain"],
+    _MotionLastDict | None,
+]:
     while True:
-        has_last = last is not None and _motion_last_applies(last, registry=registry)
-        if has_last:
-            assert last is not None
-            _print_how_to_run_menu(last=last, registry=registry)
-            raw = input(t("motion.select_mode")).strip().lower()
-            if raw in ("", "1"):
-                lm = last.get("mode", "single")
-                return "last_chain" if lm == "chain" else "last_single"
-            if raw == "2":
-                return "interactive_single"
-            if raw == "3":
-                return "interactive_chain"
-            if raw == "4":
-                _prompt_settings(workspace_dir=workspace_dir)
-                continue
-            return "interactive_single"
+        history = _recent_robot_history(workspace_dir=workspace_dir, registry=registry)
+        if history:
+            single_idx, chain_idx, settings_idx = _print_how_to_run_menu(
+                history=history,
+                registry=registry,
+            )
+            max_n = settings_idx
+            raw = input(t("motion.select_mode_n", max_n=max_n)).strip().lower()
+            if raw == "":
+                raw = "1"
+            if raw.isdigit():
+                choice = int(raw)
+                if 1 <= choice <= len(history):
+                    selected = history[choice - 1]
+                    lm = selected.get("mode", "single")
+                    kind: Literal["last_single", "last_chain"] = (
+                        "last_chain" if lm == "chain" else "last_single"
+                    )
+                    return kind, selected
+                if choice == single_idx:
+                    return "interactive_single", None
+                if choice == chain_idx:
+                    return "interactive_chain", None
+                if choice == settings_idx:
+                    _prompt_settings(workspace_dir=workspace_dir)
+                    continue
+            return "interactive_single", None
 
         _print_configure_menu()
         raw = input(t("motion.select_config")).strip().lower()
         if raw in ("", "1"):
-            return "interactive_single"
+            return "interactive_single", None
         if raw == "2":
-            return "interactive_chain"
+            return "interactive_chain", None
         if raw == "3":
             _prompt_settings(workspace_dir=workspace_dir)
             continue
-        return "interactive_single"
+        return "interactive_single", None
 
 
 def _save_motion_last(
@@ -351,28 +510,40 @@ def _save_motion_last(
     mode: Literal["single", "chain"] = "single",
     chain_segments: list[_ChainSegmentDict] | None = None,
 ) -> None:
-    path = _motion_last_file(workspace_dir)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {
-            "robot_key": robot_key,
-            "num_runs": int(num_runs),
-            "reset_env": bool(reset_env),
-            "mode": mode,
-        }
-        if mode == "chain" and chain_segments:
-            data["chain_segments"] = list(chain_segments)
-        else:
-            if task_key is not None:
-                data["task_key"] = task_key
-            if scene is not None:
-                data["scene"] = scene
-        data["lang"] = get_language()
-        data["record_object_resolution_json"] = _load_record_object_resolution_pref(workspace_dir)
-        data["ensure_ros2_stack"] = _load_ensure_ros2_stack_pref(workspace_dir)
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+    data = _load_motion_last(workspace_dir)
+    # Refresh prefs from current session
+    data["lang"] = get_language()
+    data["record_object_resolution_json"] = bool(data.get("record_object_resolution_json", False))
+    data["ensure_ros2_stack"] = bool(data.get("ensure_ros2_stack", False))
+
+    entry: _MotionLastDict = {
+        "robot_key": robot_key,
+        "num_runs": int(num_runs),
+        "reset_env": bool(reset_env),
+        "mode": mode,
+    }
+    if mode == "chain" and chain_segments:
+        entry["chain_segments"] = list(chain_segments)
+    else:
+        if task_key is not None:
+            entry["task_key"] = task_key
+        if scene is not None:
+            entry["scene"] = scene
+
+    history_raw = data.get("history_by_robot")
+    history: dict[str, list[_MotionLastDict]] = {}
+    if isinstance(history_raw, dict):
+        for rk, items in history_raw.items():
+            if isinstance(rk, str) and isinstance(items, list):
+                history[rk] = [x for x in items if isinstance(x, dict)]  # type: ignore[misc]
+
+    existing = list(history.get(robot_key) or [])
+    new_id = _run_config_identity(entry)
+    existing = [e for e in existing if _run_config_identity(e) != new_id]
+    history[robot_key] = [entry, *existing][:_MOTION_HISTORY_MAX]
+    data["history_by_robot"] = history
+    data["last_robot_key"] = robot_key
+    _write_motion_last_raw(workspace_dir, data)
 
 
 def _segment_valid_for_robot(
@@ -573,6 +744,9 @@ def _build_runtime_for_scene(
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
         build_merged_queue_config,
     )
+    from robot_action_composer.task_runtime.object_binding import (  # pyright: ignore[reportMissingImports]
+        build_objects_for_task_entry,
+    )
 
     scene_presets: dict[str, dict[str, object]] = task_entry["scene_presets"]
     scene_sd = scene_presets.get(scene, {})
@@ -591,10 +765,13 @@ def _build_runtime_for_scene(
 
     skill_defaults = dict(task_entry.get("skill_defaults") or {})
     scene_skill_params = dict(scene_sd.get("skill_params") or {})
+    objects_reg, active_object = build_objects_for_task_entry(task_entry, scene=scene)
     runtime = build_merged_queue_config(
         runtime_defaults=base_root,
         skill_defaults=skill_defaults,
         scene_preset=scene_sd,
+        objects=objects_reg or None,
+        active_object=active_object,
     )
 
     task_queue = task_entry.get("task_queue")
@@ -861,10 +1038,8 @@ def run_motion_generation(
         )
         print("=" * 70)
 
-        last = _load_motion_last(workspace_dir)
-        entry_kind = _prompt_interactive_entry_kind(
+        entry_kind, selected_last = _prompt_interactive_entry_kind(
             workspace_dir=workspace_dir,
-            last=last,
             registry=registry,
         )
 
@@ -877,7 +1052,8 @@ def run_motion_generation(
         task_entry: dict[str, Any] | None = None
         chain_segments = []
 
-        if entry_kind == "last_single" and last:
+        if entry_kind == "last_single" and selected_last:
+            last = selected_last
             robot_key_sel = str(last["robot_key"])
             task_key = str(last["task_key"])
             scene = str(last["scene"])
@@ -887,7 +1063,8 @@ def run_motion_generation(
             task_entry = robot_entry["tasks"][task_key]
             robot_key = robot_key_sel
             _print_using_last_summary(last, registry=registry)
-        elif entry_kind == "last_chain" and last:
+        elif entry_kind == "last_chain" and selected_last:
+            last = selected_last
             robot_key_sel = str(last["robot_key"])
             num_runs = int(last.get("num_runs", 1))
             reset_env = bool(last.get("reset_env", True))
@@ -1130,6 +1307,7 @@ def run_motion_generation(
                 connected = True
                 print(t("motion.chain_connected"))
                 prev_chain_task_key: str | None = None
+                grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] = {}
                 for seg_idx, seg in enumerate(chain_segments):
                     tk = seg["task_key"]
                     task_entry_seg = robot_entry["tasks"][tk]
@@ -1195,6 +1373,7 @@ def run_motion_generation(
                         task_key=tk,
                         scene=scene_name,
                         object_resolution=object_resolution,
+                        grasp_offset_cache=grasp_offset_cache,
                     )
                     prev_chain_task_key = tk
             finally:
@@ -1235,6 +1414,7 @@ def run_motion_generation(
                 interface.connect()
                 connected = True
                 print(t("motion.all_scenes_connected"))
+                grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] = {}
                 for scene_idx, scene_name in enumerate(scenes_to_run):
                     runtime, merged_queue = _build_runtime_for_scene(task_entry=task_entry, scene=scene_name, allowed=allowed)
                     print(format_merged_queue_summary(scene_name, runtime))
@@ -1268,6 +1448,7 @@ def run_motion_generation(
                         task_key=task_key,
                         scene=scene_name,
                         object_resolution=object_resolution,
+                        grasp_offset_cache=grasp_offset_cache,
                     )
             finally:
                 sim_time.shutdown()

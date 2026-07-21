@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI: ros2-stack status | start | stop — scenario ROS2 motion/navigation launches."""
+"""CLI: ros2-stack status | launch | stop — scenario ROS2 motion/navigation launches."""
 
 from __future__ import annotations
 
@@ -151,7 +151,7 @@ def _prompt_start_entry_kind(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Start/status/stop scenario ROS2 motion & navigation stacks",
+        description="Launch/status/stop scenario ROS2 motion & navigation stacks",
     )
     parser.add_argument(
         "--workspace",
@@ -209,16 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Show readiness of configured components")
     add_common(p_status)
 
-    p_start = sub.add_parser("start", help="Start missing motion/navigation launches")
-    add_common(p_start)
-    p_start.add_argument("--new-terminal", action="store_true", help="Try GUI terminal for launches")
-    p_start.add_argument("--timeout", type=float, default=60.0, help="Ready wait timeout (seconds)")
-    p_start.add_argument(
+    p_launch = sub.add_parser("launch", help="Launch missing motion/navigation stacks")
+    add_common(p_launch)
+    p_launch.add_argument("--new-terminal", action="store_true", help="Try GUI terminal for launches")
+    p_launch.add_argument("--timeout", type=float, default=60.0, help="Ready wait timeout (seconds)")
+    p_launch.add_argument(
         "--no-interactive-override",
         action="store_true",
         help="Do not prompt to change preset/profile",
     )
-    p_start.add_argument(
+    p_launch.add_argument(
         "--force-nav",
         action="store_true",
         help="Start navigation even if required=auto and no task selected",
@@ -537,7 +537,7 @@ def cmd_status(workspace_dir: Path, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_start(workspace_dir: Path, args: argparse.Namespace) -> int:
+def cmd_launch(workspace_dir: Path, args: argparse.Namespace) -> int:
     registry = load_motion_entries(workspace_dir)
     if not registry:
         raise SystemExit(t("ros2_stack.no_robots", path=workspace_dir / "robots"))
@@ -834,8 +834,8 @@ def main(argv: list[str] | None = None) -> None:
     print(t("ros2_stack.title"))
     if args.command == "status":
         raise SystemExit(cmd_status(workspace_dir, args))
-    if args.command == "start":
-        raise SystemExit(cmd_start(workspace_dir, args))
+    if args.command == "launch":
+        raise SystemExit(cmd_launch(workspace_dir, args))
     if args.command == "stop":
         raise SystemExit(cmd_stop(workspace_dir, args))
     if args.command == "logs":

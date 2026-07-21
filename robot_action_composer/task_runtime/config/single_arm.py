@@ -35,6 +35,12 @@ class QueueSlicePick:
     retreat_open_gripper: bool = False
     gripper_closed: float | None = None
     object_prim_path: str = ""
+    #: 任务 ``objects`` / ``active_object`` 引用
+    object_key: str | None = None
+    #: 相对刚体的抓取 frame id（见 objects.grasps）
+    grasp_id: str | None = None
+    #: 完整抓取 prim path（须为 object_prim_path 子孙）
+    grasp_prim_path: str | None = None
     ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
     ee_pick_axis: str = "+z"
     ee_pick_direction_vector: tuple[float, float, float] | None = None

@@ -51,6 +51,9 @@ class ParallelPickArmConfig:
     ee_orientation_frame: str | None = None
     object_orientation_mode: str | None = None
     aligned_object_yaw: float | str | None = None
+    object_key: str | None = None
+    grasp_id: str | None = None
+    grasp_prim_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,8 +76,7 @@ def parallel_pick_cfg_from_params(params: Mapping[str, Any]) -> BimanualParallel
         )
     left = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, left_raw))
     right = ParallelPickArmConfig(**kwargs_for_dataclass(ParallelPickArmConfig, right_raw))
-    if not left.object_prim_path or not right.object_prim_path:
-        raise ValueError("left_pick.object_prim_path and right_pick.object_prim_path are required")
+    # object_prim_path may be filled later via objects binding / grasp_id
     top_frame = str(params.get("ee_orientation_frame", "motion") or "motion")
     top_mode = str(params.get("object_orientation_mode", "yaw") or "yaw")
     raw_yaw = params.get("aligned_object_yaw", "auto")

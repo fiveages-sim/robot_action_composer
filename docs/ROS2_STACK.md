@@ -36,11 +36,24 @@ robot.yaml → ros2_stack
 
 `navigation.required: auto` 时：仅当任务 `task_queue` 含 `nav.*` skill 才启动导航。
 
+## 可视化 / headless
+
+| 配置字段 | 展开为 launch 参数 | 默认（未写时） |
+|----------|-------------------|----------------|
+| `motion.headless: true` | `launch_mode:=control_only`（OCS2 无 RViz） | `true` |
+| `motion.headless: false` | `launch_mode:=full` | — |
+| `navigation.headless: true` | `use_rviz:=false`（`navigation_isaac_gt`） | `true` |
+| `navigation.headless: false` | `use_rviz:=true` | — |
+
+也可直接写 `motion.args.launch_mode` / `navigation.args.use_rviz`；一等字段优先。CLI：`--set motion.headless=false`、`--set navigation.headless=false`。
+
+参考 launch：`robot_common_launch` 的 `launch_mode`（`full` / `control_only` / `rviz_only`）与 `navigation_isaac_gt.launch.py` 的 `use_rviz`。
+
 ## CLI
 
 界面语言与 `motion-generation` 共用（`--lang zh|en`，或 `MOTION_GENERATION_LANG` / `.motion_last.json` 中的 `lang` / 系统 `LANG`）。交互菜单（选机器人、任务文件夹、运控 preset、导航 profile、是/否）复用同一套 `cli/interactive.py` 与 i18n。
 
-`ros2-stack start` 会把上次成功启动写入工作空间 `.ros2_stack_last.json`（已 gitignore）。再次交互启动时默认可选「上次选择」一键复用；重新选择时也会以该记录为默认值。合并配置里的 preset / profile / map 会直接采用，默认不再逐项重选（仅询问是否修改选项，回车=否）。
+`ros2-stack launch` 会把上次成功启动写入工作空间 `.ros2_stack_last.json`（已 gitignore）。再次交互启动时默认可选「上次选择」一键复用；重新选择时也会以该记录为默认值。合并配置里的 preset / profile / map 会直接采用，默认不再逐项重选（仅询问是否修改选项，回车=否）。
 
 ### Tab 补全（bash）
 
@@ -69,18 +82,18 @@ mkdir -p ~/.local/share/bash-completion/completions
 ros2-stack completion bash > ~/.local/share/bash-completion/completions/ros2-stack
 ```
 
-可补全：子命令（`start`/`status`/`stop`/`logs`）、`--robot`、`--group`、`--motion-preset`、`--nav-profile`、`--component`、`--lang` 等。
+可补全：子命令（`launch`/`status`/`stop`/`logs`）、`--robot`、`--group`、`--motion-preset`、`--nav-profile`、`--component`、`--lang` 等。
 
 ```bash
 cd examples/IsaacSim
-ros2-stack --lang zh start   # 交互：上次选择 或 重新选机器人/任务组（配置默认直接用）
+ros2-stack --lang zh launch   # 交互：上次选择 或 重新选机器人/任务组（配置默认直接用）
 ros2-stack status
 ros2-stack logs -f                        # 默认当前机器人（运行中 / 上次启动）
 ros2-stack logs --robot fiveages_w2 -f    # 指定机器人跟踪日志
 ros2-stack stop                           # 默认停当前托管中的栈（有 PID / 上次启动）
 ros2-stack stop --robot fiveages_w2       # 指定机器人
 
-ros2-stack start --robot fiveages_w2 \
+ros2-stack launch --robot fiveages_w2 \
   --group "projets/siemens/Wind turbo blade" \
   --set navigation.map=wind_turbo_task1 \
   --motion-preset ocs2-fullbody \
@@ -124,13 +137,14 @@ ros2_stack:
   motion:
     required: true
     preset: ocs2-fullbody
+    headless: true
     args:
       type: rg75
   navigation:
     required: auto
     profile: default
+    headless: true
 ```
-
 `Wind turbo blade/.meta/ros2_stack.yaml`：
 
 ```yaml

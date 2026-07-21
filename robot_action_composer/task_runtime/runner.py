@@ -323,6 +323,7 @@ def build_queue_runtime_context(
     task_key: str = "",
     scene: str = "",
     object_resolution: Any | None = None,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
     queue_task = runtime.single_arm
@@ -346,6 +347,7 @@ def build_queue_runtime_context(
     if initial_arm not in {"left", "right"}:
         raise ValueError("arm must be 'left' or 'right'")
 
+    objs = dict(runtime.objects) if runtime.objects else None
     return QueueRuntimeContext(
         interface=interface,
         robot_cfg=robot_cfg,
@@ -368,6 +370,9 @@ def build_queue_runtime_context(
         task_key=task_key,
         scene=scene,
         object_resolution=object_resolution,
+        objects=objs,
+        active_object=runtime.active_object,
+        grasp_offset_cache=grasp_offset_cache if grasp_offset_cache is not None else {},
     )
 
 
@@ -460,6 +465,7 @@ def run_task_queue(
     scene: str = "",
     object_resolution: Any | None = None,
     use_isaac_base_pose: bool = True,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> None:
     """Single entry: connect → FSM → execute ``task_queue`` blocks (and parallel groups)."""
     queue_tc = runtime.single_arm
@@ -502,6 +508,7 @@ def run_task_queue(
             task_key=task_key,
             scene=scene,
             object_resolution=object_resolution,
+            grasp_offset_cache=grasp_offset_cache,
         )
 
         for idx, spec in enumerate(specs):
@@ -557,6 +564,7 @@ def run_task_queue_on_connected_interface(
     task_key: str = "",
     scene: str = "",
     object_resolution: Any | None = None,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> None:
     """Execute one task_queue on an already-connected interface (no connect/disconnect)."""
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
@@ -578,6 +586,7 @@ def run_task_queue_on_connected_interface(
         task_key=task_key,
         scene=scene,
         object_resolution=object_resolution,
+        grasp_offset_cache=grasp_offset_cache,
     )
 
     for idx, spec in enumerate(specs):
@@ -696,6 +705,7 @@ def run_task_queue_interactive_on_connected_interface(
     task_key: str = "",
     scene: str = "",
     object_resolution: Any | None = None,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> None:
     """逐 block 等待 Enter 后执行；输入 ``q`` 则 ``FSM_HOLD`` 并提前退出。"""
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
@@ -717,6 +727,7 @@ def run_task_queue_interactive_on_connected_interface(
         task_key=task_key,
         scene=scene,
         object_resolution=object_resolution,
+        grasp_offset_cache=grasp_offset_cache,
     )
 
     total = len(specs)

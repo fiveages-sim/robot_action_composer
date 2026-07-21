@@ -146,8 +146,11 @@ def _spawn_background(shell_cmd: str, *, log_path: Path) -> int:
     log_f = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 — kept open by child inheritance
     log_f.write(f"\n--- spawn {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n{shell_cmd}\n")
     log_f.flush()
+    # Use ``bash -c`` (not ``-lc``) and detach stdin so login-shell side effects /
+    # terminal SIGHUP are less likely to tear down long-running Nav2 launches.
     proc = subprocess.Popen(
-        ["bash", "-lc", shell_cmd],
+        ["bash", "-c", shell_cmd],
+        stdin=subprocess.DEVNULL,
         stdout=log_f,
         stderr=subprocess.STDOUT,
         start_new_session=True,

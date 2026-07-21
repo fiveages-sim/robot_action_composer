@@ -83,8 +83,9 @@
 - **效果**：执行单臂抓取序列（approach / close-in / grasp / retreat）。
 - **参数**（来自 `single_arm.pick` 切片）：
   - **目标物体配置**
-    - `object_prim_path`：抓取对象 Prim 路径。
-    - `object_position_offset`：相对物体中心的抓取偏移（物体局部坐标系；会按物体当前姿态旋转后叠加到抓取目标）。
+    - `object_prim_path`：抓取对象刚体 Prim（可与任务 `objects` 绑定补齐）。
+    - `object_position_offset`：物体系抓取偏移。若 **显式写出** 则走旧路径；未写且提供 `grasp_id` / `grasp_prim_path` 时由 USD 局部 frame 自动解析。
+    - `object_key` / `grasp_id` / `grasp_prim_path`：可选；见 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md) 物体清单。
   - **运动系配置**
     - `ee_base_orientation`：抓取姿态四元数 `xyzw`。语义为**某一标称机物相对朝向下的期望抓取方向**（可含斜抓；见 §6.2）。
     - `ee_orientation_frame`：`motion`（默认，直接用标定姿态）| `object`（按相对标称的物体姿态偏差左乘）。
@@ -103,7 +104,7 @@
     - `arm`：`left|right`。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
 - **备注**：
-  - `object_prim_path` 必填；`object_position_offset` 始终在物体系。
+  - 旧 YAML（仅 `object_prim_path` + `object_position_offset`）行为不变；`object_position_offset` 始终在物体系。
   - `runtime_defaults.use_object_orientation: true` 时，若未写 `ee_orientation_frame`，等价于 `object`（兼容旧字段）。
   - 机物偏航对齐推荐配置见 §6.2。
 
@@ -227,8 +228,9 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
 `left_pick` / `right_pick` 字段与 `single_arm.pick` 切片语义一致（每侧一套）：
 
 - **目标物体配置**
-  - `object_prim_path`：该侧抓取目标物体 Prim 路径（必填）。
-  - `object_position_offset`：相对物体中心的抓取偏移（物体局部坐标系；与 `single_arm.pick` 相同）。
+  - `object_prim_path`：该侧抓取刚体 Prim（可与 `objects` / `active_object` 补齐）。
+  - `object_position_offset`：物体系偏移；**显式写出**则覆盖自动 grasp。
+  - `object_key` / `grasp_id` / `grasp_prim_path`：可选；见任务 YAML 物体清单。
 
 - **运动系配置**
   - `motion_frame_id`：该侧物体位姿解析后的输出坐标系（可选；不写则沿用任务 `frame_id`）。**左右两侧解析后必须相同**，否则双臂同步下发无法共用一个坐标系。
@@ -284,17 +286,18 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
 
 #### `dual_arm.place`
 
-- **效果**：执行双臂相对放置序列（同向平移 -> 松爪 -> 可选开爪后下降 -> 外张 -> 后撤）。默认按当前末端做相对位移；若提供参考物体配置（`reference_object_prim_path` + `object_position_offset`），则会先计算目标放置点，再自动换算本次平移量。
+- **效果**：执行双臂相对放置序列（同向平移 -> 松爪 -> 可选开爪后下降 -> 外张 -> 后撤）。默认按当前末端做相对位移；若提供参考物体配置（`reference_object_prim_path` / `reference_object_key` + `object_position_offset`），则会先计算目标放置点，再自动换算本次平移量。
 - **默认值复用**：当未显式配置放置参数时，会复用 `dual_arm.carry` 的部分几何/节奏配置作为默认值（因此 `place` 常可只写少量参数）。
 - **参数**：
   - **目标物体配置**
     - `reference_object_prim_path`（`str`）：参考物体 Prim 路径。
+    - `reference_object_key` / `object_key`（`str`）：从任务 `objects` / `.meta/objects` 解析 prim（显式 prim 优先）。
     - `object_position_offset`（`[float,float,float]`）：参考物体坐标系下偏移。
 
   - **运动系配置**
     - `translation_xyz`（`[float,float,float]`，默认 `[0,0,0]`）：双臂同向平移位移。
     - `post_release_lower_xyz`（`[float,float,float]`）：**可选**；松爪后、外张前的同向位移（常用于“先抬后抓”的对称下降）。
-    - `spread_half`（`float`，默认取 `dual_arm.carry.arm_merge_distance_y`，否则 `0.04`）：单侧外张距离。
+    - `spread_half`（`float`，默认取前序 `dual_arm.carry.arm_merge_distance_y`；无 carry 时为 `0`）：单侧外张距离；为 `0` 时跳过外张段。
     - `retreat_xyz`（`[float,float,float]`，默认取 `dual_arm.carry.ee_retreat_offset`，否则 `[-0.2, 0.0, 0.0]`）：外张后的后撤位移。
     - `motion_frame_id` / `relative_frame_id`（`str`）：几何计算与下发坐标系。
     - `tf_lookup_timeout`（`float`，默认 `2.0`）：TF 查询超时（秒）。
@@ -398,7 +401,8 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
 - **效果**：先查对象世界坐标，再按偏移导航到对象附近。
 - **参数**：
   - **目标物体配置**
-    - `object_prim_path`（`str`，必填）：目标物体 Prim 路径。
+    - `object_prim_path`（`str`）：目标物体 Prim 路径。
+    - `object_key`（`str`）：从任务 `objects` / `.meta/objects` 解析 prim（与 prim 二选一；显式 prim 优先）。不回退 `active_object`。
   - **目标位姿配置**
     - `approach_offset_x`（`float`，默认 `-0.20`）：导航点 X 偏移（米）。
     - `approach_offset_y`（`float`，默认 `0.0`）：导航点 Y 偏移（米）。

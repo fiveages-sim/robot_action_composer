@@ -40,6 +40,7 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import Se
 from robot_action_composer.isaac_sim import get_entity_pose_world_service  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.object_binding import resolve_object_prim_path  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_nav_object_pose_for_task  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.registry import register_skill  # pyright: ignore[reportMissingImports]
 from robot_action_composer.task_runtime.types import ExecutionMeta  # pyright: ignore[reportMissingImports]
@@ -183,7 +184,9 @@ def skill_navigate_to_object(
     完成后自动刷新 ``ctx.base_world_pos/quat``。
 
     params:
-        object_prim_path (str): Isaac Sim 物体的 Prim 路径（世界坐标查询用，必填）。
+        object_prim_path (str): Isaac Sim 物体的 Prim 路径（世界坐标查询用）。
+            可与 ``object_key`` 二选一；显式 prim 优先。
+        object_key (str): 从任务 ``objects`` / ``.meta/objects`` 解析 ``object_prim_path``。
         approach_offset_x (float, 可选): 导航目标相对物体世界 X 的偏移（米），默认 -0.20。
             负值表示机器人在物体 -X 方向（从 X 前方接近）。
         approach_offset_y (float, 可选): 导航目标相对物体世界 Y 的偏移（米），默认 0.0。
@@ -192,9 +195,15 @@ def skill_navigate_to_object(
         timeout (float, 可选): 最大等待时间（秒），默认 60.0。
         poll_period (float, 可选): 轮询间隔（秒），默认 0.1。
     """
-    object_path = str(params.get("object_prim_path") or "")
-    if not object_path:
-        raise ValueError("nav.navigate_to_object requires 'object_prim_path' param")
+    object_path = resolve_object_prim_path(
+        params,
+        objects=getattr(ctx, "objects", None),
+        prim_param="object_prim_path",
+        key_params="object_key",
+        required=True,
+        label="nav.navigate_to_object",
+    )
+    assert object_path  # required=True
 
     offset_x = float(params.get("approach_offset_x", -0.20))
     offset_y = float(params.get("approach_offset_y", 0.0))

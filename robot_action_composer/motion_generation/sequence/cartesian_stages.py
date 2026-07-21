@@ -1235,7 +1235,7 @@ def build_bimanual_place_relative_sequence(
     4. （可选）在松爪后再同加 ``post_release_lower_xyz``（米），使两段合计到达 ``translation_xyz``（两段到参考 offset）。
     5. （可选）再单独对右手同加 ``post_release_right_delta_xyz``，用于先避开卡点再外抽。
     6. （可选）再单独对右手左乘 ``post_release_right_orientation_delta_rpy``，用于小角度避让。
-    7. 沿「右→左」在 XY 平面的方向各外张 ``spread_half``（米）。
+    7. （可选）若 ``spread_half`` 非零：沿「右→左」在 XY 平面的方向各外张 ``spread_half``（米）；为 0 则跳过。
     8. 再对左右同加 ``retreat_xyz`` 后撤。
 
     未配置姿态增量时，姿态全程保持与平移前一致（仅位置变）。
@@ -1313,23 +1313,25 @@ def build_bimanual_place_relative_sequence(
         )
         idx += 1
 
-    ux, uy = _lr_unit_xy_left_from_right(l_mid, r_mid)
     sh = float(spread_half)
-    l2 = _pose_translate_copy(l_mid, ux * sh, uy * sh, 0.0)
-    r2 = _pose_translate_copy(r_mid, -ux * sh, -uy * sh, 0.0)
+    l2, r2 = l_mid, r_mid
+    if abs(sh) >= 1e-12:
+        ux, uy = _lr_unit_xy_left_from_right(l_mid, r_mid)
+        l2 = _pose_translate_copy(l_mid, ux * sh, uy * sh, 0.0)
+        r2 = _pose_translate_copy(r_mid, -ux * sh, -uy * sh, 0.0)
+        stages.append(
+            StageTarget(
+                name=_stage_name(stage_prefix, idx, PLACE_RELATIVE_SUFFIXES[3]),
+                left=ArmTarget(pose=l2, gripper=gripper_open),
+                right=ArmTarget(pose=r2, gripper=gripper_open),
+            ),
+        )
+        idx += 1
 
     rx, ry, rz = retreat_xyz
     l3 = _pose_translate_copy(l2, rx, ry, rz)
     r3 = _pose_translate_copy(r2, rx, ry, rz)
 
-    stages.append(
-        StageTarget(
-            name=_stage_name(stage_prefix, idx, PLACE_RELATIVE_SUFFIXES[3]),
-            left=ArmTarget(pose=l2, gripper=gripper_open),
-            right=ArmTarget(pose=r2, gripper=gripper_open),
-        ),
-    )
-    idx += 1
     stages.append(
         StageTarget(
             name=_stage_name(stage_prefix, idx, PLACE_RELATIVE_SUFFIXES[4]),

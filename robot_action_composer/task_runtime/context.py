@@ -95,6 +95,11 @@ class QueueRuntimeContext:
     scene: str = ""
     current_block: CurrentBlockMeta | None = None
     object_resolution: ObjectResolutionSession | None = None
+    #: 合并后的物体清单（task/scene/.meta）
+    objects: dict[str, dict[str, Any]] | None = None
+    active_object: str | None = None
+    #: 跨 skill / chain segment 复用的 grasp local-offset 缓存
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.gripper_for_return_home == 0.0:

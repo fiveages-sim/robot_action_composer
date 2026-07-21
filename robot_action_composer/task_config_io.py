@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 _FORBIDDEN_ROOT_KEYS: frozenset[str] = frozenset({"pick", "place", "handover", "carry", "drawer"})
-_STRIPPED_ROOT_KEYS: frozenset[str] = frozenset({"skill_params"})
+# skill_params / objects / active_object live on task or scene root but are not runtime_defaults
+_STRIPPED_ROOT_KEYS: frozenset[str] = frozenset({"skill_params", "objects", "active_object"})
 RUNTIME_DEFAULTS_ALLOWED_KEYS: frozenset[str] = frozenset(
     {
         "base_link_entity_path",
@@ -197,7 +198,10 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskCon
                     f"{path} and {prev}"
                 )
             task_key_paths[task_key] = path
-            tasks[task_key] = dict(raw)
+            entry = dict(raw)
+            entry["_config_path"] = str(path)
+            entry["_config_dir"] = str(path.parent)
+            tasks[task_key] = entry
             group_keys[_task_group_id(path, task_cfg_dir)].append(task_key)
 
     task_groups = {gid: sorted(keys) for gid, keys in sorted(group_keys.items(), key=lambda x: (x[0] != "", x[0]))}

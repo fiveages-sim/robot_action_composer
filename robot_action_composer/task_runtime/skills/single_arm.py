@@ -36,6 +36,7 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     SERVICE_RETRY_DELAY,
     get_object_pose_from_service,
 )
+from robot_action_composer.task_runtime.object_binding import resolve_pick_object_binding
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
@@ -150,6 +151,24 @@ def _scratch_pose_entry_to_geometry_pose(entry: Mapping[str, Any]) -> Pose:
     return pose
 
 
+def _binding_params_for_pick(params: Mapping[str, Any], pk: Any) -> dict[str, Any]:
+    """Build resolve_pick_object_binding input; preserve explicit offset key presence from ``params``."""
+    out: dict[str, Any] = {}
+    for key in ("object_prim_path", "object_position_offset", "object_key", "grasp_id", "grasp_prim_path"):
+        if key in params:
+            out[key] = params[key]
+    for key in ("object_prim_path", "object_key", "grasp_id", "grasp_prim_path"):
+        if key in out:
+            continue
+        val = getattr(pk, key, None)
+        if val is None:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        out[key] = val
+    return out
+
+
 def _resolve_object_target_pose_from_pick_like_params(
     *,
     ctx: QueueRuntimeContext,
@@ -207,8 +226,12 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     qt = overlay_queue_single_arm_pick_from_params(ctx.task_cfg, params)
     arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
     pk = qt.pick
-    path = pk.object_prim_path
-    object_position_offset = pk.object_position_offset
+    path, object_position_offset = resolve_pick_object_binding(
+        _binding_params_for_pick(params, pk),
+        objects=ctx.objects,
+        active_object=ctx.active_object,
+        cache=ctx.grasp_offset_cache,
+    )
     prepare_offset = pk.prepare_offset
     pick_clearance = pk.pick_clearance
     ee_base_orientation = pk.ee_base_orientation

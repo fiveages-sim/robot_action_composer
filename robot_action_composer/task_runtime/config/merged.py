@@ -161,6 +161,10 @@ class MergedQueueConfig:
     drawer: DrawerGeometryConfig | None = None
     # 可选：任务 YAML（如 runtime_defaults / 场景 root 覆盖）覆盖 robot_config 的 Isaac base prim 路径
     base_link_entity_path: str | None = None
+    #: 合并后的物体清单（``.meta`` ∪ 任务 ``objects`` ∪ scene ``objects``）
+    objects: Mapping[str, Mapping[str, Any]] | None = None
+    #: 技能省略 ``object_key`` 时的默认物体
+    active_object: str | None = None
 
 
 def _optional_base_link_entity_path(overrides: Mapping[str, Any]) -> str | None:
@@ -179,6 +183,8 @@ def build_merged_queue_config(
     skill_defaults: Mapping[str, Any] | None = None,
     scene_preset: Mapping[str, object] | None = None,
     base_runtime: MergedQueueConfig | None = None,
+    objects: Mapping[str, Mapping[str, Any]] | None = None,
+    active_object: str | None = None,
 ) -> MergedQueueConfig:
     """Build runtime config from structured overlays."""
     root_base = validate_runtime_defaults_keys(runtime_defaults or {}, context="runtime_defaults")
@@ -254,6 +260,10 @@ def build_merged_queue_config(
     base_path = _optional_base_link_entity_path({"base_link_entity_path": base_link_raw}) if base_link_raw is not None else (
         base_runtime.base_link_entity_path if base_runtime is not None else None
     )
+    objs = objects if objects is not None else (base_runtime.objects if base_runtime is not None else None)
+    act = active_object if active_object is not None else (
+        base_runtime.active_object if base_runtime is not None else None
+    )
     return MergedQueueConfig(
         single_arm=single,
         carry=carry,
@@ -261,6 +271,8 @@ def build_merged_queue_config(
         handover=handover,
         drawer=drawer,
         base_link_entity_path=base_path,
+        objects=objs,
+        active_object=act,
     )
 
 
@@ -281,6 +293,10 @@ def format_merged_queue_summary(scene: str, cfg: MergedQueueConfig) -> str:
     parts = [format_queue_single_arm_summary(scene, cfg.single_arm)]
     if cfg.base_link_entity_path:
         parts.append(f"base_link_entity_path={cfg.base_link_entity_path}")
+    if cfg.objects:
+        parts.append(f"objects={sorted(cfg.objects)}")
+    if cfg.active_object:
+        parts.append(f"active_object={cfg.active_object}")
     if cfg.drawer is not None:
         from robot_action_composer.motion_generation.tasks.drawer import format_drawer_task_cfg_summary  # pyright: ignore[reportMissingImports]
 

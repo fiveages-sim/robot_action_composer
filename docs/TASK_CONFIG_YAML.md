@@ -107,17 +107,69 @@ scene_presets:
 - `skill_defaults`
 - `task_queue`
 - `scene_presets`
+- `objects` / `active_object`（可选；物体清单与默认目标，见下）
+
+### 物体清单（`objects` / `active_object`）
+
+用于声明刚体 prim 与 USD 抓取 frame，避免每个 skill 手写 `object_position_offset`。
+
+**任务 YAML 内联（推荐单任务）：**
+
+```yaml
+objects:
+  wind_turbo_blade:
+    object_prim_path: /World/scene/wind_turbo_blade/turbo_blade
+    grasps:
+      left: small_side/point_01   # 相对刚体的相对 path
+      right: big_side/point_01
+active_object: wind_turbo_blade
+
+skill_defaults:
+  dual_arm.parallel_pick:
+    left_pick:
+      grasp_id: left
+```
+
+**同叶子多任务复用：** 放到 `<leaf>/.meta/objects/<key>.yaml`（不进任务发现，同 `ros2_stack.yaml`）。合并顺序：
+
+`.meta/objects` → 任务 `objects` → `scene_presets.<scene>.objects`（后写覆盖）。
+
+**链式：** 整链锁定同一叶子；每段按上式**重新合并**该段 task+scene。跨 task 共享 grasps 请用 `.meta`，不要指望 task A 内联自动出现在 task B。
+
+**兼容：** 仅写 `object_prim_path` + `object_position_offset` 的旧 YAML 行为不变。若 skill **显式**写了 `object_position_offset`，优先生效（可覆盖自动 grasp）。
+
+导航 / 放置参考物也可复用同一清单：
+
+```yaml
+# .meta/objects/bg_cube.yaml
+object_key: bg_cube
+object_prim_path: /World/scene/bg_1/collision/Cube
+
+skill_defaults:
+  nav_to_bg_cube:
+    object_key: bg_cube          # → objects[bg_cube].object_prim_path
+  place_on_cube:
+    reference_object_key: bg_cube  # 同理；也可写 object_key
+    object_position_offset: [0.0, 0.3, 0.2]  # 本任务放置点，仍写在 skill 上
+```
+
+显式 `object_prim_path` / `reference_object_prim_path` 仍优先。导航**不会**回退到 `active_object`（避免误导航到抓取目标）。
+
+Newton kit 下勿对子 frame 调 `/get_entity_state` 当世界位姿；自动 offset 走 `/get_prim_attribute` 局部链。缺 `xformOp:translate`/`orient` 的中间 prim 视为恒等。
 
 ### `runtime_defaults` 允许键（严格）
 
-`runtime_defaults`（以及 `scene_presets.<scene>` 根层）仅允许以下 4 个键：
+`runtime_defaults`（以及 `scene_presets.<scene>` 根层中计入 runtime 的键）仅允许：
 
 - `base_link_entity_path`
 - `max_stage_duration`
 - `pose_tol_pos`
 - `pose_tol_ori`
+- （以及实现中已支持的 `gripper_open` / `gripper_closed`）
 
-其他字段（抓取/放置几何、双臂参数、drawer/handover 参数等）必须写在：
+`skill_params` / `objects` / `active_object` 可写在 scene 根层，但**不**当作 `runtime_defaults` 校验。
+
+其他抓取/放置几何仍写在：
 
 - `skill_defaults.<skill_or_id>`
 - `scene_presets.<scene>.skill_params.<skill_or_id>`
