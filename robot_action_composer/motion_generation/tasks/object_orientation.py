@@ -10,17 +10,17 @@
     yaw_corr = wrap(yaw_object − aligned_object_yaw)
     q_ee = normalize(R_z(yaw_corr) ⊗ q_ee_base)
 
-``yaw_roll`` 模式（yaw + roll 同时吸附）::
+``yaw_roll`` 模式（相对标称 SO(3) 残差）::
 
-    yaw_corr  = wrap(yaw_object  − aligned_object_yaw)
-    roll_corr = wrap(roll_object − aligned_object_roll)
-    q_corr    = euler_rpy(roll_corr, 0, yaw_corr)
-    q_ee      = normalize(q_corr ⊗ q_ee_base)
+    q_nom  = euler_rpy(aligned_roll, aligned_pitch, aligned_yaw)   # auto → 各角吸附到 k·π/2
+    q_corr = q_obj ⊗ conjugate(q_nom)   # = R_obj · R_nom^{-1}，勿再拆成独立 RPY 残差重装
+    q_ee   = normalize(q_corr ⊗ q_ee_base)
 
-在 pitch≈0 / 水平抓、且标定档落在物轴网格上时，``yaw_roll`` 几何上等价于把夹爪
-运动轴（由 ``ee_base`` 标定，通常工具系 +Z）贴到物体最近的 ±X/±Y/±Z。
+说明：把 ``(roll−roll0, pitch−pitch0, yaw−yaw0)`` 再 ``euler(...)`` 拼回去，在 yaw≈π/2 时会把
+物体 body-pitch 拧到错误的运动系轴（看起来像「pitch 映射成了 roll」）。相对四元数才能让
+夹爪运动轴继续贴住标定时对齐的那根物体 ±轴。
 
-``aligned_object_yaw`` / ``aligned_object_roll``：
+``aligned_object_yaw`` / ``aligned_object_roll`` / ``aligned_object_pitch``：
 
 - 数值（弧度）：显式标称角
 - ``auto`` / ``snap``：把当前物体在运动系下的对应角 **吸附到最近的** ``k·π/2``
@@ -36,8 +36,10 @@ from geometry_msgs.msg import Pose
 
 from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
     euler_rpy_to_quat_xyzw,
+    quat_conjugate,
     quat_multiply,
     quat_normalize,
+    rotate_vector_by_quat,
 )
 
 _AUTO_ALIGNED_ANGLE_TOKENS = frozenset(
@@ -47,6 +49,27 @@ _AUTO_ALIGNED_ANGLE_TOKENS = frozenset(
 _AUTO_ALIGNED_YAW_TOKENS = _AUTO_ALIGNED_ANGLE_TOKENS
 
 _YAW_ROLL_MODES = frozenset({"yaw_roll", "yaw_and_roll", "heading_roll"})
+
+_OBJECT_AXIS_LOCAL: tuple[tuple[str, tuple[float, float, float]], ...] = (
+    ("+X", (1.0, 0.0, 0.0)),
+    ("-X", (-1.0, 0.0, 0.0)),
+    ("+Y", (0.0, 1.0, 0.0)),
+    ("-Y", (0.0, -1.0, 0.0)),
+    ("+Z", (0.0, 0.0, 1.0)),
+    ("-Z", (0.0, 0.0, -1.0)),
+)
+
+_PICK_AXIS_LOCAL: dict[str, tuple[float, float, float]] = {
+    "+x": (1.0, 0.0, 0.0),
+    "x": (1.0, 0.0, 0.0),
+    "-x": (-1.0, 0.0, 0.0),
+    "+y": (0.0, 1.0, 0.0),
+    "y": (0.0, 1.0, 0.0),
+    "-y": (0.0, -1.0, 0.0),
+    "+z": (0.0, 0.0, 1.0),
+    "z": (0.0, 0.0, 1.0),
+    "-z": (0.0, 0.0, -1.0),
+}
 
 
 def object_orientation_xyzw(pose: Any) -> tuple[float, float, float, float]:
@@ -106,14 +129,19 @@ def _resolve_aligned_angle(
     *,
     component: str,
 ) -> float:
-    """解析标称角：数值直用；``auto`` 则按物体当前 roll/yaw 吸附到最近 π/2 档。"""
+    """解析标称角：数值直用；``auto`` 则按物体当前 roll/pitch/yaw 吸附到最近 π/2 档。"""
     if aligned is None:
         return 0.0
     if isinstance(aligned, str):
         key = aligned.strip().lower()
         if key in _AUTO_ALIGNED_ANGLE_TOKENS:
-            roll, _, yaw = quat_xyzw_to_rpy(object_orientation_xyzw(object_pose))
-            value = roll if component == "roll" else yaw
+            roll, pitch, yaw = quat_xyzw_to_rpy(object_orientation_xyzw(object_pose))
+            if component == "roll":
+                value = roll
+            elif component == "pitch":
+                value = pitch
+            else:
+                value = yaw
             return snap_angle_to_nearest_pi_half(value)
         if key == "":
             return 0.0
@@ -137,8 +165,63 @@ def resolve_aligned_object_roll(
     return _resolve_aligned_angle(aligned_object_roll, object_pose, component="roll")
 
 
+def resolve_aligned_object_pitch(
+    aligned_object_pitch: float | str | None,
+    object_pose: Any,
+) -> float:
+    """解析标称物体 pitch：数值直用；``auto`` 则按物体当前 pitch 吸附到最近 π/2 档。"""
+    return _resolve_aligned_angle(aligned_object_pitch, object_pose, component="pitch")
+
+
 def _mode_uses_roll(mode: str) -> bool:
     return str(mode or "").strip().lower() in _YAW_ROLL_MODES
+
+
+def _pick_axis_local(pick_axis: str = "+z") -> tuple[float, float, float]:
+    key = str(pick_axis or "+z").strip().lower()
+    if key not in _PICK_AXIS_LOCAL:
+        raise ValueError(
+            f"unsupported pick_axis {pick_axis!r}; expected one of {sorted(_PICK_AXIS_LOCAL)}"
+        )
+    return _PICK_AXIS_LOCAL[key]
+
+
+def ee_pick_axis_in_motion(
+    ee_base_orientation: tuple[float, float, float, float],
+    *,
+    pick_axis: str = "+z",
+) -> tuple[float, float, float]:
+    """``ee_base`` 下工具系 ``pick_axis`` 在运动系中的单位方向。"""
+    return rotate_vector_by_quat(_pick_axis_local(pick_axis), quat_normalize(ee_base_orientation))
+
+
+def nearest_object_axis_to_ee_pick(
+    ee_base_orientation: tuple[float, float, float, float],
+    object_pose: Any,
+    *,
+    pick_axis: str = "+z",
+) -> tuple[str, float, tuple[float, float, float]]:
+    """夹爪运动轴（默认工具 +Z）在 ``ee_base`` 下，与物体哪根 ±轴最对齐。
+
+    返回 ``(axis_label, cos_similarity, pick_dir_motion)``。
+    例如 rotate blade 的 ``ee_base=(0,1,0,0)``：工具 +Z → 运动系 −Z，
+    物体 identity 时最近轴为 ``-Z``（cos=1）。
+    """
+    pick_dir = ee_pick_axis_in_motion(ee_base_orientation, pick_axis=pick_axis)
+    q_obj = object_orientation_xyzw(object_pose)
+    best_label = "+Z"
+    best_dot = -2.0
+    for label, local in _OBJECT_AXIS_LOCAL:
+        axis_motion = rotate_vector_by_quat(local, q_obj)
+        dot = (
+            pick_dir[0] * axis_motion[0]
+            + pick_dir[1] * axis_motion[1]
+            + pick_dir[2] * axis_motion[2]
+        )
+        if dot > best_dot:
+            best_dot = float(dot)
+            best_label = label
+    return best_label, best_dot, pick_dir
 
 
 def filter_object_orientation_xyzw(
@@ -147,13 +230,14 @@ def filter_object_orientation_xyzw(
     *,
     aligned_object_yaw: float = 0.0,
     aligned_object_roll: float = 0.0,
+    aligned_object_pitch: float = 0.0,
 ) -> tuple[float, float, float, float]:
     """按 ``object_orientation_mode`` 过滤物体姿态（运动系下），并扣除标称角。
 
     - ``full`` / ``object``：完整物体姿态，再左乘 ``R_z(-aligned_object_yaw)`` 得到相对标称的姿态
     - ``yaw`` / ``yaw_only``：仅 ``wrap(yaw − aligned_object_yaw)``（导航后机物竖直、只差朝向时的推荐模式）
-    - ``yaw_roll`` / ``yaw_and_roll`` / ``heading_roll``：``euler(roll_corr, 0, yaw_corr)``，
-      pitch 置 0；相对标称同时补偿 yaw 与 roll
+    - ``yaw_roll`` / ``yaw_and_roll`` / ``heading_roll``：``q_obj ⊗ conjugate(q_nom)``，
+      相对标称同时补偿完整 SO(3) 残差（勿用独立 RPY 残差重装）
     - ``tilt`` / ``no_yaw``：roll+pitch，yaw=0（不扣标称偏航）
     - ``pitch``：仅 pitch
     - ``none`` / ``identity`` / ``motion``：单位姿态（不跟物体）
@@ -161,13 +245,13 @@ def filter_object_orientation_xyzw(
     mode_norm = str(mode or "full").strip().lower()
     yaw0 = float(aligned_object_yaw)
     roll0 = float(aligned_object_roll)
+    pitch0 = float(aligned_object_pitch)
 
     if mode_norm in ("none", "identity", "motion"):
         return (0.0, 0.0, 0.0, 1.0)
 
     roll, pitch, yaw = quat_xyzw_to_rpy(q_obj)
     yaw_corr = wrap_angle_pi(yaw - yaw0)
-    roll_corr = wrap_angle_pi(roll - roll0)
 
     if mode_norm in ("", "full", "object"):
         # 相对标称：R_z(-yaw0) 左乘到物体姿态 → 标称处近似单位，偏差保留
@@ -176,7 +260,9 @@ def filter_object_orientation_xyzw(
     if mode_norm in ("yaw", "yaw_only", "heading"):
         return euler_rpy_to_quat_xyzw(0.0, 0.0, yaw_corr)
     if mode_norm in _YAW_ROLL_MODES:
-        return euler_rpy_to_quat_xyzw(roll_corr, 0.0, yaw_corr)
+        # R_corr = R_obj · R_nom^{-1}；yaw≈π/2 时独立 RPY 残差重装会把 body-pitch 拧错轴
+        q_nom = euler_rpy_to_quat_xyzw(roll0, pitch0, yaw0)
+        return quat_normalize(quat_multiply(quat_normalize(q_obj), quat_conjugate(q_nom)))
     if mode_norm in ("tilt", "no_yaw", "roll_pitch", "roll_pitch_only"):
         return euler_rpy_to_quat_xyzw(roll, pitch, 0.0)
     if mode_norm in ("pitch", "pitch_only"):
@@ -193,17 +279,21 @@ def filter_object_pose_orientation(
     *,
     aligned_object_yaw: float | str = 0.0,
     aligned_object_roll: float | str = 0.0,
+    aligned_object_pitch: float | str = "auto",
 ) -> Pose:
     """返回仅姿态被过滤、位置不变的副本。"""
     yaw0 = resolve_aligned_object_yaw(aligned_object_yaw, pose)
     roll0 = 0.0
+    pitch0 = 0.0
     if _mode_uses_roll(mode):
         roll0 = resolve_aligned_object_roll(aligned_object_roll, pose)
+        pitch0 = resolve_aligned_object_pitch(aligned_object_pitch, pose)
     q = filter_object_orientation_xyzw(
         object_orientation_xyzw(pose),
         mode,
         aligned_object_yaw=yaw0,
         aligned_object_roll=roll0,
+        aligned_object_pitch=pitch0,
     )
     out = Pose()
     out.position.x = pose.position.x
@@ -219,20 +309,29 @@ def compose_aligned_ee_orientation(
     *,
     ee_orientation_frame: str = "motion",
     object_orientation_mode: str = "yaw",
-    aligned_object_yaw: float | str = 0.0,
+    aligned_object_yaw: float | str = "auto",
     aligned_object_roll: float | str = "auto",
+    aligned_object_pitch: float | str = "auto",
+    object_prim_path: str = "",
+    pick_axis: str = "+z",
 ) -> tuple[float, float, float, float]:
     """将「标称机物相对朝向」下标定的 ``ee_base_orientation`` 变换到当前物体朝向。
 
     - ``ee_orientation_frame=motion``：直接返回标定姿态（旧行为）。
     - ``ee_orientation_frame=object``：``q_corr(object, aligned_*) ⊗ ee_base``。
 
-    ``aligned_object_yaw`` / ``aligned_object_roll``：数值，或 ``auto``（吸附到最近的 ``k·π/2``）。
-    ``aligned_object_roll`` 仅在 ``object_orientation_mode`` 为 ``yaw_roll`` 时生效。
+    ``object_pose`` 必须是 ``object_prim_path`` 刚体在运动系下的位姿（``/get_entity_state``），
+    **不要**传入已叠加 grasp ``object_position_offset`` 后的抓取点位姿（位置可不同，但朝向
+    来源必须是刚体 prim）。
+
+    ``aligned_object_yaw`` / ``aligned_object_roll`` / ``aligned_object_pitch``：
+    数值，或 ``auto``（吸附到最近的 ``k·π/2``）。
+    pitch/roll 仅在 ``object_orientation_mode`` 为 ``yaw_roll`` 时生效。
     """
     frame = str(ee_orientation_frame or "motion").strip().lower()
+    ee_base = quat_normalize(ee_base_orientation)
     if frame in ("", "motion", "base", "world"):
-        return quat_normalize(ee_base_orientation)
+        return ee_base
     if frame not in ("object", "object_body", "body", "local"):
         raise ValueError(
             f"unsupported ee_orientation_frame {ee_orientation_frame!r}; "
@@ -240,12 +339,37 @@ def compose_aligned_ee_orientation(
         )
     yaw0 = resolve_aligned_object_yaw(aligned_object_yaw, object_pose)
     roll0 = 0.0
+    pitch0 = 0.0
     if _mode_uses_roll(object_orientation_mode):
         roll0 = resolve_aligned_object_roll(aligned_object_roll, object_pose)
+        pitch0 = resolve_aligned_object_pitch(aligned_object_pitch, object_pose)
+    q_obj = object_orientation_xyzw(object_pose)
     q_corr = filter_object_orientation_xyzw(
-        object_orientation_xyzw(object_pose),
+        q_obj,
         object_orientation_mode,
         aligned_object_yaw=yaw0,
         aligned_object_roll=roll0,
+        aligned_object_pitch=pitch0,
     )
-    return quat_normalize(quat_multiply(q_corr, ee_base_orientation))
+    if _mode_uses_roll(object_orientation_mode) or str(object_orientation_mode).strip().lower() in (
+        "yaw",
+        "yaw_only",
+        "heading",
+        "full",
+        "object",
+    ):
+        roll, pitch, yaw = quat_xyzw_to_rpy(q_obj)
+        cr, cp, cy = quat_xyzw_to_rpy(q_corr)
+        axis_label, axis_cos, pick_dir = nearest_object_axis_to_ee_pick(
+            ee_base, object_pose, pick_axis=pick_axis
+        )
+        prim_label = str(object_prim_path or "").strip() or "<object_pose>"
+        print(
+            f"[ObjectOrient] mode={object_orientation_mode} prim={prim_label} "
+            f"obj_rpy=({roll:.3f},{pitch:.3f},{yaw:.3f}) "
+            f"aligned=({roll0:.3f},{pitch0:.3f},{yaw0:.3f}) "
+            f"corr_rpy=({cr:.3f},{cp:.3f},{cy:.3f}) "
+            f"ee_pick({pick_axis})->obj_axis={axis_label}(cos={axis_cos:.3f}) "
+            f"pick_motion=({pick_dir[0]:.3f},{pick_dir[1]:.3f},{pick_dir[2]:.3f})"
+        )
+    return quat_normalize(quat_multiply(q_corr, ee_base))

@@ -118,20 +118,93 @@ def test_yaw_mode_ignores_roll() -> None:
     assert yaw == pytest.approx(0.2, abs=1e-6)
 
 
-def test_yaw_roll_mode_includes_both() -> None:
-    aligned_yaw = 0.0
-    aligned_roll = 0.0
+def test_yaw_roll_mode_near_identity_matches_rpy() -> None:
+    """标称为单位时 q_corr = q_obj，RPY 与物体一致。"""
     pose = _pose_from_rpy(0.4, 0.1, 0.2)
     q_corr = oo.filter_object_orientation_xyzw(
         oo.object_orientation_xyzw(pose),
         "yaw_roll",
-        aligned_object_yaw=aligned_yaw,
-        aligned_object_roll=aligned_roll,
+        aligned_object_yaw=0.0,
+        aligned_object_roll=0.0,
+        aligned_object_pitch=0.0,
     )
     roll, pitch, yaw = oo.quat_xyzw_to_rpy(q_corr)
     assert roll == pytest.approx(0.4, abs=1e-6)
-    assert pitch == pytest.approx(0.0, abs=1e-9)
+    assert pitch == pytest.approx(0.1, abs=1e-6)
     assert yaw == pytest.approx(0.2, abs=1e-6)
+
+
+def test_yaw_roll_relative_quat_not_euler_residuals() -> None:
+    """yaw≈π/2 时物体 pitch tip → 相对残差应落在 roll（勿用独立 RPY 残差重装成 pitch）。"""
+    import sys
+
+    name = "rac_object_orientation_under_test"
+    if name in sys.modules:
+        del sys.modules[name]
+    mod = _load_object_orientation()
+
+    pose = _pose_from_rpy(0.0, 0.3, 0.5 * math.pi)
+    ee_base = (0.0, 0.0, 0.0, 1.0)
+    out = mod.compose_aligned_ee_orientation(
+        ee_base,
+        pose,
+        ee_orientation_frame="object",
+        object_orientation_mode="yaw_roll",
+        aligned_object_yaw="auto",
+        aligned_object_roll="auto",
+        aligned_object_pitch="auto",
+    )
+    roll, pitch, yaw = mod.quat_xyzw_to_rpy(out)
+    assert abs(roll) == pytest.approx(0.3, abs=1e-5)
+    assert abs(pitch) < 1e-5
+    assert abs(yaw) < 1e-4
+
+    # 合成后夹爪轴仍精确贴住某一物体主轴（identity ee_base → 物体 +Z）
+    label, cos_sim, _ = mod.nearest_object_axis_to_ee_pick(out, pose)
+    assert label == "+Z"
+    assert cos_sim == pytest.approx(1.0, abs=1e-6)
+
+
+def test_rotate_blade_ee_base_nearest_object_axis_is_minus_z() -> None:
+    """rotate blade ``ee_base=(0,1,0,0)``：工具 +Z → 运动 −Z，与物体 −Z 最匹配。"""
+    import sys
+
+    name = "rac_object_orientation_under_test"
+    if name in sys.modules:
+        del sys.modules[name]
+    mod = _load_object_orientation()
+
+    ee_base = (0.0, 1.0, 0.0, 0.0)
+    pose = _pose_from_rpy(0.0, 0.0, 0.5 * math.pi)
+    label, cos_sim, pick_dir = mod.nearest_object_axis_to_ee_pick(ee_base, pose)
+    assert label == "-Z"
+    assert cos_sim == pytest.approx(1.0, abs=1e-6)
+    assert pick_dir == pytest.approx((0.0, 0.0, -1.0), abs=1e-6)
+
+
+def test_yaw_roll_keeps_pick_on_object_axis_with_ee_base() -> None:
+    """带 ee_base 时相对四元数仍让 pick 跟住标定时对齐的物体主轴。"""
+    import sys
+
+    name = "rac_object_orientation_under_test"
+    if name in sys.modules:
+        del sys.modules[name]
+    mod = _load_object_orientation()
+
+    ee_base = (0.0, 1.0, 0.0, 0.0)
+    pose = _pose_from_rpy(0.0, 0.3, 0.5 * math.pi)
+    out = mod.compose_aligned_ee_orientation(
+        ee_base,
+        pose,
+        ee_orientation_frame="object",
+        object_orientation_mode="yaw_roll",
+        aligned_object_yaw="auto",
+        aligned_object_roll="auto",
+        aligned_object_pitch="auto",
+    )
+    label, cos_sim, _ = mod.nearest_object_axis_to_ee_pick(out, pose)
+    assert label == "-Z"
+    assert cos_sim == pytest.approx(1.0, abs=1e-6)
 
 
 def test_compose_motion_frame_returns_ee_base() -> None:
@@ -149,18 +222,26 @@ def test_compose_motion_frame_returns_ee_base() -> None:
 
 
 def test_compose_yaw_roll_auto_snaps_then_corrects() -> None:
-    # Object near π/2 roll and small yaw → aligned roll=π/2, yaw=0; corr ≈ (roll−π/2, 0, yaw)
+    # Object near π/2 roll and small yaw → aligned roll=π/2；
+    # 相对 SO(3) 后夹爪轴仍贴住标称时对齐的那根物轴（此处为 +Y）。
+    import sys
+
+    name = "rac_object_orientation_under_test"
+    if name in sys.modules:
+        del sys.modules[name]
+    mod = _load_object_orientation()
+
     pose = _pose_from_rpy(0.5 * math.pi + 0.15, 0.0, 0.12)
     ee_base = (0.0, 0.0, 0.0, 1.0)
-    out = oo.compose_aligned_ee_orientation(
+    out = mod.compose_aligned_ee_orientation(
         ee_base,
         pose,
         ee_orientation_frame="object",
         object_orientation_mode="yaw_roll",
         aligned_object_yaw="auto",
         aligned_object_roll="auto",
+        aligned_object_pitch="auto",
     )
-    roll, pitch, yaw = oo.quat_xyzw_to_rpy(out)
-    assert pitch == pytest.approx(0.0, abs=1e-6)
-    assert roll == pytest.approx(0.15, abs=1e-5)
-    assert yaw == pytest.approx(0.12, abs=1e-5)
+    label, cos_sim, _ = mod.nearest_object_axis_to_ee_pick(out, pose)
+    assert label == "+Y"
+    assert cos_sim == pytest.approx(1.0, abs=1e-5)

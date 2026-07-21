@@ -637,8 +637,15 @@ def build_single_arm_return_home_sequence(
     home_pose: Pose,
     gripper: float,
     stage_name: str = "Return-1-ReturnHome",
+    skip_gripper_command: bool = False,
 ) -> list[ArmStage]:
-    return [ArmStage(stage_name, ArmTarget(pose=home_pose, gripper=gripper))]
+    return [
+        ArmStage(
+            stage_name,
+            ArmTarget(pose=home_pose, gripper=gripper),
+            skip_gripper_command=skip_gripper_command,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

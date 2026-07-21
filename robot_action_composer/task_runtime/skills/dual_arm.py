@@ -282,6 +282,18 @@ def _require_parallel_pick_cfg(params: Mapping[str, Any]) -> BimanualParallelPic
     return parallel_pick_cfg_from_params(params)
 
 
+def _copy_pose(pose: Pose) -> Pose:
+    out = Pose()
+    out.position.x = float(pose.position.x)
+    out.position.y = float(pose.position.y)
+    out.position.z = float(pose.position.z)
+    out.orientation.x = float(pose.orientation.x)
+    out.orientation.y = float(pose.orientation.y)
+    out.orientation.z = float(pose.orientation.z)
+    out.orientation.w = float(pose.orientation.w)
+    return out
+
+
 def _resolve_parallel_pick_target_poses(
     ctx: QueueRuntimeContext,
     cfg: BimanualParallelPickTaskConfig,
@@ -293,13 +305,18 @@ def _resolve_parallel_pick_target_poses(
     right_prim: str,
     right_offset: tuple[float, float, float],
 ) -> dict[str, Any]:
-    """物体系偏移与 ``single_arm.pick`` 一致；必要时将目标位姿从 ``ctx.frame_id`` 变到 ``execution_frame_id``。"""
+    """Resolve grasp targets + object orientations from ``object_prim_path``.
+
+    Orientation for ``yaw`` / ``yaw_roll`` alignment **must** come from the rigid-body
+    ``object_prim_path`` entity state (after optional TF into the execution frame),
+    not from a grasp-offset position pose.
+    """
     src = str(ctx.frame_id).strip() or "base_link"
     exec_f = str(execution_frame_id).strip() or src
 
-    def _one(side: str, prim: str, off: tuple[float, float, float]) -> Pose:
+    def _one(side: str, prim: str, off: tuple[float, float, float]) -> tuple[Pose, Pose]:
         if ctx.object_resolution is not None:
-            pose = resolve_object_pose_for_task(
+            obj_pose = resolve_object_pose_for_task(
                 ctx,
                 object_prim_path=prim,
                 include_orientation=True,
@@ -310,31 +327,40 @@ def _resolve_parallel_pick_target_poses(
                 retry_delay=SERVICE_RETRY_DELAY,
             )
         else:
-            pose = get_object_pose_from_service(
+            obj_pose = get_object_pose_from_service(
                 ctx.base_world_pos,
                 ctx.base_world_quat,
                 prim,
                 include_orientation=True,
             )
-        pose = apply_object_local_offset_to_pose(pose, off)
         if exec_f != src:
             iface = ctx.interface
             if not hasattr(iface, "transform_pose"):
                 raise TypeError(
                     "dual_arm.parallel_pick: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)"
                 )
-            transformed = iface.transform_pose(pose, src, exec_f, timeout=tf_timeout)
+            transformed = iface.transform_pose(obj_pose, src, exec_f, timeout=tf_timeout)
             if transformed is None:
                 raise RuntimeError(
-                    f"dual_arm.parallel_pick: TF {src!r} -> {exec_f!r} failed for {side} object pose; "
-                    "check motion_frame_id and TF."
+                    f"dual_arm.parallel_pick: TF {src!r} -> {exec_f!r} failed for {side} "
+                    f"object_prim_path={prim!r}; check motion_frame_id and TF."
                 )
-            return transformed
-        return pose
+            obj_pose = transformed
+        # Keep a pristine copy for orientation alignment (object_prim_path only).
+        orient_pose = _copy_pose(obj_pose)
+        grasp_pose = apply_object_local_offset_to_pose(_copy_pose(obj_pose), off)
+        return grasp_pose, orient_pose
 
-    left_pose = _one("left", left_prim, left_offset)
-    right_pose = _one("right", right_prim, right_offset)
-    return {"left": left_pose, "right": right_pose}
+    left_grasp, left_orient = _one("left", left_prim, left_offset)
+    right_grasp, right_orient = _one("right", right_prim, right_offset)
+    return {
+        "left": left_grasp,
+        "right": right_grasp,
+        "left_orient": left_orient,
+        "right_orient": right_orient,
+        "left_prim": left_prim,
+        "right_prim": right_prim,
+    }
 
 
 def _parallel_pick_full_stages(
@@ -344,12 +370,18 @@ def _parallel_pick_full_stages(
 ) -> list[StageTarget]:
     left_pose = target_poses.get("left")
     right_pose = target_poses.get("right")
+    left_orient = target_poses.get("left_orient", left_pose)
+    right_orient = target_poses.get("right_orient", right_pose)
     if left_pose is None or right_pose is None:
         raise ValueError("parallel pick requires both left and right target poses")
     return build_bimanual_parallel_pick_record_sequence(
         task_cfg=cfg,
         left_target_pose=left_pose,
         right_target_pose=right_pose,
+        left_object_pose=left_orient,
+        right_object_pose=right_orient,
+        left_object_prim=str(target_poses.get("left_prim") or ""),
+        right_object_prim=str(target_poses.get("right_prim") or ""),
         gripper_open=ctx.gripper_open,
         gripper_closed=ctx.gripper_closed,
     )

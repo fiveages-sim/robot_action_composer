@@ -45,7 +45,7 @@
     - `motion_frame_id`：增量解释坐标系；默认与末端反馈 frame 一致。写 `arm_base` / `base_footprint` / `base_link` 等可相对基座平移（需 TF 可达）。
     - `tf_lookup_timeout`：与任务 frame 不一致时的 TF 超时（秒）。
   - **执行控制**
-    - `gripper`：目标夹爪值，默认 ``gripper_for_return_home``。
+    - `gripper`：可选目标夹爪值；**未写则不发夹爪指令**（保持当前开合）。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`（轨迹规划时长，**不是**到位等待超时；后者见 `runtime_defaults.max_stage_duration`）。
 - **备注**：
   - WBC 双臂耦合（`ARMS_COUPLED`）后，通常只发左臂目标，右臂由耦合跟随：`arm: left`。
@@ -59,7 +59,7 @@
       position_delta: [0.2, 0.0, 0.3]
       orientation_delta_rpy: [0.0, -1.57, 0.0]
       arm_movel_duration: 4.0
-      gripper: 0.0
+      gripper: 0.0   # 需要改夹爪时才写；省略则不发夹爪指令
   ```
 
 ### 1.2 末端移动到目标物体相对位姿（`single_arm.move_to_object`）
@@ -612,15 +612,17 @@ q_ee     = R_z(yaw_corr) ⊗ ee_base
 **公式（`object_orientation_mode: yaw_roll`）**
 
 ```text
-aligned_yaw  = aligned_object_yaw   # 或 auto → snap(yaw)
-aligned_roll = aligned_object_roll  # 或 auto → snap(roll)
-yaw_corr  = wrap(yaw_object  − aligned_yaw)
-roll_corr = wrap(roll_object − aligned_roll)
-q_corr    = euler_rpy(roll_corr, 0, yaw_corr)   # pitch 置 0
-q_ee      = q_corr ⊗ ee_base
+aligned_yaw   = aligned_object_yaw    # 或 auto → snap(yaw)
+aligned_pitch = aligned_object_pitch  # 默认 auto → snap(pitch)
+aligned_roll  = aligned_object_roll   # 或 auto → snap(roll)
+q_nom  = euler_rpy(aligned_roll, aligned_pitch, aligned_yaw)
+q_corr = q_obj ⊗ conjugate(q_nom)     # R_obj · R_nom^{-1}，完整 SO(3) 相对残差
+q_ee   = q_corr ⊗ ee_base
 ```
 
-在 **pitch≈0 / 水平抓**、且标定档落在物轴网格上时，`yaw_roll` 几何上等价于把夹爪运动轴（由 `ee_base` 标定，通常工具系 +Z）贴到物体最近的 ±X/±Y/±Z。不处理任意 3D 斜置物体的最近点积对齐。
+不要把三个角的标量残差再 `euler(roll_corr, pitch_corr, yaw_corr)` 重装：在 yaw≈π/2 时会把物体 body-pitch 拧到错误的运动系轴（日志里像「pitch→roll」）。相对四元数才能让夹爪运动轴（默认工具 +Z）继续贴住标定时对齐的那根物体 ±轴。
+
+运行时日志会打印 `ee_pick(+z)->obj_axis=...`。例如 rotate blade 的 `ee_base=[0,1,0,0]`：工具 +Z → 运动系 −Z，与物体 **−Z** 最匹配（cos≈1）。
 
 工具系偏移（prepare / lift / retreat）用 **有效** `q_ee` 旋到运动系。
 

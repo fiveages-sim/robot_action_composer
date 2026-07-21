@@ -158,26 +158,35 @@ def build_bimanual_parallel_pick_record_sequence(
     right_target_pose: Pose,
     gripper_open: float,
     gripper_closed: float,
+    left_object_pose: Pose | None = None,
+    right_object_pose: Pose | None = None,
+    left_object_prim: str = "",
+    right_object_prim: str = "",
 ) -> list[StageTarget]:
     left = task_cfg.left_pick
     right = task_cfg.right_pick
     l_frame, l_mode, l_yaw0, l_roll0 = _arm_orientation_policy(task_cfg, left)
     r_frame, r_mode, r_yaw0, r_roll0 = _arm_orientation_policy(task_cfg, right)
+    # Orientation alignment uses object_prim_path pose only (not grasp-offset target).
+    left_orient = left_object_pose if left_object_pose is not None else left_target_pose
+    right_orient = right_object_pose if right_object_pose is not None else right_target_pose
     left_ee = compose_aligned_ee_orientation(
         left.ee_base_orientation,
-        left_target_pose,
+        left_orient,
         ee_orientation_frame=l_frame,
         object_orientation_mode=l_mode,
         aligned_object_yaw=l_yaw0,
         aligned_object_roll=l_roll0,
+        object_prim_path=left_object_prim or left.object_prim_path,
     )
     right_ee = compose_aligned_ee_orientation(
         right.ee_base_orientation,
-        right_target_pose,
+        right_orient,
         ee_orientation_frame=r_frame,
         object_orientation_mode=r_mode,
         aligned_object_yaw=r_yaw0,
         aligned_object_roll=r_roll0,
+        object_prim_path=right_object_prim or right.object_prim_path,
     )
     lo, lz = _pick_retreat_world_vectors(left, left_ee)
     ro, rz = _pick_retreat_world_vectors(right, right_ee)
