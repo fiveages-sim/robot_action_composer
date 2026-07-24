@@ -401,7 +401,7 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
     if pl2.place_position is None:
         raise ValueError(
             "place_position is required for single_arm.place "
-            "(set via skill params, object_prim_path, or skill_defaults.single_arm.place)"
+            "(set via skill params, object_prim_path / object_key, or skill_defaults.single_arm.place)"
         )
     if pl2.ee_base_orientation is None:
         raise ValueError("ee_base_orientation is required for single_arm.place")

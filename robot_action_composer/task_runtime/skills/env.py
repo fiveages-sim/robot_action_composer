@@ -12,6 +12,7 @@ from robot_action_composer.motion_generation.sequence.cartesian_stages import ( 
 )
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext
+from robot_action_composer.task_runtime.object_binding import resolve_object_prim_path
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.types import ExecutionMeta
 
@@ -35,23 +36,29 @@ def skill_randomize_object_local_xyz(
     """对指定 Isaac prim 施加**局部**平移随机抖动（与 ``dual_arm.carry`` 几何无关）。
 
     典型用法：在 ``reset_env: true`` 时，把本技能作为 ``task_queue`` **第一个**顺序块（在 ``parallel`` 之前），
-    以便 sim reset 完成后再对**显式** ``object_prim_path`` 做扰动。
+    以便 sim reset 完成后再对目标 prim 做扰动。
 
     调用 :func:`robot_action_composer.isaac_sim.randomize_object_xyz_after_reset`：
     各轴独立均匀分布 ``[-w_i, +w_i]``，``w_i`` 为 ``xyz_offset`` 对应分量。
 
     params:
-        object_prim_path: 必填，要扰动的物体 / 刚体 prim 全路径（勿默认用 carry 的 source）。
+        object_prim_path: 可选，要扰动的物体 / 刚体 prim 全路径（显式优先）。
+        object_key: 可选，从任务 ``objects`` / ``.meta/objects`` 解析 prim；
+            也可回退 ``active_object``。
         xyz_offset: 各轴半幅（米），默认 ``[0.04, 0.04, 0.0]``。
         enabled: 默认 ``true``；``false`` 时跳过（便于 YAML 开关）。
     """
-    raw = params.get("object_prim_path")
-    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
-        raise ValueError(
-            "env.randomize_object_local_xyz requires non-empty object_prim_path "
-            "(which prim to jitter; not inferred from dual_arm.carry)",
-        )
-    path = str(raw).strip()
+    path = resolve_object_prim_path(
+        params,
+        objects=getattr(ctx, "objects", None),
+        prim_param="object_prim_path",
+        key_params="object_key",
+        active_object=getattr(ctx, "active_object", None),
+        use_active_object=True,
+        required=True,
+        label="env.randomize_object_local_xyz",
+    )
+    assert path  # required=True
     enabled = bool(params.get("enabled", True))
     off = _param_vec3(params, "xyz_offset", (0.04, 0.04, 0.0))
 

@@ -66,15 +66,15 @@ motion 相关字段可写在根级，或集中在 `motion:` 下（与根级合�
 
 ### `ros2_interface.preset`
 
-`ros2_robot_interface` 在 `connect()` 时会自动探测双臂、夹爪、arm/body/head topic 等。
+`ros2_robot_interface` 在 `connect()` 时会自动探测双臂、夹爪、arm/body/head topic 等。单臂未在图上看到关节命令话题时，会按约定回退到 `/ocs2_arm_controller/target_joint_position`（与默认 MoveL/MoveC action 一致），因此像 Dobot CR5 / FiveAges W2 这类标准栈通常直接用 `auto` 即可。
 
 | preset | 用途 |
 |--------|------|
-| `auto`（默认） | 仅设置到位阈值，其余靠 auto-detect |
+| `auto`（默认） | 仅设置到位阈值，其余靠 auto-detect（含单臂 MoveJ 约定回退） |
 | `single_arm` | 单臂非标准夹爪（如 Realman RM75） |
-| `ocs2_single_arm` | 单臂 + `ocs2_arm_controller`（如 Dobot CR5） |
+| `ocs2_single_arm` | 显式预置单臂 `ocs2_arm_controller` 话题；命名空间或需在 detect 前写死关节/夹爪话题时用 |
 
-**示例 — 双臂标准栈（最简）：**
+**示例 — 双臂 / 单臂标准栈（最简，preset=auto）：**
 
 ```yaml
 key: galbot_one
@@ -82,18 +82,15 @@ label: Galbot One
 base_link_entity_path: /World/Galbot_One/Chassis/base_link/base_link
 ```
 
-**示例 — 单臂 OCS2 + 自定义夹爪：**
+**示例 — 单臂非标准夹爪（需 `single_arm` / `ocs2_single_arm` 覆盖）：**
 
 ```yaml
-key: dobot_cr5
-label: Dobot CR5
-base_link_entity_path: /World/CR5/base_link
+key: realman_rm75
+label: Realman RM75
 ros2_interface:
-  preset: ocs2_single_arm
-  gripper_joint_name: gripper_joint
-  gripper_command_topic: gripper_joint/position_command
-  left_gripper_controller_name: gripper_controller
-  left_gripper_target_percent_topic: /gripper_controller/target_percent
+  preset: single_arm
+  gripper_joint_name: ...
+  gripper_command_topic: ...
 ```
 
 发现结果中的 `robot_dir_relpath`（相对 `robots/`）用于 CLI 按厂商文件夹分组展示；扁平布局（无 `/`）时菜单与原先一致。

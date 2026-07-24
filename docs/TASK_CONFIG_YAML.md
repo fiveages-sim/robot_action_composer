@@ -136,7 +136,7 @@ skill_defaults:
 
 **链式：** 整链锁定同一叶子；每段按上式**重新合并**该段 task+scene。跨 task 共享 grasps 请用 `.meta`，不要指望 task A 内联自动出现在 task B。
 
-**兼容：** 仅写 `object_prim_path` + `object_position_offset` 的旧 YAML 行为不变。若 skill **显式**写了 `object_position_offset`，优先生效（可覆盖自动 grasp）。
+**兼容：** 仅写 `object_prim_path` + `object_position_offset` 的旧 YAML 行为不变。若同时写了 `grasp_id` / `grasp_prim_path` 与 `object_position_offset`，两者在**同一物体系**下相加（grasp 自动偏移 + 额外微调）。
 
 导航 / 放置参考物也可复用同一清单：
 

@@ -107,7 +107,9 @@ def _format_stack_last_brief(
     *,
     registry: dict[str, dict[str, Any]],
 ) -> list[str]:
-    robot = str(last.get("robot_key", "?"))
+    robot_key = str(last.get("robot_key", "?"))
+    robot_entry = registry.get(robot_key) or {}
+    robot_label = str(robot_entry.get("label") or robot_key).strip() or robot_key
     skip_group = bool(last.get("skip_group"))
     group = "" if skip_group else str(last.get("group_id") or "")
     group_label = group or t("ros2_stack.group_none")
@@ -120,9 +122,8 @@ def _format_stack_last_brief(
         nav_s = t("ros2_stack.brief.nav_yes", detail=detail)
     else:
         nav_s = t("ros2_stack.brief.nav_no")
-    _ = registry  # reserved for future label lookup
     return [
-        t("ros2_stack.brief.robot", value=robot),
+        t("ros2_stack.brief.robot", value=robot_label),
         t("ros2_stack.brief.group", value=group_label),
         t("ros2_stack.brief.motion", value=motion),
         t("ros2_stack.brief.nav", value=nav_s),

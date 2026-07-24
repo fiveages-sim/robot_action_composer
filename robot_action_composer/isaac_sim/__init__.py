@@ -33,11 +33,13 @@ PRIM_ATTR_PROBE_RETRIES = 1
 T = TypeVar("T")
 
 _service_node: Node | None = None
-_service_lock = threading.Lock()
+_service_clients: dict[str, object] = {}
+# RLock: node/client create and call+spin share one lock (serialize reuse).
+_service_lock = threading.RLock()
 
 
 def _ensure_service_node() -> Node:
-    """Shared Isaac service client.
+    """Shared Isaac service client node.
 
     Uses **wall clock** (``use_sim_time=False``). ``wait_for_service`` under sim time
     can block forever if this node is not spun on ``/clock`` while waiting.
@@ -54,6 +56,17 @@ def _ensure_service_node() -> Node:
             automatically_declare_parameters_from_overrides=True,
         )
         return _service_node
+
+
+def _get_service_client(service_type: type, service_name: str) -> tuple[Node, object]:
+    """Reuse one client per service name (avoid destroy-after-timeout → Isaac sendResponse spam)."""
+    node = _ensure_service_node()
+    with _service_lock:
+        client = _service_clients.get(service_name)
+        if client is None:
+            client = node.create_client(service_type, service_name)
+            _service_clients[service_name] = client
+        return node, client
 
 
 def _wait_for_service_wall(client: object, node: Node, timeout: float) -> bool:
@@ -73,9 +86,8 @@ def _call_service_once(
     *,
     timeout: float = SERVICE_CALL_TIMEOUT,
 ) -> object:
-    node = _ensure_service_node()
-    client = node.create_client(service_type, service_name)
-    try:
+    node, client = _get_service_client(service_type, service_name)
+    with _service_lock:
         if not _wait_for_service_wall(client, node, timeout):
             raise RuntimeError(f"Service '{service_name}' unavailable within {timeout:.1f}s")
         future = client.call_async(request)
@@ -87,11 +99,6 @@ def _call_service_once(
         if future.exception() is not None:
             raise RuntimeError(f"Service '{service_name}' call failed: {future.exception()}")
         return future.result()
-    finally:
-        try:
-            node.destroy_client(client)
-        except Exception:
-            pass
 
 
 def _call_service_with_retry(

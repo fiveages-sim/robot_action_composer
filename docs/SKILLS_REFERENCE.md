@@ -84,7 +84,7 @@
 - **参数**（来自 `single_arm.pick` 切片）：
   - **目标物体配置**
     - `object_prim_path`：抓取对象刚体 Prim（可与任务 `objects` 绑定补齐）。
-    - `object_position_offset`：物体系抓取偏移。若 **显式写出** 则走旧路径；未写且提供 `grasp_id` / `grasp_prim_path` 时由 USD 局部 frame 自动解析。
+    - `object_position_offset`：物体系抓取偏移。与 `grasp_id` / `grasp_prim_path` 同时写出时在物体系下**叠加**；仅写 offset 时走旧路径；仅写 grasp 时由 USD 局部 frame 自动解析。
     - `object_key` / `grasp_id` / `grasp_prim_path`：可选；见 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md) 物体清单。
   - **运动系配置**
     - `ee_base_orientation`：抓取姿态四元数 `xyzw`。语义为**某一标称机物相对朝向下的期望抓取方向**（可含斜抓；见 §6.2）。
@@ -230,7 +230,7 @@ https://github.com/user-attachments/assets/1e4e9d34-e5ba-4aa7-8e70-6c5a9de7631f
 
 - **目标物体配置**
   - `object_prim_path`：该侧抓取刚体 Prim（可与 `objects` / `active_object` 补齐）。
-  - `object_position_offset`：物体系偏移；**显式写出**则覆盖自动 grasp。
+  - `object_position_offset`：物体系偏移；与 grasp 同时写出时**叠加**，仅写 offset 时走旧路径。
   - `object_key` / `grasp_id` / `grasp_prim_path`：可选；见任务 YAML 物体清单。
 
 - **运动系配置**

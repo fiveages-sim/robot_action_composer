@@ -283,6 +283,12 @@ def resolve_object_prim_path(
     return None
 
 
+def _parse_object_position_offset(raw_off: Any) -> tuple[float, float, float]:
+    if isinstance(raw_off, (list, tuple)) and len(raw_off) == 3:
+        return (float(raw_off[0]), float(raw_off[1]), float(raw_off[2]))
+    raise TypeError(f"object_position_offset must be length-3 [x,y,z], got {raw_off!r}")
+
+
 def resolve_pick_object_binding(
     params: Mapping[str, Any],
     *,
@@ -292,12 +298,13 @@ def resolve_pick_object_binding(
 ) -> tuple[str, tuple[float, float, float]]:
     """Resolve ``(object_prim_path, object_position_offset)`` for pick-like params.
 
-    Priority (plan):
-    1. Explicit ``object_position_offset`` key in ``params`` → use it (legacy path).
-       Still requires ``object_prim_path`` (params or objects binding).
-    2. ``grasp_prim_path`` → auto offset vs object prim.
-    3. ``grasp_id`` (+ ``object_key`` / ``active_object``) → relative grasp from registry.
-    4. Else offset ``(0,0,0)`` with resolved object prim.
+    Resolution:
+    1. Resolve ``object_prim_path`` from params / objects registry.
+    2. If ``grasp_prim_path`` or ``grasp_id`` is set → auto offset from USD local chain.
+    3. If ``object_position_offset`` is explicit:
+       - with grasp → **add** (same object-local frame);
+       - without grasp → use as-is (legacy).
+    4. Else if grasp resolved → grasp offset; else ``(0,0,0)``.
     """
     object_key = str(params.get("object_key") or "").strip() or None
     if object_key is None and active_object:
@@ -310,19 +317,14 @@ def resolve_pick_object_binding(
         prim_from_entry = normalize_prim_path(str(entry.get("object_prim_path") or ""))
     object_prim_path = prim_from_params or prim_from_entry
 
-    offset_explicit = "object_position_offset" in params
-    if offset_explicit:
+    extra_offset: tuple[float, float, float] | None = None
+    if "object_position_offset" in params:
         if not object_prim_path:
             raise ValueError(
                 "object_prim_path is required when object_position_offset is set "
                 "(provide it on the skill or via objects binding)"
             )
-        raw_off = params.get("object_position_offset")
-        if isinstance(raw_off, (list, tuple)) and len(raw_off) == 3:
-            offset = (float(raw_off[0]), float(raw_off[1]), float(raw_off[2]))
-        else:
-            raise TypeError(f"object_position_offset must be length-3 [x,y,z], got {raw_off!r}")
-        return object_prim_path, offset
+        extra_offset = _parse_object_position_offset(params.get("object_position_offset"))
 
     grasp_prim = normalize_prim_path(str(params.get("grasp_prim_path") or ""))
     grasp_id = str(params.get("grasp_id") or "").strip() or None
@@ -344,16 +346,27 @@ def resolve_pick_object_binding(
             )
         grasp_prim = _join_object_grasp(object_prim_path, str(grasps[grasp_id]))
 
+    grasp_offset: tuple[float, float, float] | None = None
     if grasp_prim:
         if not object_prim_path:
             raise ValueError(
                 "object_prim_path is required with grasp_prim_path "
                 "(provide it on the skill or via objects binding)"
             )
-        offset = resolve_object_local_offset_from_grasp_prim(
+        grasp_offset = resolve_object_local_offset_from_grasp_prim(
             object_prim_path, grasp_prim, cache=cache
         )
-        return object_prim_path, offset
+
+    if grasp_offset is not None and extra_offset is not None:
+        return object_prim_path, (
+            grasp_offset[0] + extra_offset[0],
+            grasp_offset[1] + extra_offset[1],
+            grasp_offset[2] + extra_offset[2],
+        )
+    if extra_offset is not None:
+        return object_prim_path, extra_offset
+    if grasp_offset is not None:
+        return object_prim_path, grasp_offset
 
     if not object_prim_path:
         raise ValueError(

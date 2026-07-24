@@ -96,11 +96,8 @@ def test_resolve_pick_grasp_id_from_registry(monkeypatch: pytest.MonkeyPatch) ->
     assert off == (0.0, -0.072, -0.005)
 
 
-def test_resolve_pick_explicit_offset_wins_over_grasp(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {"n": 0}
-
+def test_resolve_pick_explicit_offset_adds_on_grasp(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake_compose(*_a, **_k):
-        called["n"] += 1
         return (9.0, 9.0, 9.0)
 
     monkeypatch.setattr(ob, "_compose_local_chain_translation", _fake_compose)
@@ -114,8 +111,7 @@ def test_resolve_pick_explicit_offset_wins_over_grasp(monkeypatch: pytest.Monkey
         active_object="blade",
     )
     assert prim == "/World/blade"
-    assert off == (1.0, 2.0, 3.0)
-    assert called["n"] == 0
+    assert off == (10.0, 11.0, 12.0)
 
 
 def test_resolve_active_object_scene_wins() -> None:

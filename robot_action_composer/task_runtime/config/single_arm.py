@@ -59,6 +59,12 @@ class QueueSlicePick:
 @dataclass(frozen=True)
 class QueueSlicePlace:
     object_prim_path: str = ""
+    #: 任务 ``objects`` / ``.meta/objects`` 引用（放置参考物；不回退 active_object）
+    object_key: str | None = None
+    #: 相对刚体的放置 frame id（见 objects.grasps）
+    grasp_id: str | None = None
+    #: 完整放置 prim path（须为 object_prim_path 子孙）
+    grasp_prim_path: str | None = None
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     ee_place_axis: str | None = None
     prepare_offset: tuple[float, float, float] | None = None
@@ -121,8 +127,11 @@ def format_queue_single_arm_summary(scene: str, task: QueueSingleArmSlice) -> st
         f"object_position_offset={p.object_position_offset}",
         f"motion_frame_id={p.motion_frame_id}, arm_movel_duration={p.arm_movel_duration}",
     ]
-    if pl.object_prim_path:
-        parts.append(f"place_object={pl.object_prim_path}, place_offset={pl.object_position_offset}")
+    if pl.object_prim_path or pl.object_key:
+        parts.append(
+            f"place_object={pl.object_prim_path or pl.object_key}, "
+            f"place_offset={pl.object_position_offset}, grasp_id={pl.grasp_id}"
+        )
     else:
         parts.append(f"place_position={pl.place_position}")
     parts.append(f"ee_base_orientation={pl.ee_base_orientation}")
