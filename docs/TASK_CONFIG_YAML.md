@@ -130,7 +130,17 @@ skill_defaults:
       grasp_id: left
 ```
 
-**同叶子多任务复用：** 放到 `<leaf>/.meta/objects/<key>.yaml`（不进任务发现，同 `ros2_stack.yaml`）。合并顺序：
+**同叶子多任务复用：** 放到 `<leaf>/.meta/objects/*.yaml`（不进任务发现，同 `ros2_stack.yaml`）。单文件可写一个物体（`object_key` + `object_prim_path`），也可写多个：
+
+```yaml
+# .meta/objects/apples.yaml
+apple_1:
+  object_prim_path: /World/apple_01/Geometry/model_normalized_0_vis_obj
+apple_2:
+  object_prim_path: /World/apple_02/Geometry/model_normalized_0_vis_obj
+```
+
+或显式 `objects: { apple_1: {…}, … }`。合并顺序：
 
 `.meta/objects` → 任务 `objects` → `scene_presets.<scene>.objects`（后写覆盖）。
 

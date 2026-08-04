@@ -154,23 +154,34 @@
 - **队列**：开关抽屉在 **`task_queue` 里是两条技能**（`single_arm.drawer.pull_open` 与 `single_arm.drawer.close_push`），中间通常插入抓取、放置等其他块。
 - **参数**：
   - **Prim / 拉手**
-    - `object_prim_path`：抽屉分层 Prim（必填）。
-    - `object_position_offset`：拉手参考点在抽屉 Prim 局部系下的 `[x,y,z]`（米）。
-  - **几何**
+    - `object_prim_path`：抽屉分层 Prim（可与任务 `objects` 绑定补齐）。
+    - `object_key` / `grasp_id` / `grasp_prim_path`：可选；与 `single_arm.pick` 相同，从 `.meta/objects` 解析拉手 frame → 物体系偏移（如 `level_1: handle_pose`）。
+    - `object_position_offset`：拉手参考点在抽屉 Prim 局部系下的 `[x,y,z]`（米）；与 grasp 同时写出时在物体系下**叠加**；仅写 offset 时走旧路径。
+  - **夹爪 ↔ 拉手朝向（复用 §6.2 `compose_aligned_ee_orientation`）**
+    - `ee_base_orientation`：标称机物相对朝向下的期望末端 `xyzw`。决定接近轴与**张合方向**。水平把手若张合轴与杆平行会夹不住，需标定使张合大致垂直于杆长轴。
+    - `orient_from`：`handle`（默认，用拉手 frame 朝向）| `drawer`（抽屉刚体朝向，旧行为）。
+    - `ee_orientation_frame`：默认 `object`。
+    - `object_orientation_mode`：默认 `full`（柜体跟完整 SO(3)；**不要**默认成 pick 常用的 `yaw`+`auto`）。
+    - `aligned_object_yaw`：默认 `0`（恒等标称 → `q_ee = q_obj ⊗ ee_base`）。
+  - **拉开 / 关抽屉专用**
+    - `pull_axis_local`：拉开方向在抽屉刚体局部的轴，默认 `[0,-1,0]`；与张合对齐解耦。
+    - `close_ee_delta_xyzw`：关抽屉时相对 `pull_open` 缓存姿态的固定右乘四元数。
     - `drawer_clearance`：沿末端 **+Z** 的闭合段偏移（米）。
     - `prepare_offset`：预接近（工具系）；全 0 / 省略则无 Approach 段。
     - `pull_distance`：拉开末段沿拉手拉出方向的行程（米）。
     - `ee_retreat_offset`：松爪后工具系平移；非零时：`pull_open` 在拉开 Cartesian 末尾追加松爪与撤出段，`close_push` 在到位 **`place_pose_ref`**（夹爪仍闭合）后再松爪并撤出。省略或全 0 则无上述撤出段。
 
+**标定提示**：位置用 `grasp_id`→`handle_pose`；朝向用 `orient_from` + `ee_base_orientation`。旧硬编码 `ee_base=(0.5,0.5,0.5,-0.5)` 在水平把手场景常变成「水平张合对水平杆」。可先相对该默认绕工具 +Z 转 90°（如 `[0.7071, 0, 0, -0.7071]`）试竖直张合，再按 `handle_pose` 轴系微调。
+
 #### 1.6.1 拉开抽屉（`single_arm.drawer.pull_open`）
 
 - **效果**：按几何生成拉开序列；写入 **`ctx.drawer`**，更新 **`ctx.task_cfg.place`** 放置提示；不改 **`ctx.task_cfg.pick`**。
-- **备注**：需有效 `object_prim_path` 与 `object_position_offset`；臂别由 **`common.arm`** 决定。
+- **备注**：需有效抽屉 Prim（`object_prim_path` / `object_key`）与拉手（`grasp_id` / `grasp_prim_path` / `object_position_offset`）；臂别由 **`common.arm`** 决定。朝向走 §6.2，**不**读取 `single_arm.pick` 的朝向字段。
 
 #### 1.6.2 关上抽屉（`single_arm.drawer.close_push`）
 
 - **效果**：须队列中已有 **`pull_open`**。粗定位 → 关抽屉 Cartesian → 闭合到位 **`place_pose_ref`** → 按 **`ee_retreat_offset`** 配置松爪并撤出。
-- **备注**：必须排在 **`pull_open`** 之后。
+- **备注**：必须排在 **`pull_open`** 之后；关抽屉姿态 = 缓存 `q_ee_pull ⊗ close_ee_delta_xyzw`。
 
 
 

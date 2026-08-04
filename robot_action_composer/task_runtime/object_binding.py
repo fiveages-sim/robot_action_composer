@@ -38,10 +38,80 @@ def deep_merge_dicts(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dic
     return out
 
 
+def _register_object_entry(
+    registry: dict[str, dict[str, Any]],
+    object_key: str,
+    entry: Mapping[str, Any],
+) -> None:
+    key = str(object_key).strip()
+    if not key:
+        raise ValueError("object_key must be a non-empty string")
+    if not isinstance(entry, Mapping):
+        raise TypeError(f"objects[{key!r}] must be a mapping, got {type(entry).__name__}")
+    payload = {k: v for k, v in entry.items() if k != "object_key"}
+    if key in registry:
+        registry[key] = deep_merge_dicts(registry[key], payload)
+    else:
+        registry[key] = dict(payload)
+
+
+def _entries_from_meta_objects_file(
+    data: Mapping[str, Any],
+    *,
+    path: Path,
+) -> dict[str, Mapping[str, Any]]:
+    """Parse one ``.meta/objects`` YAML into ``{object_key: entry}``.
+
+    Supported shapes:
+    1. Single object (legacy): ``object_key`` / stem + ``object_prim_path`` / ``grasps``
+    2. Explicit multi: top-level ``objects: {key: {…}, …}``
+    3. Implicit multi: ``{key: {object_prim_path|grasps: …}, …}`` (no root ``object_key`` /
+       ``object_prim_path``)
+    """
+    objects_block = data.get("objects")
+    if isinstance(objects_block, Mapping):
+        out: dict[str, Mapping[str, Any]] = {}
+        for raw_key, entry in objects_block.items():
+            key = str(raw_key).strip()
+            if not key:
+                raise ValueError(f".meta/objects file has empty objects key: {path}")
+            if not isinstance(entry, Mapping):
+                raise TypeError(
+                    f".meta/objects[{key!r}] must be a mapping in {path}, "
+                    f"got {type(entry).__name__}"
+                )
+            out[key] = entry
+        return out
+
+    # Single-object file: root carries prim / grasps (optional explicit object_key).
+    if "object_key" in data or "object_prim_path" in data or "grasps" in data:
+        key_raw = data.get("object_key")
+        key = str(key_raw).strip() if key_raw is not None else path.stem
+        if not key:
+            raise ValueError(f".meta/objects file missing object_key: {path}")
+        return {key: data}
+
+    # Implicit multi-object map: every value must itself be an object entry.
+    if data and all(isinstance(v, Mapping) for v in data.values()):
+        out = {}
+        for raw_key, entry in data.items():
+            key = str(raw_key).strip()
+            if not key:
+                raise ValueError(f".meta/objects file has empty object key: {path}")
+            out[key] = entry
+        return out
+
+    raise TypeError(
+        f".meta/objects file must be a single object, an objects: map, "
+        f"or a map of object entries: {path}"
+    )
+
+
 def load_leaf_meta_objects(leaf_dir: Path | str | None) -> dict[str, dict[str, Any]]:
     """Load ``<leaf>/.meta/objects/*.yaml`` into ``{object_key: {grasps, ...}}``.
 
-    Each file may use ``object_key:`` or default to the file stem. ``grasps`` and
+    Each file may declare one object (``object_key`` / file stem) or many objects
+    (top-level ``objects:`` map, or a bare ``{key: entry, …}`` map). ``grasps`` and
     optional ``object_prim_path`` are preserved.
     """
     if leaf_dir is None:
@@ -67,15 +137,8 @@ def load_leaf_meta_objects(leaf_dir: Path | str | None) -> dict[str, dict[str, A
             continue
         if not isinstance(data, dict):
             raise TypeError(f".meta/objects file must be a mapping: {path}")
-        key_raw = data.get("object_key")
-        key = str(key_raw).strip() if key_raw is not None else path.stem
-        if not key:
-            raise ValueError(f".meta/objects file missing object_key: {path}")
-        entry = {k: v for k, v in data.items() if k != "object_key"}
-        if key in registry:
-            registry[key] = deep_merge_dicts(registry[key], entry)
-        else:
-            registry[key] = dict(entry)
+        for key, entry in _entries_from_meta_objects_file(data, path=path).items():
+            _register_object_entry(registry, key, entry)
     return registry
 
 
@@ -174,6 +237,82 @@ def _compose_local_chain_translation(
     return float(acc_t[0]), float(acc_t[1]), float(acc_t[2])
 
 
+def _compose_local_chain_orient(
+    object_prim_path: str,
+    grasp_prim_path: str,
+) -> tuple[float, float, float, float]:
+    """Compose local ``xformOp:orient`` from ``object`` down to ``grasp`` → object←grasp quat."""
+    from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+        quat_multiply,
+        quat_normalize,
+    )
+    from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+        try_get_prim_orient_local_xyzw,
+    )
+
+    obj = normalize_prim_path(object_prim_path)
+    grasp = normalize_prim_path(grasp_prim_path)
+    if not obj or not grasp:
+        raise ValueError("object_prim_path and grasp_prim_path are required")
+    if grasp == obj:
+        return _IDENTITY_XYZW
+    prefix = obj + "/"
+    if not grasp.startswith(prefix):
+        raise ValueError(
+            f"grasp_prim_path {grasp!r} must be a descendant of object_prim_path {obj!r}"
+        )
+    segments = [s for s in grasp[len(prefix) :].split("/") if s]
+    if not segments:
+        return _IDENTITY_XYZW
+
+    acc_q = _IDENTITY_XYZW
+    current = obj
+    for seg in segments:
+        current = f"{current}/{seg}"
+        local_q = try_get_prim_orient_local_xyzw(current)
+        if local_q is None:
+            local_q = _IDENTITY_XYZW
+        else:
+            local_q = quat_normalize(local_q)
+        acc_q = quat_normalize(quat_multiply(acc_q, local_q))
+    return float(acc_q[0]), float(acc_q[1]), float(acc_q[2]), float(acc_q[3])
+
+
+def resolve_grasp_prim_path(
+    params: Mapping[str, Any],
+    *,
+    objects: Mapping[str, Mapping[str, Any]] | None = None,
+    object_prim_path: str | None = None,
+) -> str | None:
+    """Resolve full grasp/handle prim path from ``grasp_prim_path`` / ``grasp_id`` + objects."""
+    grasp_prim = normalize_prim_path(str(params.get("grasp_prim_path") or ""))
+    if grasp_prim:
+        return grasp_prim
+    grasp_id = str(params.get("grasp_id") or "").strip() or None
+    if not grasp_id:
+        return None
+    object_key = str(params.get("object_key") or "").strip() or None
+    entry = _lookup_object_entry(objects, object_key)
+    if entry is None:
+        raise ValueError(
+            f"grasp_id={grasp_id!r} requires objects registry entry "
+            f"(object_key={object_key!r})"
+        )
+    grasps = entry.get("grasps") or {}
+    if not isinstance(grasps, Mapping) or grasp_id not in grasps:
+        known = sorted(grasps) if isinstance(grasps, Mapping) else []
+        raise KeyError(f"Unknown grasp_id {grasp_id!r} for object_key={object_key!r}; known: {known}")
+    prim = normalize_prim_path(object_prim_path or str(params.get("object_prim_path") or ""))
+    if not prim and entry is not None:
+        prim = normalize_prim_path(str(entry.get("object_prim_path") or ""))
+    if not prim:
+        raise ValueError(
+            f"object_prim_path missing for grasp_id={grasp_id!r} "
+            "(set on skill, task objects, or .meta/objects)"
+        )
+    return _join_object_grasp(prim, str(grasps[grasp_id]))
+
+
 def resolve_object_local_offset_from_grasp_prim(
     object_prim_path: str,
     grasp_prim_path: str,
@@ -197,6 +336,29 @@ def resolve_object_local_offset_from_grasp_prim(
     if cache is not None:
         cache[key] = offset
     return offset
+
+
+def resolve_object_local_orient_from_grasp_prim(
+    object_prim_path: str,
+    grasp_prim_path: str,
+    *,
+    cache: MutableMapping[tuple[str, str], tuple[float, float, float, float]] | None = None,
+) -> tuple[float, float, float, float]:
+    """Compose local orients from ``object`` down to ``grasp`` → object←grasp quat xyzw."""
+    obj = normalize_prim_path(object_prim_path)
+    grasp = normalize_prim_path(grasp_prim_path)
+    key = (obj, grasp)
+    if cache is not None and key in cache:
+        return cache[key]
+    print(f"[ObjectBind] resolving grasp orient via /get_prim_attribute: {obj} → {grasp}")
+    orient = _compose_local_chain_orient(obj, grasp)
+    print(
+        f"[ObjectBind] grasp orient xyzw=({orient[0]:.6f}, {orient[1]:.6f}, "
+        f"{orient[2]:.6f}, {orient[3]:.6f})"
+    )
+    if cache is not None:
+        cache[key] = orient
+    return orient
 
 
 def _join_object_grasp(object_prim_path: str, relative: str) -> str:
@@ -415,7 +577,9 @@ __all__ = [
     "merge_objects_registry",
     "normalize_prim_path",
     "resolve_active_object",
+    "resolve_grasp_prim_path",
     "resolve_object_local_offset_from_grasp_prim",
+    "resolve_object_local_orient_from_grasp_prim",
     "resolve_object_prim_path",
     "resolve_pick_object_binding",
 ]

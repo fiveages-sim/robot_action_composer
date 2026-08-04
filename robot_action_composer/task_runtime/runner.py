@@ -390,13 +390,19 @@ def reset_queue_task_environment(
     """
     if runtime.drawer is not None:
         dcfg = runtime.drawer
-        reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
+        reset_source_path = reset_settle_entity_path_from_queue(
+            specs,
+            runtime.single_arm,
+            objects=runtime.objects,
+            active_object=runtime.active_object,
+        )
         apple_path = reset_source_path
         drawer_prim = dcfg.object_prim_path
         if not apple_path or not drawer_prim:
             raise ValueError(
-                "drawer task queue requires object_prim_path (task_cfg or single_arm.pick params), "
-                "and single_arm.drawer.object_prim_path (drawer layer prim)"
+                "drawer task queue requires object_prim_path or object_key "
+                "(task_cfg / single_arm.pick), and single_arm.drawer "
+                "object_prim_path or object_key (drawer layer prim)"
             )
         reset_simulation_state(
             apple_path,
@@ -438,10 +444,15 @@ def reset_queue_task_environment(
             sleep_fn=sim_time.sleep,
         )
         return
-    reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
+    reset_source_path = reset_settle_entity_path_from_queue(
+        specs,
+        runtime.single_arm,
+        objects=runtime.objects,
+        active_object=runtime.active_object,
+    )
     if not reset_source_path:
         raise ValueError(
-            "object_prim_path is required for env reset "
+            "object_prim_path or object_key is required for env reset "
             "(set on task_cfg or under skill_defaults / skill_params for single_arm.pick)"
         )
     reset_simulation_state(

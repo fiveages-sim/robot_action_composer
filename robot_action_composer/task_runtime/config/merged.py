@@ -141,13 +141,36 @@ def _resolve_place_config(
     return cfg
 
 
-def _try_drawer(values: Mapping[str, Any]) -> Any | None:
-    raw = values.get("object_prim_path")
+def _try_drawer(
+    values: Mapping[str, Any],
+    *,
+    objects: Mapping[str, Mapping[str, Any]] | None = None,
+    active_object: str | None = None,
+) -> Any | None:
+    flat = dict(values)
+    raw = flat.get("object_prim_path")
     if raw is None or (isinstance(raw, str) and not str(raw).strip()):
-        return None
+        from robot_action_composer.task_runtime.object_binding import (  # pyright: ignore[reportMissingImports]
+            resolve_object_prim_path,
+        )
+
+        resolved = resolve_object_prim_path(
+            flat,
+            objects=objects,
+            prim_param="object_prim_path",
+            key_params="object_key",
+            active_object=active_object,
+            use_active_object=False,
+            required=False,
+            label="single_arm.drawer",
+        )
+        if resolved:
+            flat["object_prim_path"] = resolved
+        else:
+            return None
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 
-    return DrawerGeometryConfig(**kwargs_for_dataclass(DrawerGeometryConfig, values))
+    return DrawerGeometryConfig(**kwargs_for_dataclass(DrawerGeometryConfig, flat))
 
 
 @dataclass(frozen=True)
@@ -237,12 +260,17 @@ def build_merged_queue_config(
         from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 
         drawer_base = {f.name: getattr(base_runtime.drawer, f.name) for f in fields(DrawerGeometryConfig)}
+    objs = objects if objects is not None else (base_runtime.objects if base_runtime is not None else None)
+    act = active_object if active_object is not None else (
+        base_runtime.active_object if base_runtime is not None else None
+    )
+
     drawer_flat = {
         **drawer_base,
         **dict(sd.get("single_arm.drawer") or {}),
         **dict(scene_sp.get("single_arm.drawer") or {}),
     }
-    drawer = _try_drawer(drawer_flat)
+    drawer = _try_drawer(drawer_flat, objects=objs, active_object=act)
 
     place_base = (
         {f.name: getattr(base_runtime.place, f.name) for f in fields(BimanualPlaceTaskConfig)}
@@ -259,10 +287,6 @@ def build_merged_queue_config(
     base_link_raw = root_scene.get("base_link_entity_path", root_base.get("base_link_entity_path"))
     base_path = _optional_base_link_entity_path({"base_link_entity_path": base_link_raw}) if base_link_raw is not None else (
         base_runtime.base_link_entity_path if base_runtime is not None else None
-    )
-    objs = objects if objects is not None else (base_runtime.objects if base_runtime is not None else None)
-    act = active_object if active_object is not None else (
-        base_runtime.active_object if base_runtime is not None else None
     )
     return MergedQueueConfig(
         single_arm=single,

@@ -5,6 +5,9 @@
 的 ``pull_distance``（``single_arm.drawer``）决定。
 拉开序列末尾若配置了非零 ``single_arm.drawer.ee_retreat_offset``，会追加与 ``place`` 同构的松爪 + 撤出段。
 阶段状态在 ``ctx.drawer``（:class:`DrawerPhaseState`）；几何配置在 ``ctx.drawer_geometry``。
+
+末端朝向复用 :func:`~robot_action_composer.motion_generation.tasks.object_orientation.compose_aligned_ee_orientation`
+（默认 ``ee_orientation_frame=object``、``object_orientation_mode=full``、``aligned_object_yaw=0``）。
 """
 
 from __future__ import annotations
@@ -36,6 +39,14 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     SERVICE_RETRY_DELAY,
     get_object_pose_from_service,
 )
+from robot_action_composer.motion_generation.tasks.object_orientation import (  # pyright: ignore[reportMissingImports]
+    compose_aligned_ee_orientation,
+)
+from robot_action_composer.task_runtime.object_binding import (
+    resolve_grasp_prim_path,
+    resolve_object_local_orient_from_grasp_prim,
+    resolve_pick_object_binding,
+)
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 from robot_action_composer.motion_generation.tasks.drawer import (  # pyright: ignore[reportMissingImports]
@@ -51,7 +62,6 @@ from robot_action_composer.task_runtime.context import (
     DrawerPhaseState,
     QueueRuntimeContext,
     queue_pick_arm_is_right,
-    queue_primary_ee_frame_id,
 )
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.types import ExecutionMeta
@@ -66,9 +76,47 @@ def _require_drawer_geometry(ctx: QueueRuntimeContext) -> DrawerGeometryConfig:
     if d is None:
         raise TypeError(
             "single_arm.drawer.* skills require drawer_geometry "
-            "(set single_arm.drawer.object_prim_path and drawer fields in task YAML overlays)"
+            "(set single_arm.drawer.object_prim_path / object_key and drawer fields in task YAML overlays)"
         )
     return d
+
+
+def _as_vec3(raw: Any, *, default: tuple[float, float, float]) -> tuple[float, float, float]:
+    if raw is None:
+        return default
+    if isinstance(raw, (list, tuple)) and len(raw) == 3:
+        return (float(raw[0]), float(raw[1]), float(raw[2]))
+    raise TypeError(f"expected length-3 [x,y,z], got {raw!r}")
+
+
+def _as_quat(raw: Any, *, default: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    if raw is None:
+        return default
+    if isinstance(raw, (list, tuple)) and len(raw) == 4:
+        return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+    raise TypeError(f"expected length-4 xyzw quat, got {raw!r}")
+
+
+def _resolve_drawer_handle_binding(
+    ctx: QueueRuntimeContext, dcfg: DrawerGeometryConfig
+) -> tuple[str, tuple[float, float, float]]:
+    """Resolve drawer layer prim + handle offset (``grasp_id`` / legacy ``object_position_offset``)."""
+    params: dict[str, Any] = {
+        "object_prim_path": dcfg.object_prim_path,
+        "object_key": dcfg.object_key,
+        "grasp_id": dcfg.grasp_id,
+        "grasp_prim_path": dcfg.grasp_prim_path,
+    }
+    has_grasp = bool(str(dcfg.grasp_id or "").strip() or str(dcfg.grasp_prim_path or "").strip())
+    off = _as_vec3(dcfg.object_position_offset, default=(0.0, 0.0, 0.0))
+    if not has_grasp or off != (0.0, 0.0, 0.0):
+        params["object_position_offset"] = off
+    return resolve_pick_object_binding(
+        params,
+        objects=getattr(ctx, "objects", None),
+        active_object=None,
+        cache=getattr(ctx, "grasp_offset_cache", None),
+    )
 
 
 def _rotate_vector_by_quat(
@@ -79,6 +127,30 @@ def _rotate_vector_by_quat(
     v_quat = (vec[0], vec[1], vec[2], 0.0)
     rotated = quat_multiply(quat_multiply(q, v_quat), q_inv)
     return (rotated[0], rotated[1], rotated[2])
+
+
+def _pose_orientation_xyzw(pose: Pose) -> tuple[float, float, float, float]:
+    return (
+        float(pose.orientation.x),
+        float(pose.orientation.y),
+        float(pose.orientation.z),
+        float(pose.orientation.w),
+    )
+
+
+def _clone_pose_with_orientation(
+    pose: Pose, quat_xyzw: tuple[float, float, float, float]
+) -> Pose:
+    out = Pose()
+    out.position.x = float(pose.position.x)
+    out.position.y = float(pose.position.y)
+    out.position.z = float(pose.position.z)
+    qx, qy, qz, qw = quat_normalize(quat_xyzw)
+    out.orientation.x = qx
+    out.orientation.y = qy
+    out.orientation.z = qz
+    out.orientation.w = qw
+    return out
 
 
 def _pick_arm_side(ctx: QueueRuntimeContext) -> ArmSide:
@@ -126,7 +198,7 @@ def _close_push_release_and_tool_retreat(
         gh.send_target_command(int(ctx.gripper_open))
     ctx.sim_time.sleep(rcfg.gripper_action_wait)
 
-    world_d = _rotate_vector_by_quat(rt, ee_base_orientation)
+    world_d = _rotate_vector_by_quat(_as_vec3(rt, default=(0.0, 0.0, 0.0)), ee_base_orientation)
     last = sequence[-1]
     arm_t = last.right if arm_side == ArmSide.RIGHT else last.left
     if arm_t is None:
@@ -187,48 +259,87 @@ def _resolve_drawer_source_pose(ctx: QueueRuntimeContext, *, path_drawer: str) -
     )
 
 
+def _resolve_align_object_pose(
+    ctx: QueueRuntimeContext,
+    *,
+    dcfg: DrawerGeometryConfig,
+    path_drawer: str,
+    drawer_pose: Pose,
+) -> Pose:
+    """Pose whose orientation feeds ``compose_aligned_ee_orientation`` (position unused)."""
+    orient_from = str(dcfg.orient_from or "handle").strip().lower()
+    if orient_from in ("", "drawer", "body", "cabinet"):
+        return drawer_pose
+    if orient_from not in ("handle", "grasp", "handle_pose"):
+        raise ValueError(
+            f"unsupported single_arm.drawer.orient_from={dcfg.orient_from!r}; "
+            "expected 'handle' or 'drawer'"
+        )
+    grasp_prim = resolve_grasp_prim_path(
+        {
+            "object_prim_path": path_drawer,
+            "object_key": dcfg.object_key,
+            "grasp_id": dcfg.grasp_id,
+            "grasp_prim_path": dcfg.grasp_prim_path,
+        },
+        objects=getattr(ctx, "objects", None),
+        object_prim_path=path_drawer,
+    )
+    if not grasp_prim:
+        print(
+            "[TaskQ] WARN: orient_from=handle but no grasp_id/grasp_prim_path; "
+            "falling back to drawer body orientation"
+        )
+        return drawer_pose
+    q_drawer = _pose_orientation_xyzw(drawer_pose)
+    q_local = resolve_object_local_orient_from_grasp_prim(path_drawer, grasp_prim)
+    q_handle = quat_normalize(quat_multiply(q_drawer, q_local))
+    return _clone_pose_with_orientation(drawer_pose, q_handle)
+
+
 def skill_drawer_pull_open(
     ctx: QueueRuntimeContext, _params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     dcfg = _require_drawer_geometry(ctx)
-    path_drawer = dcfg.object_prim_path
+    path_drawer, handle_local = _resolve_drawer_handle_binding(ctx, dcfg)
     if not path_drawer:
-        raise ValueError("object_prim_path is required for single_arm.drawer.pull_open (single_arm.drawer)")
+        raise ValueError(
+            "object_prim_path / object_key is required for single_arm.drawer.pull_open "
+            "(single_arm.drawer)"
+        )
 
-    source_target_pose_d = _resolve_drawer_source_pose(ctx, path_drawer=path_drawer)
-    # 拉手位：Prim 局部 ``object_position_offset``（通常离线填 (max+min)/2*scale 各轴）旋到世界系再累加
-    handle_offset = _rotate_vector_by_quat(
-        dcfg.object_position_offset,
-        (
-            float(source_target_pose_d.orientation.x),
-            float(source_target_pose_d.orientation.y),
-            float(source_target_pose_d.orientation.z),
-            float(source_target_pose_d.orientation.w),
-        ),
+    # 刚体位姿：朝向用于拉开轴；拉手位置用局部偏移旋入（勿把偏移后的位姿当对齐参考）。
+    drawer_pose = _resolve_drawer_source_pose(ctx, path_drawer=path_drawer)
+    q_drawer = _pose_orientation_xyzw(drawer_pose)
+
+    align_pose = _resolve_align_object_pose(
+        ctx, dcfg=dcfg, path_drawer=path_drawer, drawer_pose=drawer_pose
     )
+    ee_base = _as_quat(dcfg.ee_base_orientation, default=(0.5, 0.5, 0.5, -0.5))
+    ee_base_ori_drawer = compose_aligned_ee_orientation(
+        ee_base,
+        align_pose,
+        ee_orientation_frame=str(dcfg.ee_orientation_frame or "object"),
+        object_orientation_mode=str(dcfg.object_orientation_mode or "full"),
+        aligned_object_yaw=dcfg.aligned_object_yaw,
+        object_prim_path=path_drawer,
+    )
+
+    pull_axis = _as_vec3(dcfg.pull_axis_local, default=(0.0, -1.0, 0.0))
+    dir_drawer = _rotate_vector_by_quat(pull_axis, q_drawer)
+
+    # 拉手目标点：抽屉刚体位置 + 物体系偏移（grasp / legacy offset）
+    source_target_pose_d = Pose()
+    source_target_pose_d.position.x = float(drawer_pose.position.x)
+    source_target_pose_d.position.y = float(drawer_pose.position.y)
+    source_target_pose_d.position.z = float(drawer_pose.position.z)
+    source_target_pose_d.orientation = drawer_pose.orientation
+    handle_offset = _rotate_vector_by_quat(handle_local, q_drawer)
     _apply_target_pose_offset(source_target_pose_d, handle_offset)
     place_pose_ref = (
         float(source_target_pose_d.position.x),
         float(source_target_pose_d.position.y),
         float(source_target_pose_d.position.z),
-    )
-    ee_base_ori_drawer = quat_multiply(
-        (
-            float(source_target_pose_d.orientation.x),
-            float(source_target_pose_d.orientation.y),
-            float(source_target_pose_d.orientation.z),
-            float(source_target_pose_d.orientation.w),
-        ),
-        (0.5, 0.5, 0.5, -0.5),
-    )
-    dir_drawer = _rotate_vector_by_quat(
-        (0, -1, 0),
-        (
-            float(source_target_pose_d.orientation.x),
-            float(source_target_pose_d.orientation.y),
-            float(source_target_pose_d.orientation.z),
-            float(source_target_pose_d.orientation.w),
-        ),
     )
 
     ctx.drawer = DrawerPhaseState(
@@ -287,23 +398,19 @@ def skill_drawer_close_push(
     if not isinstance(tc, QueueSingleArmSlice):
         raise TypeError(f"drawer close_push expects QueueSingleArmSlice on ctx.task_cfg, got {type(tc)}")
 
-    path_drawer = dcfg.object_prim_path
+    path_drawer, handle_local = _resolve_drawer_handle_binding(ctx, dcfg)
     place_pose_ref = drw.place_pose_ref
     ee_base_ori = drw.ee_base_orientation_xyzw
     dir_vec = drw.pull_direction_xyz
 
     source_target_pose_d = _resolve_drawer_source_pose(ctx, path_drawer=path_drawer)
-    ee_base_ori = quat_multiply(ee_base_ori, (0, -0.2164396, 0, 0.976296))
+    close_delta = _as_quat(dcfg.close_ee_delta_xyzw, default=(0.0, -0.2164396, 0.0, 0.976296))
+    ee_base_ori = quat_normalize(quat_multiply(ee_base_ori, close_delta))
     drw.ee_base_orientation_xyzw = ee_base_ori
 
     handle_off = _rotate_vector_by_quat(
-        dcfg.object_position_offset,
-        (
-            float(source_target_pose_d.orientation.x),
-            float(source_target_pose_d.orientation.y),
-            float(source_target_pose_d.orientation.z),
-            float(source_target_pose_d.orientation.w),
-        ),
+        handle_local,
+        _pose_orientation_xyzw(source_target_pose_d),
     )
     _apply_target_pose_offset(source_target_pose_d, handle_off)
     handler = _primary_arm_handler(ctx)
