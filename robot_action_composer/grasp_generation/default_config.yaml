@@ -1,0 +1,37 @@
+# Default grasp-generation settings (package).
+# Override per robot: examples/IsaacSim/robots/<Robot>/grasp_generation.yaml
+
+robot_key: fiveages_w2
+arm: right
+motion_frame_id: base_link
+base_frame: base_link
+
+camera_frames:
+  - head_camera
+  - head_camera_optical_frame
+  - head_link2
+
+camera_prim: /World/FiveAges_W2/Head_V1/head_link2/head_camera/head_camera
+base_prim: /World/FiveAges_W2/LinkHou_S2/base_footprint/base_link
+
+rgb_topic: /head_camera/rgb
+depth_topic: /head_camera/depth
+info_topic: /head_camera/camera_info
+
+viser_port: 8080
+capture_dir: data/w2_head_capture
+
+# Leave empty to auto-resolve submodules/hug/.venv/bin/python
+hug_python: ""
+hug_root: ""
+sampling_steps: 1
+
+# Phase 2A: HUG wrist maps to hug_tip_frame; OCS2 tracks control_tip_frame
+# (W2+O7: hand mounts on tcp; env may reorient tcp — use live TF offset)
+hug_tip_frame: "{arm}_tcp"
+control_tip_frame: "{arm}_eef"
+mano_to_tip_rpy_deg: [0.0, 0.0, 0.0]
+position_only: true
+arrival_timeout: 8.0
+tf_timeout: 2.0
+execute_default: false

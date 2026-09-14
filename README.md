@@ -180,6 +180,21 @@ flowchart TB
 **CLI（安装后可用）**
 
 ```bash
+# 任务编排（既有）
+motion-generation --robot fiveages_w2 --task-key ...
+
+# 运控/导航栈（既有）
+ros2-stack launch --robot fiveages_w2
+
+# 抓取生成（新增，不替代上面两者；见 docs/GRASP_GENERATION.md）
+# 勿用系统 pip / 勿在 hug/.venv 里装；用 uv + --no-deps：
+uv pip install -e submodules/ros2_robot_interface --no-deps
+uv pip install -e submodules/robot_action_composer --no-deps
+uv pip install "viser>=0.2"
+grasp-generation serve --robot fiveages_w2 --workspace examples/IsaacSim
+```
+
+```bash
 # 在含 robots/ 的工作区目录下（如 examples/IsaacSim）
 cd examples/IsaacSim
 motion-generation

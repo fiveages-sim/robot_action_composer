@@ -20,8 +20,13 @@ recording = [
     "lerobot",
     "lerobot-robot-ros2",
 ]
+grasp = [
+    "viser>=0.2",
+]
 # Motion / task queue (monorepo): pip install -e submodules/robot_action_composer
 # Recording (ROS2Robot + datasets): pip install -e "submodules/robot_action_composer[recording]"
+# Grasp UI (Viser): pip install -e "submodules/robot_action_composer[grasp]"
+# HUG itself stays in submodules/hug/.venv (Python 3.10); not a hard dep here.
 # lerobot_robot_ros2：仅录制等可选能力；抽屉/仿真四元数已用 ros2_robot_interface.utils.quat_pose。
 
 [project.scripts]
@@ -29,6 +34,7 @@ motion-generation = "robot_action_composer.cli.motion_main:main"
 check-isaac-pose = "robot_action_composer.cli.check_isaac_pose_main:main"
 check-robot-status = "robot_action_composer.cli.check_robot_status_main:main"
 ros2-stack = "robot_action_composer.cli.ros2_stack_main:main"
+grasp-generation = "robot_action_composer.cli.grasp_main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
