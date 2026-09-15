@@ -37,7 +37,7 @@ def _load_yaml_dict(path: Path) -> dict[str, Any]:
 
 
 def _build_ros2_interface(section: dict[str, Any] | None) -> Any:
-    from ros2_robot_interface import ROS2RobotInterfaceConfig
+    from ros2_robot_interface.config import ROS2RobotInterfaceConfig
 
     raw = dict(section or {})
     preset = str(raw.pop("preset", "auto"))

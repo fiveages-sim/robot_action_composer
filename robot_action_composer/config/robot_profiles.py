@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ros2_robot_interface import ROS2RobotInterfaceConfig
+    from ros2_robot_interface.config import ROS2RobotInterfaceConfig
 
 
 def default_motion_ros2_interface(
@@ -15,7 +15,7 @@ def default_motion_ros2_interface(
     pose_orientation_threshold: float = 0.05,
 ) -> ROS2RobotInterfaceConfig:
     """Minimal ROS2 interface config; ``connect()`` auto-detects topics and bimanual layout."""
-    from ros2_robot_interface import ROS2RobotInterfaceConfig
+    from ros2_robot_interface.config import ROS2RobotInterfaceConfig
 
     return ROS2RobotInterfaceConfig(
         pose_position_threshold=pose_position_threshold,
