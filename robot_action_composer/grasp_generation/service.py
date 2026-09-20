@@ -141,6 +141,8 @@ def run_serve(
         "proposal_path": capture_dir / "proposal.json",
         "plan_path": capture_dir / "wrist_plan.json",
         "last_plan": None,
+        "last_q_retarget": None,
+        "last_q_sent": None,
         "lock": threading.Lock(),
         "auto_propose_on_click": True,
     }
@@ -151,10 +153,16 @@ def run_serve(
 
     click_bridge_label = "__click_uv_bridge__"
 
-    with server.gui.add_folder("Grasp generation (2A)"):
+    with server.gui.add_folder("Grasp generation"):
         gui_status = server.gui.add_markdown(
-            "**Ready.** ① Capture → left shows RGB-D cloud → ② **click the image** "
-            "→ HUG hand on left → ③ Plan (dry-run) refreshes hand / xyz."
+            "**Ready.** ① Capture → ② click → ③ Plan wrist → ④ Retarget → "
+            "⑤ Close (amplify curl from retarget) → ⑥ Open. "
+            "HUG MANO is **right-hand**; left arm reuses that wrist pose."
+        )
+        gui_arm = server.gui.add_dropdown(
+            "arm",
+            options=["right", "left"],
+            initial_value=cfg.arm if cfg.arm in ("left", "right") else "right",
         )
         gui_u = server.gui.add_slider("u_norm", min=0.0, max=1.0, step=0.01, initial_value=0.48)
         gui_v = server.gui.add_slider("v_norm", min=0.0, max=1.0, step=0.01, initial_value=0.42)
@@ -165,6 +173,13 @@ def run_serve(
         gui_execute = server.gui.add_checkbox(
             "execute_move", initial_value=bool(cfg.execute_default)
         )
+        gui_squeeze = server.gui.add_slider(
+            "squeeze_gain",
+            min=0.0,
+            max=1.2,
+            step=0.05,
+            initial_value=float(cfg.squeeze_amount),
+        )
         gui_max_depth = server.gui.add_slider(
             "max_depth_m", min=0.5, max=8.0, step=0.1, initial_value=3.0
         )
@@ -174,12 +189,22 @@ def run_serve(
         btn_capture = server.gui.add_button("1) Capture head RGB-D")
         btn_propose = server.gui.add_button("2) HUG propose @ UV (manual)")
         btn_move = server.gui.add_button("3) Plan / move wrist")
+        btn_retarget = server.gui.add_button("4) Retarget fingers (shape)")
+        btn_close = server.gui.add_button("5) Close / squeeze hand")
+        btn_open = server.gui.add_button("6) Open hand (reset fingers)")
         gui_click_bridge = server.gui.add_text(click_bridge_label, initial_value="")
         server.gui.add_html(_make_hidden_bridge_bootstrap_html(click_bridge_label))
         placeholder = np.zeros((240, 320, 3), dtype=np.uint8)
         gui_image_html = server.gui.add_html(
             _make_clickable_image_html(placeholder, click_bridge_label)
         )
+
+    def _sync_arm_from_ui() -> str:
+        arm = str(gui_arm.value).lower()
+        if arm not in ("left", "right"):
+            arm = "right"
+        cfg.arm = arm
+        return arm
 
     def _set_status(msg: str) -> None:
         gui_status.content = msg
@@ -284,6 +309,7 @@ def run_serve(
         try:
             if interface is None:
                 raise RuntimeError("ROS interface not connected")
+            arm = _sync_arm_from_ui()
             prop_path = state["proposal_path"]
             if not Path(prop_path).is_file():
                 raise FileNotFoundError("No proposal.json — click image / propose first")
@@ -312,7 +338,7 @@ def run_serve(
             mode = "EXECUTE" if execute else "DRY-RUN"
             tip = f"{plan.hug_tip_frame}→{plan.control_tip_frame}"
             _set_status(
-                f"**{mode}** arm={plan.arm} frame=`{plan.motion_frame_id}` "
+                f"**{mode}** arm={arm} frame=`{plan.motion_frame_id}` "
                 f"map=`{tip}` "
                 f"hug_xyz=({hug[0]:.3f},{hug[1]:.3f},{hug[2]:.3f}) "
                 f"cmd_xyz=({xyz[0]:.3f},{xyz[1]:.3f},{xyz[2]:.3f}) "
@@ -321,9 +347,105 @@ def run_serve(
         except Exception as exc:
             _set_status(f"**Move/plan failed:** `{exc}`")
 
+    def do_retarget(_: Any = None) -> None:
+        """Match MANO finger shape (no extra squeeze)."""
+        try:
+            if cfg.hand_profile not in ("wuji_hand2", "wuji-hand2"):
+                raise RuntimeError(f"hand_profile={cfg.hand_profile} unsupported")
+            arm = _sync_arm_from_ui()
+            prop_path = Path(state["proposal_path"])
+            if not prop_path.is_file():
+                raise FileNotFoundError("No proposal.json — propose first")
+            from .retarget.pipeline import run_retarget_pipeline
+
+            execute = bool(gui_execute.value)
+            if execute and interface is None:
+                raise RuntimeError("ROS interface not connected")
+            code, out = run_retarget_pipeline(
+                cfg=cfg,
+                workspace=workspace,
+                proposal_path=prop_path,
+                arm=arm,
+                execute=execute,
+                reset=True,
+                squeeze_amount=0.0,
+                interface=interface,
+                owns_interface=False,
+            )
+            if code != 0:
+                raise RuntimeError(out.get("error", str(out)))
+            state["last_q_retarget"] = list(out["q_retarget"])
+            state["last_q_sent"] = list(out["q"])
+            mode = "SENT" if execute else "DRY"
+            _set_status(
+                f"**Retarget {mode}** arm={arm} absmax={out['q_absmax']:.3f}rad "
+                f"(shape only, squeeze=0). Next: **5) Close/squeeze** "
+                f"or raise squeeze_amount."
+            )
+        except Exception as exc:
+            _set_status(f"**Retarget failed:** `{exc}`")
+
+    def do_close(_: Any = None) -> None:
+        """Retarget then amplify inward deltas (single send, wrist unchanged)."""
+        try:
+            if cfg.hand_profile not in ("wuji_hand2", "wuji-hand2"):
+                raise RuntimeError(f"hand_profile={cfg.hand_profile} unsupported")
+            arm = _sync_arm_from_ui()
+            prop_path = Path(state["proposal_path"])
+            if not prop_path.is_file():
+                raise FileNotFoundError("No proposal.json — propose first")
+            from .retarget.pipeline import run_retarget_pipeline
+
+            if interface is None:
+                raise RuntimeError("ROS interface not connected (need -- no-interface off)")
+            sq = float(gui_squeeze.value)
+            code, out = run_retarget_pipeline(
+                cfg=cfg,
+                workspace=workspace,
+                proposal_path=prop_path,
+                arm=arm,
+                execute=True,
+                reset=True,
+                squeeze_amount=sq,
+                interface=interface,
+                owns_interface=False,
+            )
+            if code != 0:
+                raise RuntimeError(out.get("error", str(out)))
+            state["last_q_retarget"] = list(out["q_retarget"])
+            state["last_q_sent"] = list(out["q"])
+            n_d = len(out.get("squeeze_deltas") or {})
+            _set_status(
+                f"**Close SENT** arm={arm} amplify_gain={sq:.2f} "
+                f"({n_d} DOF Δ) absmax={out['q_absmax']:.3f}rad — "
+                "shape kept, curl deepened. **6) Open** to re-grasp."
+            )
+        except Exception as exc:
+            _set_status(f"**Close/squeeze failed:** `{exc}`")
+
+    def do_open(_: Any = None) -> None:
+        """Reset fingers to open/rest so the next grasp can approach."""
+        try:
+            if interface is None:
+                raise RuntimeError("ROS interface not connected")
+            arm = _sync_arm_from_ui()
+            from .retarget.pipeline import run_open_hand
+
+            q_list = run_open_hand(arm=arm, interface=interface)
+            state["last_q_sent"] = list(q_list)
+            _set_status(
+                f"**Open SENT** arm={arm} — fingers at rest. "
+                "You can Plan / Retarget / Close again."
+            )
+        except Exception as exc:
+            _set_status(f"**Open failed:** `{exc}`")
+
     btn_capture.on_click(do_capture)
     btn_propose.on_click(do_propose)
     btn_move.on_click(do_move)
+    btn_retarget.on_click(do_retarget)
+    btn_close.on_click(do_close)
+    btn_open.on_click(do_open)
 
     @gui_click_bridge.on_update
     def _on_click(_: Any) -> None:
@@ -352,7 +474,7 @@ def run_serve(
 
     _set_status(
         f"Serving **http://127.0.0.1:{cfg.viser_port}** — "
-        "Capture → **orbit left cloud** → **click photo** → Plan dry-run."
+        "arm → Capture → click → Plan → Retarget → Close → **Open** to re-grasp."
     )
     print(f"[grasp] Viser http://127.0.0.1:{cfg.viser_port}")
     try:

@@ -50,6 +50,16 @@ class GraspGenerationConfig:
     # Fixed MANO-wrist → hug_tip axis correction: T_base_tip = T_base_mano @ T_mano_tip
     # ROS rpy deg [roll, pitch, yaw]. Identity often wrong (MANO −X≈fingers, O7 +Z≈palm).
     mano_to_tip_rpy_deg: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    # Phase 2B: which dex hand retarget backend (wrist path does not use this)
+    hand_profile: str = "wuji_hand2"  # wuji_hand2 | linkerhand_o7 | none
+    # Optional fixed rotation on wrist-relative keypoints before SDK step (deg).
+    keypoint_rpy_deg: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    # HUG MANO is right-handed; keep Right RetargetSession even when commanding left arm.
+    hug_mano_is_right: bool = True
+    # Amplify open→retarget deltas (0=shape only, ~0.45–0.7 typical). Not limit slam.
+    squeeze_amount: float = 0.5
+    # Extra gain on thumb_cmc_abd when amplifying (deepen opposition along retarget sign).
+    thumb_abd_boost: float = 1.25
     arrival_timeout: float = 8.0
     tf_timeout: float = 2.0
     execute_default: bool = False

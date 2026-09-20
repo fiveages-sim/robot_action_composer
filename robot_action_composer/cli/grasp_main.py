@@ -114,6 +114,34 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="proposal.json (default: capture_dir/proposal.json)",
     )
 
+    p_retarget = sub.add_parser(
+        "retarget-hand",
+        help="HUG proposal landmarks → Wuji Hand2 q[20] (left/right; dry-run default)",
+    )
+    _add_common(p_retarget)
+    p_retarget.add_argument(
+        "--proposal",
+        type=str,
+        default=None,
+        help="proposal.json (default: capture_dir/proposal.json)",
+    )
+    p_retarget.add_argument(
+        "--execute",
+        action="store_true",
+        help="send_{arm}_hand_joint_positions (default: dry-run print + hand_retarget.json)",
+    )
+    p_retarget.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="Do not call RetargetSession.reset() before step",
+    )
+    p_retarget.add_argument(
+        "--squeeze",
+        type=float,
+        default=None,
+        help="Flex squeeze amount 0..1 (default: yaml squeeze_amount)",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -190,6 +218,22 @@ def main(argv: list[str] | None = None) -> None:
             cfg=cfg,
             workspace=workspace,
             proposal_path=Path(args.proposal) if args.proposal else None,
+        )
+        raise SystemExit(code)
+
+    if args.command == "retarget-hand":
+        from robot_action_composer.grasp_generation.retarget_hand import (
+            run_retarget_hand,
+        )
+
+        code = run_retarget_hand(
+            cfg=cfg,
+            workspace=workspace,
+            proposal_path=Path(args.proposal) if args.proposal else None,
+            execute=bool(args.execute),
+            reset=not bool(args.no_reset),
+            arm=args.arm,
+            squeeze_amount=args.squeeze,
         )
         raise SystemExit(code)
 

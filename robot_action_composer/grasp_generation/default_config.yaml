@@ -31,6 +31,12 @@ sampling_steps: 1
 hug_tip_frame: "{arm}_tcp"
 control_tip_frame: "{arm}_eef"
 mano_to_tip_rpy_deg: [0.0, 0.0, 0.0]
+hand_profile: wuji_hand2
+keypoint_rpy_deg: [0.0, 0.0, 0.0]
+hug_mano_is_right: true
+# Amplify retarget curl (not slam to joint limits)
+squeeze_amount: 0.5
+thumb_abd_boost: 1.25
 position_only: true
 arrival_timeout: 8.0
 tf_timeout: 2.0
