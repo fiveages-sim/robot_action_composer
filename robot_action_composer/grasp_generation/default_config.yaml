@@ -37,6 +37,44 @@ hug_mano_is_right: true
 # Amplify retarget curl (not slam to joint limits)
 squeeze_amount: 0.5
 thumb_abd_boost: 1.25
+
+# Close-phase ablations B0–B5 (docs/CLOSE_EXECUTORS.md)
+# Close button: gated retarget → settle → executor (one click)
+close_executor: B4
+close_steps: 40
+close_dt_s: 0.04
+contact_hold_frames: 2
+min_contact_fingers: 2
+freeze_mode: keep_tip
+ramp_steps: 25
+ramp_amount: 0.18
+tip_ramp_boost: 0.35
+tip_pinch_steps: 12
+tip_pinch_amount: 0.25
+wrist_press_m: 0.008
+wrist_press_axis: tip_neg_z
+auto_retarget_on_close: true
+shape_steps: 30
+shape_settle_s: 0.5
+shape_use_contact_gate: false
+pre_close_lift_m: 0
+ignore_contact_partners:
+  - ground
+  - GroundPlane
+  - defaultGroundPlane
+  - default_environment
+  - table
+  - desk
+  - floor
+  - Plane
+object_push_warn_m: 0.015
+contact_topic_prefix: ""
+use_contact_bool: true
+force_mag_threshold_n: 0.0
+always_log_contact: true
+object_frame: ""
+close_log_dir: ""
+
 position_only: true
 arrival_timeout: 8.0
 tf_timeout: 2.0

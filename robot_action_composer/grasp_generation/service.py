@@ -127,12 +127,10 @@ def run_serve(
 
     interface = None
     if connect_interface:
-        from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
+        from .interface_util import connect_grasp_interface
 
-        interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
-        print("[grasp] connecting ROS2RobotInterface ...")
-        interface.connect()
-        time.sleep(0.5)
+        # Dedicated node — does not share motion-generation's interface instance.
+        interface = connect_grasp_interface(robot_key=str(cfg.robot_key))
 
     state: dict[str, Any] = {
         "rgb": None,
@@ -155,9 +153,9 @@ def run_serve(
 
     with server.gui.add_folder("Grasp generation"):
         gui_status = server.gui.add_markdown(
-            "**Ready.** ① Capture → ② click → ③ Plan wrist → ④ Retarget → "
-            "⑤ Close (amplify curl from retarget) → ⑥ Open. "
-            "HUG MANO is **right-hand**; left arm reuses that wrist pose."
+            "**Ready.** ① Capture → ② click → ③ Plan → "
+            "⑤ **Close** (lift → MANO shape → executor). "
+            "④ = shape only. ``execute_move`` only gates wrist Plan."
         )
         gui_arm = server.gui.add_dropdown(
             "arm",
@@ -172,6 +170,19 @@ def run_serve(
         gui_pos_only = server.gui.add_checkbox("position_only", initial_value=cfg.position_only)
         gui_execute = server.gui.add_checkbox(
             "execute_move", initial_value=bool(cfg.execute_default)
+        )
+        from .execution import EXECUTOR_CHOICES, EXECUTOR_HELP_MD, EXECUTOR_LABELS
+
+        _exec_init = str(getattr(cfg, "close_executor", "B4") or "B4").upper()
+        if _exec_init not in EXECUTOR_CHOICES:
+            _exec_init = "B4"
+        gui_executor = server.gui.add_dropdown(
+            "close_executor",
+            options=list(EXECUTOR_CHOICES),
+            initial_value=_exec_init,
+        )
+        gui_exec_help = server.gui.add_markdown(
+            f"**{EXECUTOR_LABELS.get(_exec_init, _exec_init)}**"
         )
         gui_squeeze = server.gui.add_slider(
             "squeeze_gain",
@@ -189,14 +200,25 @@ def run_serve(
         btn_capture = server.gui.add_button("1) Capture head RGB-D")
         btn_propose = server.gui.add_button("2) HUG propose @ UV (manual)")
         btn_move = server.gui.add_button("3) Plan / move wrist")
-        btn_retarget = server.gui.add_button("4) Retarget fingers (shape)")
-        btn_close = server.gui.add_button("5) Close / squeeze hand")
+        btn_retarget = server.gui.add_button("4) Retarget MANO shape")
+        btn_close = server.gui.add_button("5) Close (shape→grasp)")
         btn_open = server.gui.add_button("6) Open hand (reset fingers)")
         gui_click_bridge = server.gui.add_text(click_bridge_label, initial_value="")
         server.gui.add_html(_make_hidden_bridge_bootstrap_html(click_bridge_label))
         placeholder = np.zeros((240, 320, 3), dtype=np.uint8)
         gui_image_html = server.gui.add_html(
             _make_clickable_image_html(placeholder, click_bridge_label)
+        )
+
+    with server.gui.add_folder("Help / executors"):
+        server.gui.add_markdown(EXECUTOR_HELP_MD)
+        server.gui.add_markdown(
+            f"**Robot** `{cfg.robot_key}` · **hand** `{cfg.hand_profile}` · "
+            f"**default executor** `{cfg.close_executor}` · "
+            f"**lift** `{float(getattr(cfg, 'pre_close_lift_m', 0.0))*1000:.0f} mm`\n\n"
+            "Config file: `robots/<Robot>/grasp_generation.yaml` "
+            "(overrides package `default_config.yaml`). "
+            "`execute_move` only gates **wrist Plan**; Retarget/Close always send fingers."
         )
 
     def _sync_arm_from_ui() -> str:
@@ -348,7 +370,10 @@ def run_serve(
             _set_status(f"**Move/plan failed:** `{exc}`")
 
     def do_retarget(_: Any = None) -> None:
-        """Match MANO finger shape (no extra squeeze)."""
+        """Open-loop approach to MANO shape (always sends if interface connected).
+
+        Does **not** require ``execute_move`` (that flag is for wrist Plan only).
+        """
         try:
             if cfg.hand_profile not in ("wuji_hand2", "wuji-hand2"):
                 raise RuntimeError(f"hand_profile={cfg.hand_profile} unsupported")
@@ -356,37 +381,47 @@ def run_serve(
             prop_path = Path(state["proposal_path"])
             if not prop_path.is_file():
                 raise FileNotFoundError("No proposal.json — propose first")
-            from .retarget.pipeline import run_retarget_pipeline
-
-            execute = bool(gui_execute.value)
-            if execute and interface is None:
+            if interface is None:
                 raise RuntimeError("ROS interface not connected")
-            code, out = run_retarget_pipeline(
+            from .execution import ensure_q_retarget, run_close
+
+            q_ret = ensure_q_retarget(
                 cfg=cfg,
                 workspace=workspace,
                 proposal_path=prop_path,
                 arm=arm,
-                execute=execute,
-                reset=True,
-                squeeze_amount=0.0,
-                interface=interface,
-                owns_interface=False,
+                force_recompute=True,
             )
-            if code != 0:
-                raise RuntimeError(out.get("error", str(out)))
-            state["last_q_retarget"] = list(out["q_retarget"])
-            state["last_q_sent"] = list(out["q"])
-            mode = "SENT" if execute else "DRY"
+            state["last_q_retarget"] = list(q_ret)
+            settle = float(getattr(cfg, "shape_settle_s", 0.5))
             _set_status(
-                f"**Retarget {mode}** arm={arm} absmax={out['q_absmax']:.3f}rad "
-                f"(shape only, squeeze=0). Next: **5) Close/squeeze** "
-                f"or raise squeeze_amount."
+                f"Open-loop MANO retarget ({int(getattr(cfg, 'shape_steps', 30))} steps) ..."
+            )
+            result = run_close(
+                cfg=cfg,
+                interface=interface,
+                q_retarget=q_ret,
+                arm=arm,
+                q_start=state.get("last_q_sent"),
+                squeeze_amount=0.0,
+                executor_id="B0",
+                last_plan=state.get("last_plan"),
+                workspace=workspace,
+                log=True,
+                do_shape_phase=True,
+            )
+            state["last_q_sent"] = list(result.q_final)
+            push = result.extras.get("object_push_m_after_shape")
+            push_s = f" objΔ={push:.3f}m" if isinstance(push, float) else ""
+            _set_status(
+                f"**Retarget OK** arm={arm} — MANO shape sent{push_s}. "
+                "Or **5) Close** for full grasp."
             )
         except Exception as exc:
             _set_status(f"**Retarget failed:** `{exc}`")
 
     def do_close(_: Any = None) -> None:
-        """Retarget then amplify inward deltas (single send, wrist unchanged)."""
+        """One click: retarget → open-loop MANO → settle → executor."""
         try:
             if cfg.hand_profile not in ("wuji_hand2", "wuji-hand2"):
                 raise RuntimeError(f"hand_profile={cfg.hand_profile} unsupported")
@@ -394,34 +429,55 @@ def run_serve(
             prop_path = Path(state["proposal_path"])
             if not prop_path.is_file():
                 raise FileNotFoundError("No proposal.json — propose first")
-            from .retarget.pipeline import run_retarget_pipeline
-
             if interface is None:
-                raise RuntimeError("ROS interface not connected (need -- no-interface off)")
+                raise RuntimeError(
+                    "ROS interface not connected (need --no-interface off)"
+                )
+            from .execution import EXECUTOR_LABELS, ensure_q_retarget, run_close
+
+            eid = str(gui_executor.value).upper()
             sq = float(gui_squeeze.value)
-            code, out = run_retarget_pipeline(
+            lift = float(getattr(cfg, "pre_close_lift_m", 0.0))
+            _set_status(
+                f"**{eid}** {EXECUTOR_LABELS.get(eid, eid)}: "
+                f"lift={lift*1000:.0f}mm → MANO shape → close "
+                f"(squeeze={sq:.2f}) ..."
+            )
+            q_ret = ensure_q_retarget(
                 cfg=cfg,
                 workspace=workspace,
                 proposal_path=prop_path,
                 arm=arm,
-                execute=True,
-                reset=True,
-                squeeze_amount=sq,
-                interface=interface,
-                owns_interface=False,
+                force_recompute=True,
             )
-            if code != 0:
-                raise RuntimeError(out.get("error", str(out)))
-            state["last_q_retarget"] = list(out["q_retarget"])
-            state["last_q_sent"] = list(out["q"])
-            n_d = len(out.get("squeeze_deltas") or {})
+            state["last_q_retarget"] = list(q_ret)
+            result = run_close(
+                cfg=cfg,
+                interface=interface,
+                q_retarget=q_ret,
+                arm=arm,
+                q_start=state.get("last_q_sent"),
+                squeeze_amount=sq,
+                executor_id=eid,
+                last_plan=state.get("last_plan"),
+                workspace=workspace,
+                trial_id="",
+                log=True,
+                do_shape_phase=bool(getattr(cfg, "auto_retarget_on_close", True)),
+            )
+            state["last_q_sent"] = list(result.q_final)
+            state["last_close_result"] = result
+            log_hint = f" log=`{result.log_path}`" if result.log_path else ""
+            push = result.extras.get("object_push_m_total")
+            push_s = f" objΔ={push:.3f}m" if isinstance(push, float) else ""
+            warn = " **PUSHED**" if result.extras.get("object_push_warn") else ""
             _set_status(
-                f"**Close SENT** arm={arm} amplify_gain={sq:.2f} "
-                f"({n_d} DOF Δ) absmax={out['q_absmax']:.3f}rad — "
-                "shape kept, curl deepened. **6) Open** to re-grasp."
+                f"**Close {eid} OK** arm={arm} fingers≤"
+                f"{result.n_contact_fingers_max} steps={len(result.steps)} — "
+                f"{result.message}.{push_s}{warn}{log_hint} **6) Open**."
             )
         except Exception as exc:
-            _set_status(f"**Close/squeeze failed:** `{exc}`")
+            _set_status(f"**Close failed:** `{exc}`")
 
     def do_open(_: Any = None) -> None:
         """Reset fingers to open/rest so the next grasp can approach."""
@@ -439,6 +495,12 @@ def run_serve(
             )
         except Exception as exc:
             _set_status(f"**Open failed:** `{exc}`")
+
+    @gui_executor.on_update
+    def _on_executor(_: Any) -> None:
+        eid = str(gui_executor.value).upper()
+        gui_exec_help.content = EXECUTOR_LABELS.get(eid, eid)
+        cfg.close_executor = eid
 
     btn_capture.on_click(do_capture)
     btn_propose.on_click(do_propose)
@@ -474,7 +536,7 @@ def run_serve(
 
     _set_status(
         f"Serving **http://127.0.0.1:{cfg.viser_port}** — "
-        "arm → Capture → click → Plan → Retarget → Close → **Open** to re-grasp."
+        "Plan → **Close** (one click: retarget→wait→B0–B5) → Open."
     )
     print(f"[grasp] Viser http://127.0.0.1:{cfg.viser_port}")
     try:
@@ -483,11 +545,9 @@ def run_serve(
     except KeyboardInterrupt:
         print("\n[grasp] shutting down")
     finally:
-        if interface is not None:
-            try:
-                interface.disconnect()
-            except Exception:
-                pass
+        from .interface_util import disconnect_grasp_interface
+
+        disconnect_grasp_interface(interface)
 
 
 def run_follow_wrist_cli(
@@ -498,12 +558,10 @@ def run_follow_wrist_cli(
     execute: bool,
 ) -> int:
     """One-shot: proposal.json → plan → optional move (no Viser)."""
-    from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig
+    from .interface_util import connect_grasp_interface, disconnect_grasp_interface
 
     T, meta = load_proposal_T_camera_wrist(proposal)
-    interface = ROS2RobotInterface(ROS2RobotInterfaceConfig())
-    interface.connect()
-    time.sleep(0.3)
+    interface = connect_grasp_interface(robot_key=str(cfg.robot_key), settle_s=0.3)
     try:
         plan = plan_wrist_from_proposal(
             T,
@@ -521,4 +579,4 @@ def run_follow_wrist_cli(
         print(json.dumps(info, indent=2, default=str))
         return 0
     finally:
-        interface.disconnect()
+        disconnect_grasp_interface(interface)

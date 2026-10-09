@@ -40,8 +40,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# motion-generation last selection cache (per workspace cwd)
+# CLI last selection cache (per workspace cwd)
 .motion_last.json
+.grasp_last.json
 .ros2_stack_last.json
 
 # ROS 2 stack runtime state (pid/log/json under workspace cwd)

@@ -60,6 +60,53 @@ class GraspGenerationConfig:
     squeeze_amount: float = 0.5
     # Extra gain on thumb_cmc_abd when amplifying (deepen opposition along retarget sign).
     thumb_abd_boost: float = 1.25
+    # Close-phase executor (B0–B5). See docs/CLOSE_EXECUTORS.md
+    close_executor: str = "B4"
+    close_steps: int = 40
+    close_dt_s: float = 0.04
+    contact_hold_frames: int = 2
+    min_contact_fingers: int = 2
+    # full | keep_tip — keep_tip wraps small objects after proximal contact
+    freeze_mode: str = "keep_tip"
+    ramp_steps: int = 25
+    ramp_amount: float = 0.18
+    tip_ramp_boost: float = 0.35
+    tip_pinch_steps: int = 12
+    tip_pinch_amount: float = 0.25
+    wrist_press_m: float = 0.008
+    wrist_press_axis: str = "tip_neg_z"  # tip_neg_z | tip_z | world_neg_z
+    # Close: recompute retarget → open-loop MANO shape → settle → executor
+    auto_retarget_on_close: bool = True
+    shape_steps: int = 30
+    shape_settle_s: float = 0.5
+    # False = visible MANO (recommended). True = old gated shape (table can freeze).
+    shape_use_contact_gate: bool = False
+    # World +Z lift before shape/close (table clearance for small objects)
+    pre_close_lift_m: float = 0.015
+    # Ignore these partner substrings when gating (desk / ground)
+    ignore_contact_partners: list[str] = field(
+        default_factory=lambda: [
+            "ground",
+            "GroundPlane",
+            "defaultGroundPlane",
+            "default_environment",
+            "table",
+            "desk",
+            "floor",
+            "Plane",
+        ]
+    )
+    # If object_frame set, warn when object moves more than this (m)
+    object_push_warn_m: float = 0.015
+    # Empty → profile default (wuji_rh / wuji_lh). Override for alternate mounts.
+    contact_topic_prefix: str = ""
+    use_contact_bool: bool = True
+    force_mag_threshold_n: float = 0.0
+    always_log_contact: bool = True
+    # Optional TF frame for object Δpose logging (empty → skip)
+    object_frame: str = ""
+    # Empty → <capture_dir>/close_logs
+    close_log_dir: str = ""
     arrival_timeout: float = 8.0
     tf_timeout: float = 2.0
     execute_default: bool = False
@@ -109,6 +156,82 @@ class GraspGenerationConfig:
         return (hug / p).resolve()
 
 
+def _robot_key_from_dir(robot_dir: Path) -> str:
+    key = robot_dir.name.lower()
+    ry = robot_dir / "robot.yaml"
+    if ry.is_file():
+        try:
+            meta = yaml.safe_load(ry.read_text(encoding="utf-8")) or {}
+            if isinstance(meta.get("key"), str) and meta["key"]:
+                key = str(meta["key"])
+        except Exception:
+            pass
+    return key
+
+
+def _robot_label_from_dir(robot_dir: Path) -> str:
+    ry = robot_dir / "robot.yaml"
+    if ry.is_file():
+        try:
+            meta = yaml.safe_load(ry.read_text(encoding="utf-8")) or {}
+            if isinstance(meta.get("label"), str) and meta["label"]:
+                return str(meta["label"])
+        except Exception:
+            pass
+    return robot_dir.name
+
+
+def discover_grasp_robots(workspace: Path) -> dict[str, dict[str, Any]]:
+    """Robots that ship ``grasp_generation.yaml`` under ``workspace/robots/``.
+
+    Independent of ``task_configs/`` / motion-generation discovery so a robot
+    can expose grasp assist without a full skill queue.
+    """
+    robots_root = Path(workspace) / "robots"
+    out: dict[str, dict[str, Any]] = {}
+    if not robots_root.is_dir():
+        return out
+    for robot_dir in _iter_robot_dirs(robots_root):
+        yml = robot_dir / "grasp_generation.yaml"
+        if not yml.is_file():
+            continue
+        key = _robot_key_from_dir(robot_dir)
+        out[key] = {
+            "key": key,
+            "label": _robot_label_from_dir(robot_dir),
+            "robot_dir": robot_dir,
+            "config_path": yml.resolve(),
+        }
+    return out
+
+
+def find_grasp_config_path(
+    workspace: Path,
+    robot_key: str,
+) -> Optional[Path]:
+    """Locate ``grasp_generation.yaml`` for ``robot_key`` (or None)."""
+    robots = discover_grasp_robots(workspace)
+    entry = robots.get(robot_key)
+    if entry is not None:
+        return Path(entry["config_path"])
+    # Fallback: name / path heuristics (same as load)
+    candidates = [
+        workspace / "robots" / robot_key / "grasp_generation.yaml",
+    ]
+    for p in (workspace / "robots").glob(f"*/{robot_key}/grasp_generation.yaml"):
+        candidates.append(p)
+    for robot_dir in _iter_robot_dirs(workspace / "robots"):
+        yml = robot_dir / "grasp_generation.yaml"
+        if not yml.is_file():
+            continue
+        if _robot_key_from_dir(robot_dir) == robot_key or robot_dir.name == robot_key:
+            return yml.resolve()
+    for c in candidates:
+        if c.is_file():
+            return c.resolve()
+    return None
+
+
 def load_grasp_config(
     *,
     workspace: Path,
@@ -122,38 +245,9 @@ def load_grasp_config(
     if default_path.is_file():
         merged.update(yaml.safe_load(default_path.read_text(encoding="utf-8")) or {})
 
-    path = config_path
+    path = Path(config_path) if config_path is not None else None
     if path is None and robot_key:
-        # Prefer IsaacSim layout: workspace/robots/<key>/ or nested
-        candidates = [
-            workspace / "robots" / robot_key / "grasp_generation.yaml",
-        ]
-        # nested vendor/robot
-        for p in (workspace / "robots").glob(f"*/{robot_key}/grasp_generation.yaml"):
-            candidates.append(p)
-        for p in (workspace / "robots").glob(f"*/*/{robot_key}/grasp_generation.yaml"):
-            candidates.append(p)
-        # FiveAges_W2 often lives as robots/FiveAges_W2 with key fiveages_w2
-        for robot_dir in _iter_robot_dirs(workspace / "robots"):
-            yml = robot_dir / "grasp_generation.yaml"
-            if not yml.is_file():
-                continue
-            # match key from robot.yaml if present
-            ry = robot_dir / "robot.yaml"
-            key = robot_dir.name.lower()
-            if ry.is_file():
-                try:
-                    meta = yaml.safe_load(ry.read_text(encoding="utf-8")) or {}
-                    if isinstance(meta.get("key"), str):
-                        key = meta["key"]
-                except Exception:
-                    pass
-            if key == robot_key or robot_dir.name == robot_key:
-                candidates.insert(0, yml)
-        for c in candidates:
-            if c.is_file():
-                path = c
-                break
+        path = find_grasp_config_path(workspace, robot_key)
 
     if path is not None and Path(path).is_file():
         merged.update(yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {})

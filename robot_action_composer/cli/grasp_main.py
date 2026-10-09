@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""CLI: grasp-generation — HUG grasp assist beside ros2-stack (does not replace it).
+"""CLI: grasp-generation — modular grasp assist beside ros2-stack / motion-generation.
 
-Typical smoke::
+Aligned with ``motion-generation`` UX:
 
-    # terminal A (unchanged orchestration)
-    cd examples/IsaacSim
-    ros2-stack launch --robot fiveages_w2
+* Interactive (default)::
 
-    # terminal B (composer env with ROS + viser)
-    grasp-generation serve --robot fiveages_w2 --workspace .
-    # browser → Capture → set UV on object → Propose → Plan/move
+      cd examples/IsaacSim
+      grasp-generation                 # pick robot (reads robots/*/grasp_generation.yaml)
+      grasp-generation --robot fiveages_w2
 
-Does **not** modify motion-generation task queues.
+* Scripted subcommands (CI / smoke)::
+
+      grasp-generation serve --robot fiveages_w2 --workspace .
+      grasp-generation show-config --robot fiveages_w2
+
+Does **not** replace motion-generation task queues. Expect ``ros2-stack`` already up.
+Uses a dedicated ROS node (``grasp_generation_<robot>``) so arm targets are not
+shared with a concurrent motion CLI interface instance.
 """
 
 from __future__ import annotations
@@ -20,9 +25,43 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any, Optional
 
+from robot_action_composer.cli.interactive import select_from_list, select_yes_no
 from robot_action_composer.cli.motion_main import resolve_workspace_dir
-from robot_action_composer.grasp_generation.config import load_grasp_config
+from robot_action_composer.grasp_generation.config import (
+    discover_grasp_robots,
+    load_grasp_config,
+)
+
+_GRASP_LAST_FILENAME = ".grasp_last.json"
+
+
+def _grasp_last_path(workspace: Path) -> Path:
+    return workspace / _GRASP_LAST_FILENAME
+
+
+def _load_grasp_last(workspace: Path) -> dict[str, Any]:
+    path = _grasp_last_path(workspace)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _save_grasp_last(workspace: Path, **updates: Any) -> None:
+    data = _load_grasp_last(workspace)
+    data.update({k: v for k, v in updates.items() if v is not None})
+    try:
+        path = _grasp_last_path(workspace)
+        path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -35,7 +74,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--robot",
         type=str,
-        default="fiveages_w2",
+        default=None,
         help="Robot key (loads robots/.../grasp_generation.yaml)",
     )
     p.add_argument(
@@ -58,11 +97,16 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="grasp-generation",
-        description="HUG → wrist follow (uses ros2-stack motion; separate from motion-generation)",
+        description=(
+            "Grasp generation (HUG + dex hand close). "
+            "Interactive by default; use subcommands for scripts. "
+            "Separate from motion-generation."
+        ),
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    _add_common(parser)
+    sub = parser.add_subparsers(dest="command", required=False)
 
-    p_serve = sub.add_parser("serve", help="Viser UI: capture → HUG → wrist plan/move")
+    p_serve = sub.add_parser("serve", help="Viser UI: capture → HUG → wrist → close")
     _add_common(p_serve)
     p_serve.add_argument(
         "--no-interface",
@@ -75,74 +119,175 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="One-shot: proposal.json → T_base_wrist → dry-run or execute",
     )
     _add_common(p_follow)
-    p_follow.add_argument(
-        "--proposal",
-        type=str,
-        required=True,
-        help="Path to proposal.json from HUG",
-    )
-    p_follow.add_argument(
-        "--execute",
-        action="store_true",
-        help="Actually send_target_stamped (default: dry-run)",
-    )
+    p_follow.add_argument("--proposal", type=str, required=True)
+    p_follow.add_argument("--execute", action="store_true")
 
     p_show = sub.add_parser("show-config", help="Print merged grasp_generation config")
     _add_common(p_show)
 
-    p_diag = sub.add_parser(
-        "diagnose-frames",
-        help="TF/EE dump: camera + right_tcp/eef vs HUG wrist_plan (Phase 2A.1)",
-    )
+    p_diag = sub.add_parser("diagnose-frames", help="TF/EE dump vs wrist plan")
     _add_common(p_diag)
-    p_diag.add_argument(
-        "--plan",
-        type=str,
-        default=None,
-        help="wrist_plan.json (default: capture_dir/wrist_plan.json if present)",
-    )
+    p_diag.add_argument("--plan", type=str, default=None)
 
     p_orient = sub.add_parser(
-        "diagnose-orientation",
-        help="MANO wrist axes vs robot tcp→eef (debug palm-flip axis mismatch)",
+        "diagnose-orientation", help="MANO wrist axes vs robot tip"
     )
     _add_common(p_orient)
-    p_orient.add_argument(
-        "--proposal",
-        type=str,
-        default=None,
-        help="proposal.json (default: capture_dir/proposal.json)",
-    )
+    p_orient.add_argument("--proposal", type=str, default=None)
 
     p_retarget = sub.add_parser(
-        "retarget-hand",
-        help="HUG proposal landmarks → Wuji Hand2 q[20] (left/right; dry-run default)",
+        "retarget-hand", help="Proposal → hand q (dry-run default)"
     )
     _add_common(p_retarget)
-    p_retarget.add_argument(
-        "--proposal",
-        type=str,
-        default=None,
-        help="proposal.json (default: capture_dir/proposal.json)",
-    )
-    p_retarget.add_argument(
-        "--execute",
-        action="store_true",
-        help="send_{arm}_hand_joint_positions (default: dry-run print + hand_retarget.json)",
-    )
-    p_retarget.add_argument(
-        "--no-reset",
-        action="store_true",
-        help="Do not call RetargetSession.reset() before step",
-    )
-    p_retarget.add_argument(
-        "--squeeze",
-        type=float,
-        default=None,
-        help="Flex squeeze amount 0..1 (default: yaml squeeze_amount)",
-    )
+    p_retarget.add_argument("--proposal", type=str, default=None)
+    p_retarget.add_argument("--execute", action="store_true")
+    p_retarget.add_argument("--no-reset", action="store_true")
+    p_retarget.add_argument("--squeeze", type=float, default=None)
+
+    p_close = sub.add_parser("close-hand", help="Run B0–B5 close executor")
+    _add_common(p_close)
+    p_close.add_argument("--mode", type=str, default=None)
+    p_close.add_argument("--proposal", type=str, default=None)
+    p_close.add_argument("--squeeze", type=float, default=None)
+    p_close.add_argument("--trial-id", type=str, default="")
 
     return parser.parse_args(argv)
+
+
+def _resolve_robot_key(
+    *,
+    workspace: Path,
+    cli_robot: Optional[str],
+    interactive: bool,
+) -> str:
+    robots = discover_grasp_robots(workspace)
+    last = _load_grasp_last(workspace)
+    default = (
+        cli_robot
+        or (last.get("robot_key") if isinstance(last.get("robot_key"), str) else None)
+        or "fiveages_w2"
+    )
+    if cli_robot:
+        if robots and cli_robot not in robots:
+            print(
+                f"[grasp-generation] warn: no grasp_generation.yaml for {cli_robot!r}; "
+                f"known: {sorted(robots)}",
+                file=sys.stderr,
+            )
+        return cli_robot
+    if not interactive:
+        return default if default in robots or not robots else next(iter(robots))
+    if not robots:
+        raise SystemExit(
+            "[grasp-generation] No robots/*/grasp_generation.yaml under "
+            f"{workspace / 'robots'}. Add a config (see FiveAges_W2 template)."
+        )
+    registry = {
+        k: {
+            "label": v["label"],
+            "robot_dir_relpath": str(
+                Path(v["robot_dir"]).relative_to(workspace / "robots")
+            ),
+        }
+        for k, v in robots.items()
+    }
+    from robot_action_composer.cli.interactive import select_robot_from_registry
+
+    if default not in registry:
+        default = next(iter(registry))
+    return select_robot_from_registry(
+        title="Select robot (grasp_generation.yaml)",
+        registry=registry,
+        default_key=default,
+        show_label=True,
+    )
+
+
+def _build_cfg(
+    *,
+    workspace: Path,
+    robot_key: str,
+    args: argparse.Namespace,
+) -> Any:
+    overrides = {
+        "viser_port": getattr(args, "port", None),
+        "arm": getattr(args, "arm", None),
+        "position_only": getattr(args, "position_only", None),
+    }
+    config_path = Path(args.config) if getattr(args, "config", None) else None
+    return load_grasp_config(
+        workspace=workspace,
+        robot_key=robot_key,
+        config_path=config_path,
+        overrides=overrides,
+    )
+
+
+def _run_serve(cfg: Any, workspace: Path, *, connect_interface: bool) -> None:
+    from robot_action_composer.grasp_generation.service import run_serve
+
+    print("[grasp-generation] workspace=", workspace)
+    print("[grasp-generation] robot=", cfg.robot_key, "port=", cfg.viser_port)
+    print(
+        "[grasp-generation] close_executor=",
+        cfg.close_executor,
+        "hand_profile=",
+        cfg.hand_profile,
+        "pre_close_lift_m=",
+        cfg.pre_close_lift_m,
+    )
+    print(
+        "[grasp-generation] Expect ros2-stack already running. "
+        "Do not run motion-generation task execute concurrently with grasp execute_move."
+    )
+    run_serve(cfg=cfg, workspace=workspace, connect_interface=connect_interface)
+
+
+def _interactive_main(args: argparse.Namespace, workspace: Path) -> None:
+    print("\n" + "=" * 70)
+    print("grasp-generation (modular; separate from motion-generation)")
+    print("=" * 70)
+    print(f"workspace: {workspace}")
+    robots = discover_grasp_robots(workspace)
+    if robots:
+        print("grasp-capable robots:", ", ".join(sorted(robots)))
+    else:
+        print("grasp-capable robots: (none — add robots/<Robot>/grasp_generation.yaml)")
+
+    robot_key = _resolve_robot_key(
+        workspace=workspace, cli_robot=args.robot, interactive=True
+    )
+    _save_grasp_last(workspace, robot_key=robot_key)
+    cfg = _build_cfg(workspace=workspace, robot_key=robot_key, args=args)
+
+    actions = [
+        "serve (Viser UI)",
+        "show-config",
+        "quit",
+    ]
+    action = select_from_list(
+        title="Select action",
+        options=actions,
+        default_value=actions[0],
+    )
+    if action.startswith("quit"):
+        return
+    if action.startswith("show-config"):
+        from dataclasses import asdict
+
+        print(json.dumps(asdict(cfg), indent=2))
+        print("hug_python:", cfg.resolved_hug_python(workspace))
+        print("capture_dir:", cfg.resolved_capture_dir(workspace))
+        yml = discover_grasp_robots(workspace).get(robot_key, {}).get("config_path")
+        if yml:
+            print("config_path:", yml)
+        return
+
+    connect = select_yes_no(
+        title="Connect ROS2RobotInterface? (needed for Plan / Retarget / Close)",
+        default_yes=True,
+    )
+    _run_serve(cfg, workspace, connect_interface=connect)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -150,17 +295,19 @@ def main(argv: list[str] | None = None) -> None:
     workspace = resolve_workspace_dir(
         Path(args.workspace) if args.workspace else None
     )
-    overrides = {
-        "viser_port": args.port,
-        "arm": args.arm,
-        "position_only": args.position_only,
-    }
-    cfg = load_grasp_config(
+
+    # No subcommand → interactive (motion-generation style)
+    if not args.command:
+        _interactive_main(args, workspace)
+        return
+
+    robot_key = _resolve_robot_key(
         workspace=workspace,
-        robot_key=args.robot,
-        config_path=Path(args.config) if args.config else None,
-        overrides=overrides,
+        cli_robot=args.robot or "fiveages_w2",
+        interactive=False,
     )
+    _save_grasp_last(workspace, robot_key=robot_key)
+    cfg = _build_cfg(workspace=workspace, robot_key=robot_key, args=args)
 
     if args.command == "show-config":
         from dataclasses import asdict
@@ -171,19 +318,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "serve":
-        from robot_action_composer.grasp_generation.service import run_serve
-
-        print("[grasp-generation] workspace=", workspace)
-        print("[grasp-generation] robot=", cfg.robot_key, "port=", cfg.viser_port)
-        print(
-            "[grasp-generation] Expect ros2-stack motion already running "
-            "(this CLI does not launch OCS2)."
-        )
-        run_serve(
-            cfg=cfg,
-            workspace=workspace,
-            connect_interface=not args.no_interface,
-        )
+        _run_serve(cfg, workspace, connect_interface=not args.no_interface)
         return
 
     if args.command == "follow-wrist":
@@ -236,6 +371,47 @@ def main(argv: list[str] | None = None) -> None:
             squeeze_amount=args.squeeze,
         )
         raise SystemExit(code)
+
+    if args.command == "close-hand":
+        from robot_action_composer.grasp_generation.execution import (
+            ensure_q_retarget,
+            run_close,
+        )
+        from robot_action_composer.grasp_generation.interface_util import (
+            connect_grasp_interface,
+            disconnect_grasp_interface,
+        )
+
+        arm = (args.arm or cfg.arm or "right").lower()
+        prop = (
+            Path(args.proposal)
+            if args.proposal
+            else cfg.resolved_capture_dir(workspace) / "proposal.json"
+        )
+        q_ret = ensure_q_retarget(
+            cfg=cfg,
+            workspace=workspace,
+            proposal_path=prop,
+            arm=arm,
+            cached=None,
+        )
+        iface = connect_grasp_interface(robot_key=cfg.robot_key)
+        try:
+            result = run_close(
+                cfg=cfg,
+                interface=iface,
+                q_retarget=q_ret,
+                arm=arm,
+                squeeze_amount=args.squeeze,
+                executor_id=args.mode,
+                workspace=workspace,
+                trial_id=str(args.trial_id or ""),
+                log=True,
+            )
+        finally:
+            disconnect_grasp_interface(iface)
+        print(json.dumps(result.summary_row(), indent=2))
+        raise SystemExit(0 if result.ok else 1)
 
     raise SystemExit(f"unknown command {args.command}")
 
