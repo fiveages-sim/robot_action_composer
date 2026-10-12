@@ -110,6 +110,23 @@ class GraspGenerationConfig:
     arrival_timeout: float = 8.0
     tf_timeout: float = 2.0
     execute_default: bool = False
+    # Privileged auto-grasp: hardcoded table objects (wuji_hand2_new). Empty → feature off.
+    # Each entry: pose_prim, placement_prim, optional home_translate / home_orient_wxyz.
+    grasp_objects: dict[str, Any] = field(default_factory=dict)
+    default_object_key: str = ""
+    # Scene prep before capture (exile distractors + near-workspace target spawn).
+    scene_prep: dict[str, Any] = field(default_factory=dict)
+    # Legacy MoveJ joint lists (unused — Go home uses FSM_HOME). Kept for yaml compat.
+    home_joints: dict[str, Any] = field(default_factory=dict)
+    # Seconds to wait in FSM HOME before returning to OCS2.
+    home_settle_s: float = 5.0
+    # After FSM HOME: raise both EE world +Z for grasp workspace home (m).
+    grasp_home_lift_m: float = 0.20
+    # After successful close in auto: lift EE world +Z to verify grasp.
+    post_grasp_lift_m: float = 0.20
+    post_grasp_lift: bool = True
+    # Wait after close (fingers settle) before post-grasp lift.
+    post_grasp_settle_s: float = 1.5
 
     def resolved_hug_tip_frame(self) -> str:
         return self.hug_tip_frame.replace("{arm}", self.arm).strip()

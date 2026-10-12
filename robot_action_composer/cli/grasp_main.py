@@ -151,6 +151,38 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p_close.add_argument("--squeeze", type=float, default=None)
     p_close.add_argument("--trial-id", type=str, default="")
 
+    p_auto = sub.add_parser(
+        "auto",
+        help="Privileged auto-grasp: object → (scene-prep) → capture → HUG → move → close",
+    )
+    _add_common(p_auto)
+    p_auto.add_argument(
+        "--object",
+        type=str,
+        required=True,
+        help="Key from grasp_generation.yaml grasp_objects (e.g. apple)",
+    )
+    p_auto.add_argument(
+        "--scene-prep",
+        action="store_true",
+        help="Exile distractors + spawn target in near workspace",
+    )
+    p_auto.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Capture + propose + dry plan only (no wrist/close)",
+    )
+    p_auto.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually move wrist and run close (default: dry wrist unless set)",
+    )
+    p_auto.add_argument(
+        "--no-close",
+        action="store_true",
+        help="Skip B4 close even when --execute",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -412,6 +444,20 @@ def main(argv: list[str] | None = None) -> None:
             disconnect_grasp_interface(iface)
         print(json.dumps(result.summary_row(), indent=2))
         raise SystemExit(0 if result.ok else 1)
+
+    if args.command == "auto":
+        from robot_action_composer.grasp_generation.auto_grasp import run_auto_grasp_cli
+
+        code = run_auto_grasp_cli(
+            cfg=cfg,
+            workspace=workspace,
+            object_key=str(args.object),
+            scene_prep=bool(args.scene_prep),
+            dry_run=bool(args.dry_run),
+            execute=bool(args.execute) and not bool(args.dry_run),
+            do_close=not bool(args.no_close),
+        )
+        raise SystemExit(code)
 
     raise SystemExit(f"unknown command {args.command}")
 

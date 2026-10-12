@@ -28,6 +28,7 @@ from .bridge import (
 )
 from .config import GraspGenerationConfig
 from .hug_subprocess import run_hug_propose
+from .objects import default_object_key, list_grasp_object_keys
 from .rgbd_io import capture_head_camera_ros, save_frame_to_dir
 from .scene_vis import GraspScene3D, backproject_rgbd, pixel_to_cam_xyz
 
@@ -209,6 +210,47 @@ def run_serve(
         gui_image_html = server.gui.add_html(
             _make_clickable_image_html(placeholder, click_bridge_label)
         )
+
+    # --- Privileged auto (optional; requires grasp_objects in yaml) ---
+    object_keys = list_grasp_object_keys(cfg)
+    gui_obj = None
+    gui_scene_prep = None
+    gui_auto_execute = None
+    gui_dry_auto = None
+    btn_auto = None
+    btn_go_home = None
+    btn_reset_scene = None
+    if object_keys:
+        _obj_init = default_object_key(cfg) or object_keys[0]
+        with server.gui.add_folder("Privileged auto"):
+            server.gui.add_markdown(
+                "Flow: **Play** → **Go home** → pick object → Auto. "
+                "scene_prep = PLAY→place→STOP→PLAY (set_prim needs PLAY; "
+                "then heal PhysX) + auto Go home. "
+                "**Stop+reset objects** clears invisible / home poses."
+            )
+            gui_obj = server.gui.add_dropdown(
+                "object",
+                options=object_keys,
+                initial_value=_obj_init if _obj_init in object_keys else object_keys[0],
+            )
+            gui_scene_prep = server.gui.add_checkbox(
+                "scene_prep (place + heal PhysX)",
+                initial_value=True,
+            )
+            gui_auto_execute = server.gui.add_checkbox(
+                "auto_execute (move + close)",
+                initial_value=True,
+            )
+            gui_dry_auto = server.gui.add_checkbox(
+                "dry_run_auto (propose only)",
+                initial_value=False,
+            )
+            btn_auto = server.gui.add_button("Auto grasp selected object")
+            btn_go_home = server.gui.add_button("Go home (grasp home, priority)")
+            btn_reset_scene = server.gui.add_button(
+                "Stop sim + reset objects (visible + home)"
+            )
 
     with server.gui.add_folder("Help / executors"):
         server.gui.add_markdown(EXECUTOR_HELP_MD)
@@ -502,12 +544,173 @@ def run_serve(
         gui_exec_help.content = EXECUTOR_LABELS.get(eid, eid)
         cfg.close_executor = eid
 
+    # Serialize privileged-auto actions. Go home is highest priority:
+    # sets cancel_evt so Auto aborts between steps, then waits for the lock.
+    auto_busy = threading.Lock()
+    cancel_evt = threading.Event()
+    home_pending = threading.Event()
+
+    def _run_privileged(
+        label: str,
+        fn: Any,
+        *,
+        priority: bool = False,
+    ) -> None:
+        if priority:
+            cancel_evt.set()
+            home_pending.set()
+            _set_status(f"**{label}** priority — cancelling current job …")
+
+            def _worker() -> None:
+                auto_busy.acquire(blocking=True)
+                try:
+                    # Drop stale cancel so this home run itself can finish;
+                    # a newer Go home click will set cancel again.
+                    if not home_pending.is_set():
+                        return
+                    home_pending.clear()
+                    cancel_evt.clear()
+                    fn()
+                except Exception as exc:
+                    _set_status(f"**{label} failed:** `{exc}`")
+                finally:
+                    auto_busy.release()
+
+            threading.Thread(target=_worker, daemon=True, name=f"grasp_{label}").start()
+            return
+
+        if home_pending.is_set():
+            _set_status("**Busy** — Go home is pending (priority)")
+            return
+        if not auto_busy.acquire(blocking=False):
+            _set_status(
+                f"**Busy** — wait for current job, or click **Go home** (priority)"
+            )
+            return
+
+        def _worker() -> None:
+            try:
+                fn()
+            except Exception as exc:
+                _set_status(f"**{label} failed:** `{exc}`")
+            finally:
+                auto_busy.release()
+
+        _set_status(f"**{label}** started ...")
+        threading.Thread(target=_worker, daemon=True, name=f"grasp_{label}").start()
+
+    def do_auto_grasp(_: Any = None) -> None:
+        """Privileged: select object → (prep) → capture → HUG → move → close."""
+
+        def _body() -> None:
+            if gui_obj is None:
+                raise RuntimeError("No grasp_objects in config")
+            if interface is None:
+                raise RuntimeError("ROS interface not connected")
+            from .auto_grasp import run_auto_grasp
+
+            _sync_arm_from_ui()
+            key = str(gui_obj.value)
+            dry = bool(gui_dry_auto.value) if gui_dry_auto is not None else False
+            prep = bool(gui_scene_prep.value) if gui_scene_prep is not None else False
+            auto_exec = (
+                bool(gui_auto_execute.value) if gui_auto_execute is not None else True
+            )
+            execute_wrist = auto_exec and not dry
+            do_close_flag = execute_wrist and not dry
+            cfg.position_only = bool(gui_pos_only.value)
+            cfg.close_executor = str(gui_executor.value).upper()
+            cfg.squeeze_amount = float(gui_squeeze.value)
+
+            result = run_auto_grasp(
+                cfg=cfg,
+                workspace=workspace,
+                object_key=key,
+                interface=interface,
+                scene_prep=prep,
+                execute=execute_wrist,
+                dry_run=dry,
+                do_close=do_close_flag,
+                status=_set_status,
+                cancel_event=cancel_evt,
+            )
+            if result.extras.get("frame") is not None:
+                fr = result.extras["frame"]
+                with state["lock"]:
+                    state["rgb"] = fr.rgb
+                    state["depth_m"] = fr.depth_m
+                    state["K"] = fr.K
+                _refresh_image(result.u_norm, result.v_norm)
+                _update_point_cloud()
+            elif result.u_norm or result.v_norm:
+                _refresh_image(result.u_norm, result.v_norm)
+            if result.u_norm or result.v_norm:
+                gui_u.value = float(result.u_norm)
+                gui_v.value = float(result.v_norm)
+            if result.proposal_path and Path(result.proposal_path).is_file():
+                state["proposal_path"] = Path(result.proposal_path)
+                _show_hand_from_proposal(Path(result.proposal_path))
+            if result.plan_path and Path(result.plan_path).is_file():
+                state["plan_path"] = Path(result.plan_path)
+            if not result.ok:
+                if "cancelled" in str(result.message).lower():
+                    _set_status(f"**Auto cancelled** — `{result.message}`")
+                    return
+                _set_status(f"**Auto grasp failed:** `{result.message}`")
+                return
+            _set_status(
+                f"**Auto OK** `{key}` UV=({result.u_norm:.3f},{result.v_norm:.3f}) "
+                f"pose=`{result.pose_method}` — {result.message}"
+            )
+
+        _run_privileged("Auto grasp", _body)
+
+    def do_go_home(_: Any = None) -> None:
+        def _body() -> None:
+            if interface is None:
+                raise RuntimeError("ROS interface not connected")
+            from .home import HomeCancelled, go_home
+
+            try:
+                info = go_home(interface, cfg, cancel_event=cancel_evt)
+            except HomeCancelled:
+                _set_status("**Go home** superseded by a newer Go home click.")
+                return
+            lift_m = info.get("grasp_home_lift_m", 0.0)
+            _set_status(
+                f"**Grasp home OK** via `{info.get('fsm')}` "
+                f"+ dual EE +Z {lift_m}m (settle={info.get('settle_s')}s). "
+                "Ready for next Auto / Plan."
+            )
+
+        _run_privileged("Go home", _body, priority=True)
+
+    def do_reset_scene(_: Any = None) -> None:
+        """STOP sim, snap all props to home_*, clear invisible — leave STOPPED."""
+
+        def _body() -> None:
+            from .scene_prep import reset_scene_objects
+
+            keys = reset_scene_objects(cfg, leave_stopped=True)
+            _set_status(
+                f"**Sim STOPPED** — reset objects (visible + home): {', '.join(keys)}. "
+                "Press **Play** in Isaac, then **Go home** before Auto."
+            )
+
+        _run_privileged("Stop+reset objects", _body, priority=True)
+
     btn_capture.on_click(do_capture)
     btn_propose.on_click(do_propose)
     btn_move.on_click(do_move)
     btn_retarget.on_click(do_retarget)
     btn_close.on_click(do_close)
     btn_open.on_click(do_open)
+    if btn_auto is not None:
+        btn_auto.on_click(do_auto_grasp)
+    if btn_go_home is not None:
+        btn_go_home.on_click(do_go_home)
+    if btn_reset_scene is not None:
+        btn_reset_scene.on_click(do_reset_scene)
 
     @gui_click_bridge.on_update
     def _on_click(_: Any) -> None:
@@ -534,9 +737,14 @@ def run_serve(
     def _on_pc_size(_: Any) -> None:
         scene.set_point_size(float(gui_pc_size.value))
 
+    _auto_hint = (
+        " · **Privileged auto** folder for sim object select"
+        if object_keys
+        else ""
+    )
     _set_status(
         f"Serving **http://127.0.0.1:{cfg.viser_port}** — "
-        "Plan → **Close** (one click: retarget→wait→B0–B5) → Open."
+        f"Plan → **Close** (retarget→B0–B5) → Open{_auto_hint}."
     )
     print(f"[grasp] Viser http://127.0.0.1:{cfg.viser_port}")
     try:

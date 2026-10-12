@@ -224,11 +224,10 @@ def send_wrist_plan(
     execute: bool,
     arrival_timeout: float = 8.0,
 ) -> dict[str, Any]:
-    """Dry-run or ``send_target_stamped`` + ``wait_until_arrive``."""
-    handler = _arm_handler(interface, plan.arm)
-    if handler is None:
-        raise RuntimeError(f"No arm handler for arm={plan.arm!r}")
+    """Dry-run or ``send_target_stamped`` + ``wait_until_arrive``.
 
+    Dry-run does **not** require a live arm handler (plan-only).
+    """
     info: dict[str, Any] = {
         "execute": execute,
         "arm": plan.arm,
@@ -251,6 +250,16 @@ def send_wrist_plan(
         info["status"] = "dry_run"
         return info
 
+    from .home import require_arm_handler
+
+    handler = require_arm_handler(interface, plan.arm)
+    # Best-effort: ensure OCS2 before cartesian (after STOP/PLAY / FSM HOME).
+    try:
+        from ros2_robot_interface import FSM_OCS2
+
+        interface.send_fsm_command(FSM_OCS2)
+    except Exception as exc:
+        print(f"[bridge] WARN could not send FSM_OCS2 before wrist: {exc}")
     handler.send_target_stamped(plan.motion_frame_id, plan.wrist_pose)
     part = "right_arm" if plan.arm == "right" else "left_arm"
     result = interface.wait_until_arrive(part=part, timeout=arrival_timeout)

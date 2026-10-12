@@ -109,12 +109,51 @@ grasp-generation diagnose-frames --robot fiveages_w2 --workspace .
 
 | 模块 | 作用 |
 |------|------|
-| `config.py` / yaml | 话题、TF 候选、prim、端口、HUG python 路径 |
+| `config.py` / yaml | 话题、TF 候选、prim、端口、HUG python 路径、close executor |
 | `hug_adapter` / `hug_worker` | HUG propose（3.10） |
 | `hug_subprocess` | serve 侧调 HUG |
 | `frames` / `se3` / `bridge` | `T_base_cam`、`T_base_wrist`、`send_target_stamped` |
-| `service` | Viser UI |
+| `objects` / `privileged_pose` / `project_uv` | 写死物体目录、Newton 安全位姿、投影 UV |
+| `scene_prep` | 采数前：目标近处随机 + 其余 exile（不改 USDA） |
+| `auto_grasp` | 特权全自动编排（Viser / CLI 共用） |
+| `retarget/` | Wuji Hand2 SDK 重定向 + squeeze |
+| `execution/` | Close 阶段 B0–B5（接触门控 / 增力 / 腕微压） |
+| `service` | Viser UI（含 `close_executor` 下拉 + Privileged auto） |
 | `cli/grasp_main.py` | `grasp-generation` 入口 |
+
+Close 消融说明见 [CLOSE_EXECUTORS.md](CLOSE_EXECUTORS.md)。
+
+```bash
+# ④ Retarget 之后，CLI 跑一次 B3（需 Sensor=contact_force）
+grasp-generation close-hand --robot fiveages_w2 --workspace . --mode B3 --trial-id t01
+```
+
+## Privileged auto（仿真特权选物）
+
+不替代右侧点图选 UV。物体列表写在 `robots/FiveAges_W2/grasp_generation.yaml` 的 `grasp_objects`（`wuji_hand2_new` 桌面；之后可恢复动态发现）。
+
+Viser 文件夹 **Privileged auto**：
+
+1. 下拉选物体（如 `apple`）
+2. 可选 **scene_prep**：`STOP→PLAY` → 近处 XY + yaw（`keep_live_z`）→ **再 STOP→PLAY**（重建 PhysX view，否则 `getDof*Targets` 失效、手臂不动）
+3. Auto 在 scene_prep 后会自动 **Go home**（否则绿手能动臂不动）
+4. **dry_run_auto** / **auto_execute** / **Go home（最高优先）** / **Stop sim + reset objects**（停仿真、回 `home_*`、取消隐形）
+
+**流程：** Play → Go home → 选物 Auto。隐形残留点 **Stop+reset** → Play → Go home。
+
+**Go home（抓取 home）**：`HOLD → HOME → settle → HOLD → OCS2`，再双臂 **+Z** `grasp_home_lift_m`。
+
+位姿：优先 `/get_entity_state`（重试）；失败回退 prim-attr 链；两者漂移 >5cm 打 WARN。
+
+**HUG 紫点 / `click_offset`：** 自动 UV 用 `pose_prim` 位姿 + yaml `click_offset: [x,y,z]`（**米**，`pose_prim` 局部系）。多数资产原点在底部，默认抬一点 Z。调参：勾选 `dry_run_auto` → Auto → 看 3D 紫点是否在抓取面中心 → 改对应物体的 `click_offset` → 重启 serve。
+
+```bash
+# 验 UV（不动臂）
+grasp-generation auto --robot fiveages_w2 --workspace . --object apple --dry-run
+
+# 场景整理 + 真执行
+grasp-generation auto --robot fiveages_w2 --workspace . --object apple --scene-prep --execute
+```
 
 ## 与既有 smoke 脚本关系
 
