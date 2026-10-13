@@ -81,20 +81,9 @@ tf_timeout: 2.0
 execute_default: false
 
 # Privileged auto-grasp (override per robot yaml). Empty grasp_objects → UI hides auto.
+# No scene clear / exile — table props stay as authored in the env USD.
 default_object_key: ""
 grasp_objects: {}
-# STOP→PLAY then near XY+yaw (keep live Z). Auto Go home after prep.
-scene_prep:
-  settle_s: 1.5
-  restore_after: false
-  isolate_mode: exile
-  near_spawn: true
-  keep_live_z: true
-  near_yaw_deg: 30.0
-  near_xy_min: [-12.0, -32.0]
-  near_xy_max: [8.0, -10.0]
-  exile_xy_base: [120.0, 120.0]
-  exile_spacing: 30.0
 
 home_joints: {}
 home_settle_s: 5.0

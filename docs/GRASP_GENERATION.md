@@ -114,8 +114,7 @@ grasp-generation diagnose-frames --robot fiveages_w2 --workspace .
 | `hug_subprocess` | serve 侧调 HUG |
 | `frames` / `se3` / `bridge` | `T_base_cam`、`T_base_wrist`、`send_target_stamped` |
 | `objects` / `privileged_pose` / `project_uv` | 写死物体目录、Newton 安全位姿、投影 UV |
-| `scene_prep` | 采数前：目标近处随机 + 其余 exile（不改 USDA） |
-| `auto_grasp` | 特权全自动编排（Viser / CLI 共用） |
+| `auto_grasp` | 特权全自动编排（Viser / CLI 共用；不改场景摆放） |
 | `retarget/` | Wuji Hand2 SDK 重定向 + squeeze |
 | `execution/` | Close 阶段 B0–B5（接触门控 / 增力 / 腕微压） |
 | `service` | Viser UI（含 `close_executor` 下拉 + Privileged auto） |
@@ -130,29 +129,44 @@ grasp-generation close-hand --robot fiveages_w2 --workspace . --mode B3 --trial-
 
 ## Privileged auto（仿真特权选物）
 
-不替代右侧点图选 UV。物体列表写在 `robots/FiveAges_W2/grasp_generation.yaml` 的 `grasp_objects`（`wuji_hand2_new` 桌面；之后可恢复动态发现）。
+不替代右侧点图选 UV。物体列表写在 `robots/FiveAges_W2/grasp_generation.yaml` 的 `grasp_objects`（`wuji_hand2_new` 桌面）。**不改场景摆放**（无 exile / 清场）；桌面物品保持 env 作者态。
 
 Viser 文件夹 **Privileged auto**：
 
 1. 下拉选物体（如 `apple`）
-2. 可选 **scene_prep**：`STOP→PLAY` → 近处 XY + yaw（`keep_live_z`）→ **再 STOP→PLAY**（重建 PhysX view，否则 `getDof*Targets` 失效、手臂不动）
-3. Auto 在 scene_prep 后会自动 **Go home**（否则绿手能动臂不动）
-4. **dry_run_auto** / **auto_execute** / **Go home（最高优先）** / **Stop sim + reset objects**（停仿真、回 `home_*`、取消隐形）
+2. **dry_run_auto** / **auto_execute** / **Go home（最高优先）**
+3. Auto：capture → 特权 UV → HUG →（可选）腕 + close
 
-**流程：** Play → Go home → 选物 Auto。隐形残留点 **Stop+reset** → Play → Go home。
+**流程：** Play → Go home → 选物 Auto。
 
 **Go home（抓取 home）**：`HOLD → HOME → settle → HOLD → OCS2`，再双臂 **+Z** `grasp_home_lift_m`。
 
 位姿：优先 `/get_entity_state`（重试）；失败回退 prim-attr 链；两者漂移 >5cm 打 WARN。
 
-**HUG 紫点 / `click_offset`：** 自动 UV 用 `pose_prim` 位姿 + yaml `click_offset: [x,y,z]`（**米**，`pose_prim` 局部系）。多数资产原点在底部，默认抬一点 Z。调参：勾选 `dry_run_auto` → Auto → 看 3D 紫点是否在抓取面中心 → 改对应物体的 `click_offset` → 重启 serve。
+**HUG 紫点 — 推荐 `click_prim`（Stage 手动选点）：**
+
+1. Stage 里选中物体根（`placement_prim`，如 `.../sm_food_beverage_beerBottle_a01_01`）。
+2. 右键 → **Create → Xform**，命名 `Grasp_Point_1_1`（可多个：`_1_2`…）。
+3. 选中该 Xform，用 Move 工具拖到抓取面最佳点（瓶身中段/把手中心等）。Orient 可保持单位四元数。
+4. 复制完整 prim 路径到 yaml：
+   ```yaml
+   bottle:
+     click_prim: /World/default_environment/EastRural_Table/sm_food_beverage_beerBottle_a01_01/Grasp_Point_1_1
+     click_offset: [0.0, 0.0, 0.0]
+   ```
+5. **Save** 环境 USD（或保证每次进场景后 Xform 仍在），否则会话里建的点下次会丢。
+6. 勾选 `dry_run_auto` → Auto → 看紫点是否落在 Xform；不对就挪 Stage 里的点，不必改 `click_offset`。
+
+**备选 `click_offset`：** 无 `click_prim` 时用 `pose_prim` 中心 + `[x,y,z]` 米（局部系）。多数资产原点在底部，先抬 Z。调参同上 dry_run。
+
+新物体：复制一段 `grasp_objects` → 填 `pose_prim` / `placement_prim` → 按上面建 `Grasp_Point` → 写 `click_prim`。
 
 ```bash
 # 验 UV（不动臂）
 grasp-generation auto --robot fiveages_w2 --workspace . --object apple --dry-run
 
-# 场景整理 + 真执行
-grasp-generation auto --robot fiveages_w2 --workspace . --object apple --scene-prep --execute
+# 真执行
+grasp-generation auto --robot fiveages_w2 --workspace . --object apple --execute
 ```
 
 ## 与既有 smoke 脚本关系

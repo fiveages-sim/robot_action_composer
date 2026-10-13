@@ -1,8 +1,11 @@
 """Privileged auto-grasp orchestration (Viser + CLI).
 
-Does not replace the manual click path. Scene prep / UV projection / HUG /
-wrist / close are sequenced here so serve UI and ``grasp-generation auto`` share
-one code path.
+Does not replace the manual click path. Object select → UV / HUG / wrist /
+close are sequenced here so serve UI and ``grasp-generation auto`` share one
+code path.
+
+Scene clear / exile / near-spawn were removed: objects stay on the authored
+table layout; only privileged UV selection uses ``grasp_objects``.
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ from .objects import get_grasp_object
 from .privileged_pose import resolve_object_pose_in_base, transform_base_point_to_cam
 from .project_uv import UvProjection, project_privileged_to_uv
 from .rgbd_io import RgbdFrame, capture_head_camera_ros, save_frame_to_dir
-from .scene_prep import prepare_scene_for_grasp, restore_scene
 
 
 StatusFn = Callable[[str], None]
@@ -81,21 +83,45 @@ def privileged_uv_for_object(
     from .privileged_pose import apply_local_offset_world, world_point_to_base
 
     spec = get_grasp_object(cfg, object_key)
-    pose = resolve_object_pose_in_base(
-        spec.pose_prim,
-        base_prim=cfg.base_prim,
-        interface=interface,
-        base_frame=cfg.base_frame,
-        tf_timeout=cfg.tf_timeout,
-    )
+    wanted = (spec.click_prim or "").strip()
+    click_path = wanted or spec.pose_prim
+    try:
+        pose = resolve_object_pose_in_base(
+            click_path,
+            base_prim=cfg.base_prim,
+            interface=interface,
+            base_frame=cfg.base_frame,
+            tf_timeout=cfg.tf_timeout,
+        )
+    except Exception as exc:
+        if wanted and wanted != spec.pose_prim:
+            print(
+                f"[uv] WARN click_prim={wanted!r} failed ({exc}); "
+                f"falling back to pose_prim + click_offset"
+            )
+            click_path = spec.pose_prim
+            pose = resolve_object_pose_in_base(
+                click_path,
+                base_prim=cfg.base_prim,
+                interface=interface,
+                base_frame=cfg.base_frame,
+                tf_timeout=cfg.tf_timeout,
+            )
+        else:
+            raise
     off = spec.click_offset or (0.0, 0.0, 0.0)
+    method = pose.method
+    if click_path != spec.pose_prim:
+        method = f"{pose.method}+click_prim"
+        print(f"[uv] click_prim={click_path}")
     if any(abs(float(v)) > 1e-9 for v in off):
         click_w = apply_local_offset_world(
             pose.xyz_world, pose.quat_xyzw_world, off
         )
         xyz_base = world_point_to_base(click_w, base_prim=cfg.base_prim)
+        frame_lbl = "click_prim" if click_path != spec.pose_prim else "pose_prim"
         print(
-            f"[uv] click_offset={list(off)} m (pose_prim local) → "
+            f"[uv] click_offset={list(off)} m ({frame_lbl} local) → "
             f"base={list(xyz_base)}"
         )
     else:
@@ -111,7 +137,7 @@ def privileged_uv_for_object(
     )
     xyz_cam = transform_base_point_to_cam(xyz_base, cam.T_base_cam)
     uv = project_privileged_to_uv(xyz_cam, K=frame.K, depth_m=frame.depth_m)
-    return uv, pose.method
+    return uv, method
 
 
 def run_auto_grasp(
@@ -120,20 +146,19 @@ def run_auto_grasp(
     workspace: Path,
     object_key: str,
     interface: Any,
-    scene_prep: bool = False,
     execute: bool = True,
     dry_run: bool = False,
     do_close: bool = True,
-    restore_after: Optional[bool] = None,
     status: Optional[StatusFn] = None,
     frame: Optional[RgbdFrame] = None,
     capture_dir: Optional[Path] = None,
     cancel_event: Any = None,
 ) -> AutoGraspResult:
-    """Full privileged pipeline. ``dry_run`` stops after propose (+ dry plan).
+    """Privileged pipeline. ``dry_run`` stops after propose (+ dry plan).
 
+    Objects are **not** moved or hidden — table layout stays as authored.
     When ``frame`` is provided (Viser already captured), skip ROS capture.
-    ``cancel_event`` (threading.Event) aborts between major steps for Go home.
+    ``cancel_event`` aborts between major steps for Go home.
     """
     key = str(object_key).strip()
     if not key:
@@ -148,14 +173,6 @@ def run_auto_grasp(
     except Exception as exc:
         return AutoGraspResult(ok=False, object_key=key, message=str(exc))
 
-    prep_cfg = cfg.scene_prep if isinstance(cfg.scene_prep, dict) else {}
-    do_restore = (
-        bool(restore_after)
-        if restore_after is not None
-        else bool(prep_cfg.get("restore_after", False))
-    )
-
-    # Partial progress so Viser can still show capture / green hand on failure.
     uv = None
     pose_method = ""
     proposal_path: Optional[Path] = None
@@ -165,7 +182,12 @@ def run_auto_grasp(
     close_summary: dict[str, Any] = {}
 
     def _partial(*, ok: bool, message: str) -> AutoGraspResult:
-        extras: dict[str, Any] = {"uv": uv, "frame": frame, "close": close_summary, "move": info}
+        extras: dict[str, Any] = {
+            "uv": uv,
+            "frame": frame,
+            "close": close_summary,
+            "move": info,
+        }
         return AutoGraspResult(
             ok=ok,
             object_key=key,
@@ -179,35 +201,6 @@ def run_auto_grasp(
         )
 
     try:
-        _check_cancel()
-        did_stop_play = False
-        if scene_prep:
-            _status(
-                status,
-                f"Scene prep for `{key}` (PLAY→place→STOP→PLAY) ...",
-            )
-            prep_result = prepare_scene_for_grasp(cfg, key)
-            did_stop_play = bool(getattr(prep_result, "did_stop_play", True))
-            # STOP/PLAY recreates PhysX view but resets robot to USD joints.
-            # Must re-enter grasp home / OCS2 before wrist execute, or the arm
-            # appears frozen (green HUG hand only).
-            # Always re-home after STOP/PLAY when we will command the arm.
-            # dry_run (propose-only) skips the long FSM settle.
-            if interface is not None and not dry_run:
-                _check_cancel()
-                from .home import go_home
-
-                _status(
-                    status,
-                    "Go home after scene STOP/PLAY (required for arm control) ...",
-                )
-                go_home(interface, cfg, cancel_event=cancel_event)
-            elif did_stop_play and dry_run:
-                _status(
-                    status,
-                    "Scene STOP/PLAY done — dry_run skips Go home.",
-                )
-
         _check_cancel()
         if frame is None:
             _status(status, "Capturing head RGB-D ...")
@@ -260,15 +253,21 @@ def run_auto_grasp(
             send_wrist_plan(
                 interface, plan, execute=False, arrival_timeout=cfg.arrival_timeout
             )
-            if do_restore and scene_prep:
-                restore_scene(cfg)
-            return _partial(ok=True, message="dry_run OK (propose + dry plan; no move/close)")
+            return _partial(
+                ok=True, message="dry_run OK (propose + dry plan; no move/close)"
+            )
 
-        # Validate arm handler before execute (clearer than late failure).
         if execute:
             from .home import require_arm_handler
 
             require_arm_handler(interface, cfg.arm or "right")
+            # Open fingers before approach (leftover curl looks like fake close-open).
+            from .retarget.pipeline import run_open_hand
+
+            arm_open = (cfg.arm or "right").lower()
+            if arm_open in ("left", "right"):
+                _status(status, f"Open {arm_open} hand before wrist approach ...")
+                run_open_hand(arm=arm_open, interface=interface)  # type: ignore[arg-type]
 
         _check_cancel()
         _status(status, f"{'EXECUTE' if execute else 'DRY'} move wrist ...")
@@ -307,13 +306,12 @@ def run_auto_grasp(
                 log=True,
                 do_shape_phase=bool(getattr(cfg, "auto_retarget_on_close", True)),
             )
-            close_summary = result.summary_row() if hasattr(result, "summary_row") else {
-                "ok": result.ok,
-                "message": result.message,
-            }
+            close_summary = (
+                result.summary_row()
+                if hasattr(result, "summary_row")
+                else {"ok": result.ok, "message": result.message}
+            )
             if not result.ok:
-                if do_restore and scene_prep:
-                    restore_scene(cfg)
                 return _partial(ok=False, message=f"close failed: {result.message}")
 
             if bool(getattr(cfg, "post_grasp_lift", True)):
@@ -325,7 +323,6 @@ def run_auto_grasp(
                         status,
                         f"Waiting {settle:.1f}s for fingers to settle before lift ...",
                     )
-                    # Interruptible settle so Go home can preempt.
                     remaining = settle
                     while remaining > 1e-6:
                         _check_cancel()
@@ -346,16 +343,8 @@ def run_auto_grasp(
                 close_summary["post_grasp_lift"] = lift_info
                 close_summary["post_grasp_settle_s"] = settle
 
-        if do_restore and scene_prep:
-            restore_scene(cfg)
-
         return _partial(ok=True, message="auto grasp OK")
     except Exception as exc:
-        if do_restore and scene_prep:
-            try:
-                restore_scene(cfg)
-            except Exception:
-                pass
         return _partial(ok=False, message=str(exc))
 
 
@@ -364,7 +353,6 @@ def run_auto_grasp_cli(
     cfg: GraspGenerationConfig,
     workspace: Path,
     object_key: str,
-    scene_prep: bool,
     dry_run: bool,
     execute: bool,
     do_close: bool,
@@ -378,7 +366,6 @@ def run_auto_grasp_cli(
             workspace=workspace,
             object_key=object_key,
             interface=interface,
-            scene_prep=scene_prep,
             execute=execute and not dry_run,
             dry_run=dry_run,
             do_close=do_close and not dry_run,

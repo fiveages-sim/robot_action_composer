@@ -111,10 +111,11 @@ class GraspGenerationConfig:
     tf_timeout: float = 2.0
     execute_default: bool = False
     # Privileged auto-grasp: hardcoded table objects (wuji_hand2_new). Empty → feature off.
-    # Each entry: pose_prim, placement_prim, optional home_translate / home_orient_wxyz.
+    # Each entry: pose_prim, placement_prim, optional home_*, click_prim, click_offset.
+    # Objects are not moved at runtime (no exile / scene clear).
     grasp_objects: dict[str, Any] = field(default_factory=dict)
     default_object_key: str = ""
-    # Scene prep before capture (exile distractors + near-workspace target spawn).
+    # Deprecated / ignored (kept for old yaml compat). Scene clear was removed.
     scene_prep: dict[str, Any] = field(default_factory=dict)
     # Legacy MoveJ joint lists (unused — Go home uses FSM_HOME). Kept for yaml compat.
     home_joints: dict[str, Any] = field(default_factory=dict)

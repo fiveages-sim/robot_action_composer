@@ -214,29 +214,22 @@ def run_serve(
     # --- Privileged auto (optional; requires grasp_objects in yaml) ---
     object_keys = list_grasp_object_keys(cfg)
     gui_obj = None
-    gui_scene_prep = None
     gui_auto_execute = None
     gui_dry_auto = None
     btn_auto = None
     btn_go_home = None
-    btn_reset_scene = None
     if object_keys:
         _obj_init = default_object_key(cfg) or object_keys[0]
         with server.gui.add_folder("Privileged auto"):
             server.gui.add_markdown(
                 "Flow: **Play** → **Go home** → pick object → Auto. "
-                "scene_prep = PLAY→place→STOP→PLAY (set_prim needs PLAY; "
-                "then heal PhysX) + auto Go home. "
-                "**Stop+reset objects** clears invisible / home poses."
+                "Uses registered ``grasp_objects`` for privileged UV "
+                "(no scene clear / exile — table props stay as authored)."
             )
             gui_obj = server.gui.add_dropdown(
                 "object",
                 options=object_keys,
                 initial_value=_obj_init if _obj_init in object_keys else object_keys[0],
-            )
-            gui_scene_prep = server.gui.add_checkbox(
-                "scene_prep (place + heal PhysX)",
-                initial_value=True,
             )
             gui_auto_execute = server.gui.add_checkbox(
                 "auto_execute (move + close)",
@@ -248,9 +241,6 @@ def run_serve(
             )
             btn_auto = server.gui.add_button("Auto grasp selected object")
             btn_go_home = server.gui.add_button("Go home (grasp home, priority)")
-            btn_reset_scene = server.gui.add_button(
-                "Stop sim + reset objects (visible + home)"
-            )
 
     with server.gui.add_folder("Help / executors"):
         server.gui.add_markdown(EXECUTOR_HELP_MD)
@@ -391,6 +381,15 @@ def run_serve(
             # Always refresh dry hand from proposal (camera frame, like HUG).
             _show_hand_from_proposal(Path(prop_path))
             execute = bool(gui_execute.value)
+            if execute and interface is not None:
+                # Match auto path: open before approach so leftover curl does
+                # not look like a fake close-open before retarget.
+                from .retarget.pipeline import run_open_hand
+
+                try:
+                    run_open_hand(arm=arm, interface=interface)  # type: ignore[arg-type]
+                except Exception as exc:
+                    print(f"[serve] WARN open hand before move: {exc}")
             info = send_wrist_plan(
                 interface,
                 plan,
@@ -600,7 +599,7 @@ def run_serve(
         threading.Thread(target=_worker, daemon=True, name=f"grasp_{label}").start()
 
     def do_auto_grasp(_: Any = None) -> None:
-        """Privileged: select object → (prep) → capture → HUG → move → close."""
+        """Privileged: select object → capture → HUG → move → close."""
 
         def _body() -> None:
             if gui_obj is None:
@@ -612,7 +611,6 @@ def run_serve(
             _sync_arm_from_ui()
             key = str(gui_obj.value)
             dry = bool(gui_dry_auto.value) if gui_dry_auto is not None else False
-            prep = bool(gui_scene_prep.value) if gui_scene_prep is not None else False
             auto_exec = (
                 bool(gui_auto_execute.value) if gui_auto_execute is not None else True
             )
@@ -627,7 +625,6 @@ def run_serve(
                 workspace=workspace,
                 object_key=key,
                 interface=interface,
-                scene_prep=prep,
                 execute=execute_wrist,
                 dry_run=dry,
                 do_close=do_close_flag,
@@ -685,20 +682,6 @@ def run_serve(
 
         _run_privileged("Go home", _body, priority=True)
 
-    def do_reset_scene(_: Any = None) -> None:
-        """STOP sim, snap all props to home_*, clear invisible — leave STOPPED."""
-
-        def _body() -> None:
-            from .scene_prep import reset_scene_objects
-
-            keys = reset_scene_objects(cfg, leave_stopped=True)
-            _set_status(
-                f"**Sim STOPPED** — reset objects (visible + home): {', '.join(keys)}. "
-                "Press **Play** in Isaac, then **Go home** before Auto."
-            )
-
-        _run_privileged("Stop+reset objects", _body, priority=True)
-
     btn_capture.on_click(do_capture)
     btn_propose.on_click(do_propose)
     btn_move.on_click(do_move)
@@ -709,8 +692,6 @@ def run_serve(
         btn_auto.on_click(do_auto_grasp)
     if btn_go_home is not None:
         btn_go_home.on_click(do_go_home)
-    if btn_reset_scene is not None:
-        btn_reset_scene.on_click(do_reset_scene)
 
     @gui_click_bridge.on_update
     def _on_click(_: Any) -> None:

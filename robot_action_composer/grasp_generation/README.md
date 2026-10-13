@@ -10,7 +10,7 @@ Hard-dep free: composer installs without HUG.
 | ``bridge`` / ``frames`` | ``T_camera_wrist`` → ``base_link`` → ``send_target_stamped`` |
 | ``retarget/`` | Wuji Hand2 SDK retarget + squeeze amplify |
 | ``execution/`` | Close-phase B0–B5 (contact gate / ramp / wrist); multi-hand ready |
-| ``objects`` / ``privileged_pose`` / ``project_uv`` / ``scene_prep`` / ``auto_grasp`` | Sim-privilege select → UV → auto (optional exile) |
+| ``objects`` / ``privileged_pose`` / ``project_uv`` / ``auto_grasp`` | Sim-privilege select → UV → auto (table layout unchanged) |
 | ``service`` | Viser: manual click path + **Privileged auto** folder |
 
 Docs:

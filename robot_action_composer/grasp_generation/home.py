@@ -77,6 +77,19 @@ def go_home(
     interface.send_fsm_command(FSM_OCS2)
     print("[home] FSM HOME done → OCS2")
 
+    # FSM/STOP→PLAY can leave Wuji fingers curled from USD defaults. Open both
+    # so the next wrist approach is not a "虚握再张开" pulse.
+    try:
+        from .retarget.pipeline import run_open_hand
+
+        for side in ("right", "left"):
+            try:
+                run_open_hand(arm=side, interface=interface)  # type: ignore[arg-type]
+            except Exception as exc:
+                print(f"[home] WARN open {side} hand: {exc}")
+    except Exception as exc:
+        print(f"[home] WARN open hands after HOME: {exc}")
+
     lift_info: dict[str, Any] = {}
     if do_grasp_lift and abs(lift_m) > 1e-6:
         print(f"[home] grasp home lift both EE +Z {lift_m:.3f}m")

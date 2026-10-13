@@ -153,7 +153,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     p_auto = sub.add_parser(
         "auto",
-        help="Privileged auto-grasp: object → (scene-prep) → capture → HUG → move → close",
+        help="Privileged auto-grasp: object → capture → HUG → move → close",
     )
     _add_common(p_auto)
     p_auto.add_argument(
@@ -161,11 +161,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         required=True,
         help="Key from grasp_generation.yaml grasp_objects (e.g. apple)",
-    )
-    p_auto.add_argument(
-        "--scene-prep",
-        action="store_true",
-        help="Exile distractors + spawn target in near workspace",
     )
     p_auto.add_argument(
         "--dry-run",
@@ -452,7 +447,6 @@ def main(argv: list[str] | None = None) -> None:
             cfg=cfg,
             workspace=workspace,
             object_key=str(args.object),
-            scene_prep=bool(args.scene_prep),
             dry_run=bool(args.dry_run),
             execute=bool(args.execute) and not bool(args.dry_run),
             do_close=not bool(args.no_close),

@@ -46,7 +46,7 @@ def project_cam_xyz_to_uv(
     if not (0.0 <= u_px < width and 0.0 <= v_px < height):
         raise ValueError(
             f"Projected UV ({u_px:.1f},{v_px:.1f}) outside image {width}x{height}. "
-            "Object may be off-camera after scene_prep — reset scene / tighten near_xy_*."
+            "Object may be off-camera — check pose_prim / click_prim vs head camera FOV."
         )
     u_norm = float(u_px / max(width - 1, 1))
     v_norm = float(v_px / max(height - 1, 1))

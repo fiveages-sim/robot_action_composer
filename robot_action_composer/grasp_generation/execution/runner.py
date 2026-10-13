@@ -174,6 +174,11 @@ def run_close(
 
         # --- Phase A: open-loop (default) → visible MANO shape ---
         if req.do_shape_phase:
+            # Snap to commanded start first. Otherwise leftover curled joints
+            # from a prior grasp / STOP→PLAY look like a "fake close", then the
+            # first interp frames jump open before the real MANO approach.
+            _send(q_cur)
+            time.sleep(min(0.25, max(0.05, float(req.close_dt_s) * 2.0)))
             t0 = time.time()
             if req.shape_use_contact_gate:
                 q_cur, _fr, shape_steps = run_gated_approach(

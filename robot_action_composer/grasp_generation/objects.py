@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional
 
 from .config import GraspGenerationConfig
 
@@ -15,7 +15,11 @@ class GraspObjectSpec:
     placement_prim: str
     home_translate: Optional[tuple[float, float, float]] = None
     home_orient_wxyz: Optional[tuple[float, float, float, float]] = None
-    # HUG click point offset in pose_prim local frame (meters).
+    # Optional Stage Xform (e.g. Grasp_Point_1_1 under the object). When set,
+    # HUG purple click uses this prim's world position instead of pose_prim
+    # center. Still can apply click_offset in click_prim local frame (meters).
+    click_prim: str = ""
+    # HUG click point offset in pose_prim (or click_prim) local frame (meters).
     # Origin is often at the mesh base — raise Z so the purple marker sits
     # on the graspable surface (same idea as motion-gen object_position_offset).
     click_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -42,6 +46,7 @@ def parse_grasp_object(key: str, entry: Mapping[str, Any]) -> GraspObjectSpec:
         raise ValueError(f"grasp_objects[{key!r}] missing placement_prim")
     home_t = entry.get("home_translate")
     home_q = entry.get("home_orient_wxyz")
+    click_prim = str(entry.get("click_prim") or "").strip()
     # Accept click_offset or legacy alias click_offset_m.
     off_raw = entry.get("click_offset", entry.get("click_offset_m"))
     return GraspObjectSpec(
@@ -54,6 +59,7 @@ def parse_grasp_object(key: str, entry: Mapping[str, Any]) -> GraspObjectSpec:
         home_orient_wxyz=_as_vec4(home_q, label=f"grasp_objects[{key}].home_orient_wxyz")
         if home_q is not None
         else None,
+        click_prim=click_prim,
         click_offset=_as_vec3(off_raw, label=f"grasp_objects[{key}].click_offset")
         if off_raw is not None
         else (0.0, 0.0, 0.0),
@@ -89,15 +95,3 @@ def default_object_key(cfg: GraspGenerationConfig) -> str:
         return pref
     return keys[0]
 
-
-def scene_prep_vec2(
-    raw: Any,
-    default: Sequence[float],
-    *,
-    label: str,
-) -> tuple[float, float]:
-    if raw is None:
-        return float(default[0]), float(default[1])
-    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
-        raise ValueError(f"{label} must be length-2 list, got {raw!r}")
-    return float(raw[0]), float(raw[1])
