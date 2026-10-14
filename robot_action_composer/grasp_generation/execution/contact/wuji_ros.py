@@ -22,20 +22,46 @@ from ..types import ContactSnapshot
 from .base import ContactSensor
 
 # Substrings matched against partner USD paths (case-insensitive).
+# NOTE: Do NOT put ``default_environment`` or bare ``table`` here — grasp props
+# live under ``/World/default_environment/EastRural_Table/sm_apple_...`` and
+# those tokens would discard *real* object contacts (B3/B4 never freeze).
 _DEFAULT_IGNORE_PARTNERS: tuple[str, ...] = (
     "ground",
     "groundplane",
     "defaultgroundplane",
-    "default_environment",
-    "table",
-    "desk",
+    "tabletop",  # EastRural TableTop collider only (not EastRural_Table/sm_*)
     "floor",
-    "plane",
+    # Self / other-finger collisions must not freeze the close gate.
+    "wuji_",
+    "_hand_",
+    "finger_",
+    "thumb_",
+    "pinky_",
+    "ring_",
+    "index_finger",
+    "middle_finger",
+)
+
+# If any of these appear in the partner path, never treat as desk/ground.
+_OBJECT_KEEP_HINTS: tuple[str, ...] = (
+    "sm_",
+    "apple",
+    "bottle",
+    "banana",
+    "lime",
+    "hammer",
+    "mug",
+    "ycb",
+    "model_normalized",
+    "_obj_",
+    "/geometry/",
 )
 
 
 def _is_ignored_partner(path: str, ignore: Sequence[str]) -> bool:
     low = str(path).lower()
+    if any(h in low for h in _OBJECT_KEEP_HINTS):
+        return False
     return any(tok.lower() in low for tok in ignore if tok)
 
 
@@ -63,7 +89,25 @@ class WujiRosContactSensor(ContactSensor):
             )
         self._force_thr = float(force_mag_threshold_n)
         self._use_bool = bool(use_bool)
-        self._ignore = tuple(ignore_partners) if ignore_partners is not None else _DEFAULT_IGNORE_PARTNERS
+        # YAML may only list desk/ground; always keep self-collision filters.
+        _self = (
+            "wuji_",
+            "_hand_",
+            "finger_",
+            "thumb_",
+            "pinky_",
+            "ring_",
+            "index_finger",
+            "middle_finger",
+        )
+        if ignore_partners is not None:
+            merged = list(ignore_partners)
+            for tok in _self:
+                if not any(str(t).lower() == tok for t in merged):
+                    merged.append(tok)
+            self._ignore = tuple(merged)
+        else:
+            self._ignore = _DEFAULT_IGNORE_PARTNERS
         self._node_name = node_name
 
         self._lock = threading.Lock()
@@ -202,21 +246,30 @@ class WujiRosContactSensor(ContactSensor):
                 if mag >= self._force_thr:
                     link_bool[link] = True
 
-        # Drop contacts whose only partners are table/ground (desk resting).
+        # Gate on *real* object contact. Past bugs:
+        #   - Bool True + force=0 on self (ring↔pinky) → false freeze
+        #   - ignore list matching ``default_environment`` / ``table`` → apple
+        #     under EastRural_Table discarded → B3/B4 never freeze, squeeze
+        #     keeps pushing, PhysX yields fingers open (cmd holds closed)
+        #
+        # Rules (force-first when partners name an object):
+        #   1) object partner → mag >= 0.15 (bottle thumb often 0.2–0.4 N)
+        #   2) no partners → Bool + mag >= 0.5 (avoid wrench noise / false Bool)
+        #   3) partners only self/desk → never freeze
+        #   4) object + force enough even when Bool lags False
+        force_gate = max(float(self._force_thr), 0.5)
+        object_gate = max(float(self._force_thr), 0.15)
         filtered: dict[str, bool] = {}
-        for link, touching in link_bool.items():
-            if not touching:
-                filtered[link] = False
-                continue
+        for link in link_bool:
+            mag = float(link_mag.get(link, 0.0) or 0.0)
             partners = link_partners.get(link) or []
+            non_ignore = [
+                p for p in partners if not _is_ignored_partner(p, self._ignore)
+            ]
             if partners:
-                non_ignore = [
-                    p for p in partners if not _is_ignored_partner(p, self._ignore)
-                ]
-                filtered[link] = bool(non_ignore)
+                filtered[link] = bool(non_ignore) and mag >= object_gate
             else:
-                # No partner info yet — keep Bool (may include table briefly)
-                filtered[link] = True
+                filtered[link] = bool(link_bool.get(link, False)) and mag >= force_gate
 
         fingers = self._profile.finger_contact_from_links(filtered)
         any_c = any(fingers.values()) or any(filtered.values())

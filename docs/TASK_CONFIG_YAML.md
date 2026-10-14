@@ -276,6 +276,14 @@ task_queue:
 
 `robot.cache_ee_pose(which=both)` -> `single_arm.pick` -> `dual_arm.handover_sync` -> `single_arm.place` -> `dual_arm.goto_cache_pose`
 
+### 导航后灵巧手 HUG 抓取
+
+`nav.navigate_to_object` -> `dex_hand.auto_grasp`
+
+- 物体/手/相机配置在 `robots/<Robot>/grasp_generation.yaml`（`grasp_objects` + `hand_profile`），任务 YAML 只传 `object_key` / `robot_key`。
+- 与夹爪 `navigate_and_pick`（`single_arm.pick`）并行存在；demo：`dex_hand/navigate_and_dex_grasp.yaml`。
+- 技能语义见 [`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md) §3b；抓取库见 [`GRASP_GENERATION.md`](GRASP_GENERATION.md)。
+
 ### 导航后回起势
 
 `nav.navigate_backup` -> `parallel(nav.send_nav_goal + joint.movej_to_config)` -> `nav.wait_nav_arrived` -> `dual_arm.goto_cache_pose`
@@ -363,6 +371,7 @@ real/object-resolution replay 使用交互式 task queue runner。遇到 `nav.*`
 - `examples/IsaacSim/robots/Agibot_G1/task_configs/handover.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/bimanual_carry.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/navigate_and_carry.yaml`
+- `examples/IsaacSim/robots/FiveAges_W2/task_configs/dex_hand/navigate_and_dex_grasp.yaml`
 
 ---
 

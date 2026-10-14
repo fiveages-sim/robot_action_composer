@@ -418,6 +418,44 @@ def randomize_object_xyz_after_reset(
     )
 
 
+def wait_entity_pose_readable(
+    entity: str,
+    *,
+    max_wait: float = 10.0,
+    poll_interval: float = 0.25,
+    timeout: float = SERVICE_CALL_TIMEOUT,
+    retries: int = 1,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> bool:
+    """Poll ``/get_entity_state`` until PhysX views are readable after STOP→PLAY.
+
+    Isaac reset briefly invalidates articulation / RigidBody views; callers that
+    immediately query poses or send Nav2 goals see intermittent failures.
+    """
+    sleep = sleep_fn or time.sleep
+    deadline = time.monotonic() + max(0.0, float(max_wait))
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            get_entity_pose_world_service(
+                entity,
+                timeout=timeout,
+                retries=max(1, int(retries)),
+                retry_delay=retry_delay,
+            )
+            print(f"[OK] Entity pose readable after reset: '{entity}'")
+            return True
+        except Exception as exc:
+            last_err = exc
+            sleep(max(0.05, float(poll_interval)))
+    print(
+        f"[WARN] Entity pose still unreadable after {max_wait:.1f}s: '{entity}'"
+        + (f" ({last_err})" if last_err is not None else "")
+    )
+    return False
+
+
 def reset_simulation_state(
     settle_entity_path: str,
     *,
@@ -433,8 +471,14 @@ def reset_simulation_state(
     settle_sample_interval: float = 0.05,
     settle_stable_samples: int = 3,
     settle_position_epsilon: float = 0.002,
+    also_settle_entity_path: str = "",
+    physx_ready_max_wait: float = 8.0,
 ) -> None:
     """Reset/play Isaac sim，等待 ``post_reset_wait``，再可选对 ``settle_entity_path`` 做位姿稳定检测。
+
+    After PLAY, PhysX views are briefly invalid — we wait until
+    ``settle_entity_path`` (and optional ``also_settle_entity_path``, e.g. robot
+    base) answer ``/get_entity_state`` before the position-stable poll.
 
     **不**修改任何物体 prim 的平移；需要随机化时在任务队列**第一个顺序块**使用技能
     ``env.randomize_object_local_xyz``（或自行调用 ``randomize_object_xyz_after_reset``）。
@@ -453,6 +497,28 @@ def reset_simulation_state(
     )
     print("[OK] Simulation reset completed")
     (sleep_fn or time.sleep)(post_reset_wait)
+
+    ready_budget = max(0.0, float(physx_ready_max_wait))
+    if settle_entity_path and ready_budget > 0.0:
+        wait_entity_pose_readable(
+            settle_entity_path,
+            max_wait=ready_budget,
+            timeout=sim_service_timeout,
+            retries=1,
+            retry_delay=retry_delay,
+            sleep_fn=sleep_fn,
+        )
+    also = (also_settle_entity_path or "").strip()
+    if also and also != settle_entity_path and ready_budget > 0.0:
+        wait_entity_pose_readable(
+            also,
+            max_wait=ready_budget,
+            timeout=sim_service_timeout,
+            retries=1,
+            retry_delay=retry_delay,
+            sleep_fn=sleep_fn,
+        )
+
     if enable_settle_wait:
         wait_entity_position_stable(
             settle_entity_path,
@@ -465,6 +531,18 @@ def reset_simulation_state(
             retry_delay=retry_delay,
             sleep_fn=sleep_fn,
         )
+        if also and also != settle_entity_path:
+            wait_entity_position_stable(
+                also,
+                max_wait=settle_max_wait,
+                sample_interval=settle_sample_interval,
+                stable_samples=settle_stable_samples,
+                position_epsilon=settle_position_epsilon,
+                timeout=sim_service_timeout,
+                retries=retries,
+                retry_delay=retry_delay,
+                sleep_fn=sleep_fn,
+            )
 
 
 def wait_entity_position_stable(

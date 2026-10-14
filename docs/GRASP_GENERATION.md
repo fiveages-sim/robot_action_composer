@@ -2,15 +2,17 @@
 
 `grasp-generation` 是 **新功能入口**：在运控已由 `ros2-stack` 拉起的前提下，用头相机 + HUG 生成相机系抓姿，再经 `ROS2RobotInterface` 把 **腕** 送到对应位姿。
 
-**不替代** `motion-generation` 任务编排，也 **不修改** 现有 `ros2-stack` / task_queue 逻辑。
+**不替代** `motion-generation` 任务编排；task_queue 经 skill **`dex_hand.auto_grasp`** 调用同一抓取库。**不改** `ros2-stack`。
 
 ## 角色分工
 
 | 组件 | 职责 |
 |------|------|
 | `ros2-stack` | 启动 OCS2 运控 / Nav2（照旧） |
-| `motion-generation` | 既有 skill 任务队列（照旧） |
-| `grasp-generation` | HUG 抓取辅助：采帧 → 选点 → propose → 跟腕 |
+| `motion-generation` | 任务队列；可用 skill **`dex_hand.auto_grasp`** 调用同一套抓取库 |
+| `grasp-generation` | HUG 抓取辅助 + **Viser 调试**（采帧 → 选点 → propose → 跟腕 → close） |
+
+**文档分工：** 本文件（composer `docs/`）讲 grasp CLI / Viser / 模块边界；仓库根 [`docs/`](../../../docs/) 讲仿真联调里程碑、HUG/Wuji 专项（`SIM_GRASP_*`、`WUJI_*`、`HUG_SUBMODULE`）。任务 YAML / 其它 skill 参数见同目录 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md)、[`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md)。
 
 ## Python 拆分
 
@@ -92,6 +94,14 @@ grasp-generation follow-wrist --robot fiveages_w2 --workspace examples/IsaacSim 
 grasp-generation follow-wrist ... --proposal ... --execute
 ```
 
+抓歪排查（HUG 紫点 + 绿 MANO，不启 Viser）：
+
+```bash
+# auto / dex_hand.auto_grasp 会自动写 capture_dir/hug_debug/ 与 hug_debug_overlay.png
+grasp-generation dump-hug-debug --robot fiveages_w2 --workspace . \
+  --from-dir submodules/hug/data/w2_wuji_head_capture
+```
+
 默认 **`position_only: true`**：只跟 MANO 腕平移，保持当前 EE 姿态，降低第一期朝向/坐标系差带来的风险。
 
 ### Phase 2A.1 — 腕目标与 EE 偏差诊断
@@ -105,27 +115,96 @@ grasp-generation diagnose-frames --robot fiveages_w2 --workspace .
 
 对比 `right_tcp` / `right_eef` 与 plan `wrist_xyz`。说明见仓库 [`docs/SIM_GRASP_EE_ALIGN.md`](../../../docs/SIM_GRASP_EE_ALIGN.md)。
 
-## 模块
+## 三条入口（共用库）
 
-| 模块 | 作用 |
+| 入口 | 用途 |
 |------|------|
-| `config.py` / yaml | 话题、TF 候选、prim、端口、HUG python 路径、close executor |
-| `hug_adapter` / `hug_worker` | HUG propose（3.10） |
-| `hug_subprocess` | serve 侧调 HUG |
-| `frames` / `se3` / `bridge` | `T_base_cam`、`T_base_wrist`、`send_target_stamped` |
-| `objects` / `privileged_pose` / `project_uv` | 写死物体目录、Newton 安全位姿、投影 UV |
-| `auto_grasp` | 特权全自动编排（Viser / CLI 共用；不改场景摆放） |
-| `retarget/` | Wuji Hand2 SDK 重定向 + squeeze |
-| `execution/` | Close 阶段 B0–B5（接触门控 / 增力 / 腕微压） |
-| `service` | Viser UI（含 `close_executor` 下拉 + Privileged auto） |
-| `cli/grasp_main.py` | `grasp-generation` 入口 |
+| `grasp-generation serve`（Viser） | 手动点图 / Privileged auto，调试 HUG、腕、retarget、close |
+| `grasp-generation auto` | 无 UI 特权抓取（CLI） |
+| motion skill `dex_hand.auto_grasp` | 任务队列内调用；**复用** `run_auto_grasp` + `ctx.interface` |
 
-Close 消融说明见 [CLOSE_EXECUTORS.md](CLOSE_EXECUTORS.md)。
+程序化稳定面：`load_grasp_config` + `run_auto_grasp`（见 `grasp_generation/config.py`、`auto_grasp.py`）。
+
+**与运控手 FSM / GripperControlPanel：** `/fsm_command` 全局共享（RViz：HOLD / OCS2 / MOVEJ / HOME）。臂切 OCS2(3) 时手也进 MOVEJ；手非 MOVEJ 时 `target_command` / `target_joint_position` 会被丢弃。期望时序：
+
+`仿真开 → 手 home_1 全开 → OCS2 → target_command(1) 保持开 → 跟腕（手不动）→ shape/retarget → close`
+
+运控新增 `home_2`(半开) / `home_3`(握紧) 后，上游模板仍可能把 open 指到 home_2。**不要改 wuji_description**；用本机 `config/robot.profiles/wuji_hand2.yaml`（`control.patch`：`open_config:0` / `close_config:2`），Isaac 经 `robot.yaml` 的 `robot_profile:=` 传入。
+
+## 模块边界与替换（MANO / Retarget / Execute）
+
+抓取库拆成三段，**接口稳定面**如下；换模块时只改对应实现 + yaml，不要改 motion 其它 skill。
+
+```
+头相机 RGB-D
+    │
+    ▼
+┌──────────────────┐
+│ 1. MANO / Propose │  hug_worker / hug_subprocess → proposal.json
+└────────┬─────────┘
+         │ T_camera_wrist + landmarks + click_uv
+         ▼
+┌──────────────────┐
+│ 2. Retarget       │  retarget/pipeline → q_retarget[n_dof]
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│ 3. Execute close  │  execution/runner + B0–B5 + hand profile
+└──────────────────┘
+```
+
+| 段 | 代码位置 | 输入 | 输出 / 契约 |
+|----|----------|------|-------------|
+| **MANO 生成** | `hug_subprocess.py`、`hug_worker.py`、`dump_hug_debug.py` | 采帧目录 + `(u_norm,v_norm)` | `proposal.json`：至少含 `T_camera_wrist`（4×4）、可选 landmarks / click |
+| **Retarget** | `retarget/pipeline.py`、`retarget/wuji_hand2.py`、`retarget/squeeze.py` | proposal + `hand_profile` | `list[float]` 长度 = profile `n_dof`；后缀序见 profile |
+| **Execute** | `execution/runner.py`、`executors/`、`profiles/`、`contact/` | `q_retarget` + yaml close 参数 + 接触话题 | 下发 `/…/target_joint_position`；日志 `close_logs/*.jsonl` |
+
+### 如何换 MANO 后端
+
+1. 保持写出 **`proposal.json`** 字段约定（`T_camera_wrist` 为相机系腕目标）。  
+2. 改 `hug_subprocess.run_hug_propose` 或换 worker；Viser / `auto_grasp` / skill **不必改**。  
+3. 用 `grasp-generation dump-hug-debug --from-dir <capture>` 看紫点 UV + 绿 MANO 是否对齐。
+
+### 如何换 Retarget / 新手
+
+1. 在 `execution/profiles/` 注册 `HandExecutionProfile`（关节后缀、指分组、tip、接触 link、`topic_prefix_by_arm`）。  
+2. 在 `retarget/` 实现 MANO→该手 `q`；`ensure_q_retarget` / `run_retarget_pipeline` 按 `cfg.hand_profile` 分发。  
+3. yaml：`hand_profile: <name>`。今日仅 **`wuji_hand2`** 全通。
+
+### 如何换 / 调 Execute（B0–B5）
+
+1. 语义与参数表见 [`CLOSE_EXECUTORS.md`](CLOSE_EXECUTORS.md)（**B2 开环 squeeze ≠ B4 门控+ramp**）。  
+2. 机器人侧只改 `robots/<Robot>/grasp_generation.yaml`（`close_executor`、`ramp_*`、`tip_pinch_*`、`soft_stop_force_n`…）。  
+3. 接触：Isaac 开 `Sensor=contact_force`；`ignore_contact_partners` 勿含 `default_environment`。
+
+### 其它模块
+
+| 模块 | 作用 | 替换时保持 |
+|------|------|------------|
+| `config.py` / `robots/*/grasp_generation.yaml` | 机型解耦：相机、手、MANO→tip、profile、executor、`grasp_objects` | yaml 字段名 |
+| `frames` / `se3` / `bridge` | 相机/腕 TF → `send_target_stamped` | plan 字段 |
+| `objects` / `privileged_pose` / `project_uv` | 特权选物 UV（**不改场景摆放**） | `pose_prim` / `click_prim` |
+| `auto_grasp` | capture → UV → HUG → wrist → close | `AutoGraspResult` |
+| `service` / `cli/grasp_main.py` | Viser / CLI | — |
+
+**新机器人：** 复制 `grasp_generation.yaml`；改 `robot_key`、相机 topic/prim、`mano_to_tip_rpy_deg`、`hand_profile`、`grasp_objects`。新手须 **同时** 加 retarget 后端与 `execution/profiles/`。
 
 ```bash
-# ④ Retarget 之后，CLI 跑一次 B3（需 Sensor=contact_force）
-grasp-generation close-hand --robot fiveages_w2 --workspace . --mode B3 --trial-id t01
+grasp-generation close-hand --robot fiveages_w2 --workspace . --mode B4 --trial-id t01
 ```
+
+### 仿真测试环境（W2 + Wuji Hand2）
+
+| 项 | 要求 |
+|----|------|
+| USD | FaSim `…/W2/env/wuji_hand2_new.usda`（东村桌子 + 苹果等；spawn `x=-2`） |
+| 手 | 右手 `Sensor=contact_force`；话题 `/wuji_rh/*` |
+| 运控 | `ros2-stack launch --robot fiveages_w2`；手 open→`home_1` 用本机 `robot.profiles/wuji_hand2.yaml` |
+| 导航冒烟 | `--group dex_hand` + `task_configs/dex_hand/navigate_and_dex_grasp.yaml` |
+| 配置 | `examples/IsaacSim/robots/FiveAges_W2/grasp_generation.yaml` |
+
+冒烟顺序：Isaac Play → stack →（可选）`grasp-generation serve` 或 `motion-generation … navigate_and_dex_grasp`。
 
 ## Privileged auto（仿真特权选物）
 
@@ -167,6 +246,19 @@ grasp-generation auto --robot fiveages_w2 --workspace . --object apple --dry-run
 
 # 真执行
 grasp-generation auto --robot fiveages_w2 --workspace . --object apple --execute
+```
+
+### motion-generation 任务队列
+
+导航靠近后再跑同一套 `run_auto_grasp`（skill 参数见 [`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md) §3b）。
+
+W2 仿真导航走 **`navigation_isaac_gt`**：Isaac GT `/odom` + 静态地图（`map`→`world` 恒等），**不是** SLAM。`task_configs/dex_hand/.meta`：`map_only` + **EastRural 全空闲 map**（勿用仓库图，否则会绕「假障碍」跑远）+ Nav2 RViz。`approach_offset_*` 是**世界系 XY**（桌面高度只影响 HUG，不进底盘目标）。
+
+```bash
+# Isaac: wuji_hand2_new Play；机器人放到桌子西侧数米外
+cd examples/IsaacSim
+ros2-stack launch --robot fiveages_w2 --group dex_hand   # 改 map 后需重启 stack
+motion-generation --robot fiveages_w2 --task-key navigate_and_dex_grasp --scene apple
 ```
 
 ## 与既有 smoke 脚本关系

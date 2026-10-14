@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -76,6 +77,40 @@ def _quat_rotate_vector_xyzw(
     t = quat_multiply(q, v_quat)
     out = quat_multiply(t, quat_conjugate(q))
     return (out[0], out[1], out[2])
+
+
+def _yaw_from_quat_xyzw(q: tuple[float, float, float, float]) -> float:
+    x, y, z, w = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _world_xy_yaw_to_base_footprint(
+    *,
+    target_x: float,
+    target_y: float,
+    target_yaw: float,
+    base_xy: tuple[float, float],
+    base_quat_xyzw: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    """World approach pose → pose in current ``base_footprint`` (dx, dy, dyaw).
+
+    Isaac GT ``/odom`` is relative to Play-start; with ``map≈odom`` at identity,
+    sending **world** XY as ``frame_id=map`` goals is wrong whenever the robot
+    did not start at world origin (e.g. teleported to x=-2). Body-frame goals
+    stay correct.
+    """
+    dx_w = float(target_x) - float(base_xy[0])
+    dy_w = float(target_y) - float(base_xy[1])
+    base_yaw = _yaw_from_quat_xyzw(base_quat_xyzw)
+    c = math.cos(base_yaw)
+    s = math.sin(base_yaw)
+    dx_b = c * dx_w + s * dy_w
+    dy_b = -s * dx_w + c * dy_w
+    dyaw = math.atan2(
+        math.sin(float(target_yaw) - base_yaw),
+        math.cos(float(target_yaw) - base_yaw),
+    )
+    return dx_b, dy_b, dyaw
 
 
 def skill_send_nav_goal(
@@ -208,33 +243,106 @@ def skill_navigate_to_object(
     offset_x = float(params.get("approach_offset_x", -0.20))
     offset_y = float(params.get("approach_offset_y", 0.0))
     yaw = float(params.get("yaw", 0.0))
-    frame_id = str(params.get("frame_id", "map"))
+    # Default map: legacy warehouse demos (spawn≈world origin).
+    # base_footprint: Isaac GT odom-safe (dex_hand / robot teleported away from origin).
+    frame_id = str(params.get("frame_id", "map")).strip() or "map"
     timeout = float(params.get("timeout", 60.0))
     poll_period = float(params.get("poll_period", 0.1))
 
-    # 从 live/replay object-resolution 获取导航 frame 下的物体位姿。
+    # Object pose is always resolved in world/map (Isaac GT: map≡world).
     obj_pose = resolve_nav_object_pose_for_task(
         ctx,
         object_prim_path=object_path,
-        frame_id=frame_id,
+        frame_id="map",
     )
     obj_x = float(obj_pose.position.x)
     obj_y = float(obj_pose.position.y)
     obj_z = float(obj_pose.position.z)
     nav_x = obj_x + offset_x
     nav_y = obj_y + offset_y
-    print(
-        f"[Nav] Object world pos: ({obj_x:.3f}, {obj_y:.3f}, {obj_z:.3f})"
-        f"  →  nav target: ({nav_x:.3f}, {nav_y:.3f}) yaw={yaw:.3f}"
-    )
+
+    goal_x, goal_y, goal_yaw = nav_x, nav_y, yaw
+    send_frame = frame_id
+    # Isaac GT: /odom relative to Play-start; map→odom often identity.
+    # World XY as map goals is wrong if spawn≠world origin. Instead:
+    #   Isaac world → body (dx,dy,dyaw) → compose onto TF map←base → send frame=map.
+    # Never ask Nav2 to transform base_footprint goals (sim/wall stamp → ABORT 6).
+    if frame_id in ("base_footprint", "base_link", "odom_relative"):
+        base_path = getattr(ctx, "base_link_entity_path", None) or ""
+        if not base_path:
+            raise ValueError(
+                "nav.navigate_to_object odom_relative/base_footprint requires "
+                "base_link_entity_path on context"
+            )
+        (bx, by, _bz), bq = get_entity_pose_world_service(base_path)
+        dx_b, dy_b, dyaw_b = _world_xy_yaw_to_base_footprint(
+            target_x=nav_x,
+            target_y=nav_y,
+            target_yaw=yaw,
+            base_xy=(bx, by),
+            base_quat_xyzw=bq,
+        )
+        send_frame = "map"
+        mx = my = 0.0
+        myaw = 0.0
+        tf = None
+        lookup = getattr(ctx.interface, "lookup_transform", None)
+        if callable(lookup):
+            # After Isaac STOP→PLAY, odom TF can lag PhysX; retry before body-delta fallback.
+            tf_deadline = time.monotonic() + 6.0
+            while time.monotonic() < tf_deadline and tf is None:
+                for base_frame in ("base_footprint", "base_link"):
+                    try:
+                        tf = lookup("map", base_frame, timeout=1.0)
+                    except Exception:
+                        tf = None
+                    if tf is not None:
+                        break
+                if tf is None:
+                    sim = getattr(ctx, "sim_time", None)
+                    if sim is not None and hasattr(sim, "sleep"):
+                        sim.sleep(0.25)
+                    else:
+                        time.sleep(0.25)
+        if tf is not None:
+            t = tf.transform.translation
+            r = tf.transform.rotation
+            mx, my = float(t.x), float(t.y)
+            myaw = _yaw_from_quat_xyzw((float(r.x), float(r.y), float(r.z), float(r.w)))
+            c, s = math.cos(myaw), math.sin(myaw)
+            goal_x = mx + c * dx_b - s * dy_b
+            goal_y = my + s * dx_b + c * dy_b
+            goal_yaw = math.atan2(
+                math.sin(myaw + dyaw_b), math.cos(myaw + dyaw_b)
+            )
+        else:
+            # TF not ready (common right after sim reset): assume map pose ≈ odom origin
+            goal_x, goal_y, goal_yaw = dx_b, dy_b, dyaw_b
+            print(
+                "[Nav] WARN: map←base TF unavailable; "
+                "using body delta as map goal (ok if odom still at Play origin)"
+            )
+        print(
+            f"[Nav] Object world=({obj_x:.3f}, {obj_y:.3f}, {obj_z:.3f}) "
+            f"approach_world=({nav_x:.3f}, {nav_y:.3f}) | "
+            f"base_world=({bx:.3f}, {by:.3f}) body=({dx_b:.3f},{dy_b:.3f},{dyaw_b:.3f}) | "
+            f"map_base=({mx:.3f},{my:.3f},{myaw:.3f}) → map goal "
+            f"({goal_x:.3f}, {goal_y:.3f}) yaw={goal_yaw:.3f}"
+        )
+    else:
+        print(
+            f"[Nav] Object world pos: ({obj_x:.3f}, {obj_y:.3f}, {obj_z:.3f})"
+            f"  →  nav target: ({goal_x:.3f}, {goal_y:.3f}) yaw={goal_yaw:.3f} "
+            f"frame={send_frame}"
+        )
 
     sim_time = getattr(ctx, "sim_time", None)
     time_now_fn = sim_time.now_seconds if sim_time is not None else None
     sleep_fn = sim_time.sleep if sim_time is not None else None
 
     success = ctx.interface.navigate_to_pose(
-        nav_x, nav_y, yaw,
-        frame_id=frame_id,
+        goal_x, goal_y, goal_yaw,
+        frame_id=send_frame,
         timeout=timeout,
         poll_period=poll_period,
         time_now_fn=time_now_fn,
@@ -242,7 +350,9 @@ def skill_navigate_to_object(
     )
     if not success:
         raise RuntimeError(
-            f"Navigation to object approach failed (target=({nav_x:.3f}, {nav_y:.3f}))"
+            f"Navigation to object approach failed "
+            f"(frame={send_frame} goal=({goal_x:.3f}, {goal_y:.3f}) "
+            f"approach_world=({nav_x:.3f}, {nav_y:.3f}))"
         )
 
     print("[Nav] Arrived at object approach position — refreshing base world pose")

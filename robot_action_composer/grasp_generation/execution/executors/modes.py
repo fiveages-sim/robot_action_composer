@@ -12,6 +12,7 @@ from ..profiles.base import HandExecutionProfile
 from ..types import CloseRequest, CloseRunResult, CloseStepLog, ExecutorId
 from .base import (
     CloseExecutor,
+    MeasureHandFn,
     ObjectPoseFn,
     SendHandFn,
     WristPoseFn,
@@ -19,6 +20,7 @@ from .base import (
     base_result,
     make_step_log,
     run_gated_approach,
+    run_open_loop_approach,
     sleep_dt,
     update_freeze,
 )
@@ -68,11 +70,13 @@ class InstantRetargetExecutor(CloseExecutor):
         wrist_press: Optional[WristPressFn] = None,
         object_xyz: Optional[ObjectPoseFn] = None,
         wrist_xyz: Optional[WristPoseFn] = None,
+        measure_hand: Optional[MeasureHandFn] = None,
     ) -> CloseRunResult:
         q_start, _, q_goal = _resolve_start_goal(req, profile)
         t0 = time.time()
         send_hand(q_goal)
         snap = contact.snapshot()
+        meas = measure_hand() if measure_hand else None
         steps = [
             make_step_log(
                 step=0,
@@ -84,6 +88,7 @@ class InstantRetargetExecutor(CloseExecutor):
                 snap=snap,
                 object_xyz=object_xyz,
                 wrist_xyz=wrist_xyz,
+                q_meas=meas,
             )
         ]
         return base_result(
@@ -115,38 +120,33 @@ class SlowOpenLoopExecutor(CloseExecutor):
         wrist_press: Optional[WristPressFn] = None,
         object_xyz: Optional[ObjectPoseFn] = None,
         wrist_xyz: Optional[WristPoseFn] = None,
+        measure_hand: Optional[MeasureHandFn] = None,
     ) -> CloseRunResult:
         q_start, _, q_goal = _resolve_start_goal(req, profile)
-        n_steps = max(1, int(req.close_steps))
-        dt = float(req.close_dt_s)
+        # B2 squeezes after shape; stop on real force-contact to avoid PhysX bounce-open.
+        stop = self._mode == ExecutorId.B2_SLOW_SQUEEZE
         t0 = time.time()
-        steps: list[CloseStepLog] = []
-        q_cmd = q_start.copy()
-
-        for i in range(n_steps):
-            alpha = float(i + 1) / float(n_steps)
-            q_cmd = (q_start + alpha * (q_goal - q_start)).astype(np.float32)
-            send_hand(q_cmd)
-            snap = contact.snapshot()
-            steps.append(
-                make_step_log(
-                    step=i,
-                    phase="approach",
-                    t0=t0,
-                    alpha=alpha,
-                    q=q_cmd,
-                    frozen=set(),
-                    snap=snap,
-                    object_xyz=object_xyz,
-                    wrist_xyz=wrist_xyz,
-                )
-            )
-            sleep_dt(dt)
+        q_cmd, steps = run_open_loop_approach(
+            q_start=q_start,
+            q_goal=q_goal,
+            contact=contact,
+            send_hand=send_hand,
+            n_steps=int(req.close_steps),
+            dt=float(req.close_dt_s),
+            phase="approach",
+            t0=t0,
+            object_xyz=object_xyz,
+            wrist_xyz=wrist_xyz,
+            measure_hand=measure_hand,
+            stop_on_contact=stop,
+            hold_frames=max(1, int(req.contact_hold_frames)),
+        )
 
         label = (
             "B1 slow → q_retarget"
             if self._mode == ExecutorId.B1_SLOW_RETARGET
             else "B2 slow → squeeze(q_retarget)"
+            + (" [stop_on_contact]" if stop else "")
         )
         return base_result(
             req,
@@ -181,6 +181,7 @@ class ContactGatedExecutor(CloseExecutor):
         wrist_press: Optional[WristPressFn] = None,
         object_xyz: Optional[ObjectPoseFn] = None,
         wrist_xyz: Optional[WristPoseFn] = None,
+        measure_hand: Optional[MeasureHandFn] = None,
     ) -> CloseRunResult:
         q_start, _, q_goal = _resolve_start_goal(req, profile)
         dt = float(req.close_dt_s)
@@ -194,6 +195,7 @@ class ContactGatedExecutor(CloseExecutor):
         do_wrist = self._mode == ExecutorId.B5_GATED_RAMP_WRIST
 
         t0 = time.time()
+        soft_stop_n = float(getattr(req, "soft_stop_force_n", 10.0) or 0.0)
         q_cmd, frozen, steps = run_gated_approach(
             q_start=q_start,
             q_goal=q_goal,
@@ -209,104 +211,184 @@ class ContactGatedExecutor(CloseExecutor):
             object_xyz=object_xyz,
             wrist_xyz=wrist_xyz,
             early_exit_fingers=min_fingers if do_ramp else None,
+            measure_hand=measure_hand,
+            soft_stop_force_n=soft_stop_n,
         )
+        soft_stopped = any(s.phase == "soft_stop" for s in steps)
 
         tip_map = getattr(profile, "tip_joint_indices", None) or {}
 
+        def _peak_force(snap) -> float:
+            mags = getattr(snap, "link_force_mag", None) or {}
+            return float(max(mags.values())) if mags else 0.0
+
         # --- B4/B5: uniform micro-ramp + tip boost on contacted fingers ---
-        if do_ramp:
+        if do_ramp and not soft_stopped:
             q_open = profile.open_hand_q()
             ramp_gain = float(max(0.0, req.ramp_amount))
             tip_boost = float(max(0.0, getattr(req, "tip_ramp_boost", 0.0)))
+
+            def _fill_ramp_target(fingers: set[str], dest: np.ndarray) -> None:
+                for finger in fingers:
+                    for idx in profile.finger_joint_indices.get(finger, ()):
+                        delta = float(q_goal[idx] - q_open[idx])
+                        gain = ramp_gain
+                        if idx in tip_map.get(finger, ()):
+                            gain = ramp_gain + tip_boost
+                        dest[idx] = float(q_goal[idx] + gain * delta)
+
             q_ramp = q_goal.copy()
-            for finger in frozen:
-                for idx in profile.finger_joint_indices.get(finger, ()):
-                    delta = float(q_goal[idx] - q_open[idx])
-                    gain = ramp_gain
-                    if idx in tip_map.get(finger, ()):
-                        gain = ramp_gain + tip_boost
-                    q_ramp[idx] = float(q_goal[idx] + gain * delta)
+            _fill_ramp_target(set(frozen), q_ramp)
 
             n_ramp = max(1, int(req.ramp_steps))
             q_ramp_start = q_cmd.copy()
+            # Pose locked when each finger freezes. Using global q_ramp_start for a
+            # finger that freezes mid-ramp snapped MCP/tips more open (接触后张开).
+            q_at_freeze = q_ramp_start.copy()
+            freeze_step: dict[str, int] = {f: 0 for f in frozen}
             hold_counts: dict[str, int] = {f: hold_frames for f in frozen}
             for j in range(n_ramp):
                 snap = contact.snapshot()
+                if soft_stop_n > 0.0 and _peak_force(snap) >= soft_stop_n:
+                    # Already gripping hard — hold; further curl causes open/close pulse.
+                    send_hand(q_cmd)
+                    meas = measure_hand() if measure_hand else None
+                    steps.append(
+                        make_step_log(
+                            step=len(steps),
+                            phase="soft_stop",
+                            t0=t0,
+                            alpha=float(j + 1) / float(n_ramp),
+                            q=q_cmd,
+                            frozen=set(frozen),
+                            snap=snap,
+                            object_xyz=object_xyz,
+                            wrist_xyz=wrist_xyz,
+                            q_meas=meas,
+                        )
+                    )
+                    soft_stopped = True
+                    break
+                prev_frozen = set(frozen)
                 frozen = update_freeze(
                     frozen,
                     snap,
                     hold_counts=hold_counts,
                     hold_frames=hold_frames,
                 )
-                alpha = float(j + 1) / float(n_ramp)
+                newly = frozen - prev_frozen
+                if newly:
+                    for finger in newly:
+                        freeze_step[finger] = j
+                        for idx in profile.finger_joint_indices.get(finger, ()):
+                            q_at_freeze[idx] = float(q_cmd[idx])
+                    _fill_ramp_target(newly, q_ramp)
+
+                alpha_global = float(j + 1) / float(n_ramp)
                 q_blend = q_ramp_start.copy()
                 for finger, idxs in profile.finger_joint_indices.items():
                     if finger in frozen:
+                        j0 = int(freeze_step.get(finger, 0))
+                        denom = max(1, n_ramp - j0)
+                        local_alpha = float(j - j0 + 1) / float(denom)
+                        local_alpha = float(min(1.0, max(0.0, local_alpha)))
+                        tips = set(tip_map.get(finger, ()))
                         for idx in idxs:
-                            # tip joints always blend toward ramp; MCP held
-                            tips = set(tip_map.get(finger, ()))
                             if freeze_mode == "keep_tip" and idx not in tips:
-                                q_blend[idx] = q_ramp_start[idx]
+                                q_blend[idx] = q_at_freeze[idx]
                             else:
-                                q_blend[idx] = (1.0 - alpha) * q_ramp_start[
+                                q_blend[idx] = (1.0 - local_alpha) * q_at_freeze[
                                     idx
-                                ] + alpha * q_ramp[idx]
+                                ] + local_alpha * float(q_ramp[idx])
                     else:
                         for idx in idxs:
-                            q_blend[idx] = (1.0 - alpha) * q_ramp_start[
+                            q_blend[idx] = (1.0 - alpha_global) * q_ramp_start[
                                 idx
-                            ] + alpha * q_goal[idx]
+                            ] + alpha_global * q_goal[idx]
                 q_cmd = q_blend.astype(np.float32)
                 send_hand(q_cmd)
+                meas = measure_hand() if measure_hand else None
                 steps.append(
                     make_step_log(
                         step=len(steps),
                         phase="ramp",
                         t0=t0,
-                        alpha=alpha,
+                        alpha=alpha_global,
                         q=q_cmd,
                         frozen=set(frozen),
                         snap=snap,
                         object_xyz=object_xyz,
                         wrist_xyz=wrist_xyz,
+                        q_meas=meas,
                     )
                 )
                 sleep_dt(dt)
 
-            # Tip-only pinch: extra DIP/IP curl (lime / grape scale)
+            # Tip-only pinch: extra DIP/IP curl (lime / grape scale).
+            # Skip when soft-stop already fired — apple logs showed tip_pinch
+            # pushing cmd while contact force fell 45 N → 0 (stable slip, not fly).
             n_pinch = max(0, int(getattr(req, "tip_pinch_steps", 0)))
             pinch_amt = float(max(0.0, getattr(req, "tip_pinch_amount", 0.0)))
-            if n_pinch > 0 and pinch_amt > 0.0 and frozen:
-                q_pinch = q_cmd.copy()
-                for finger in frozen:
-                    for idx in tip_map.get(finger, ()):
-                        delta = float(q_goal[idx] - q_open[idx])
-                        if abs(delta) < 1e-4:
-                            # no retarget curl — nudge toward squeeze goal anyway
-                            delta = float(q_goal[idx] - q_cmd[idx]) or 0.15
-                        q_pinch[idx] = float(q_cmd[idx] + pinch_amt * delta)
-                q_pinch_start = q_cmd.copy()
-                for j in range(n_pinch):
-                    alpha = float(j + 1) / float(n_pinch)
-                    q_cmd = (
-                        (1.0 - alpha) * q_pinch_start + alpha * q_pinch
-                    ).astype(np.float32)
-                    send_hand(q_cmd)
-                    snap = contact.snapshot()
-                    steps.append(
-                        make_step_log(
-                            step=len(steps),
-                            phase="tip_pinch",
-                            t0=t0,
-                            alpha=alpha,
-                            q=q_cmd,
-                            frozen=set(frozen),
-                            snap=snap,
-                            object_xyz=object_xyz,
-                            wrist_xyz=wrist_xyz,
+            if (
+                n_pinch > 0
+                and pinch_amt > 0.0
+                and frozen
+                and not soft_stopped
+            ):
+                snap0 = contact.snapshot()
+                if soft_stop_n > 0.0 and _peak_force(snap0) >= soft_stop_n:
+                    soft_stopped = True
+                else:
+                    q_pinch = q_cmd.copy()
+                    for finger in frozen:
+                        for idx in tip_map.get(finger, ()):
+                            delta = float(q_goal[idx] - q_open[idx])
+                            if abs(delta) < 1e-4:
+                                delta = float(q_goal[idx] - q_cmd[idx]) or 0.15
+                            q_pinch[idx] = float(q_cmd[idx] + pinch_amt * delta)
+                    q_pinch_start = q_cmd.copy()
+                    for j in range(n_pinch):
+                        snap = contact.snapshot()
+                        if soft_stop_n > 0.0 and _peak_force(snap) >= soft_stop_n:
+                            send_hand(q_cmd)
+                            meas = measure_hand() if measure_hand else None
+                            steps.append(
+                                make_step_log(
+                                    step=len(steps),
+                                    phase="soft_stop",
+                                    t0=t0,
+                                    alpha=float(j + 1) / float(n_pinch),
+                                    q=q_cmd,
+                                    frozen=set(frozen),
+                                    snap=snap,
+                                    object_xyz=object_xyz,
+                                    wrist_xyz=wrist_xyz,
+                                    q_meas=meas,
+                                )
+                            )
+                            soft_stopped = True
+                            break
+                        alpha = float(j + 1) / float(n_pinch)
+                        q_cmd = (
+                            (1.0 - alpha) * q_pinch_start + alpha * q_pinch
+                        ).astype(np.float32)
+                        send_hand(q_cmd)
+                        meas = measure_hand() if measure_hand else None
+                        steps.append(
+                            make_step_log(
+                                step=len(steps),
+                                phase="tip_pinch",
+                                t0=t0,
+                                alpha=alpha,
+                                q=q_cmd,
+                                frozen=set(frozen),
+                                snap=snap,
+                                object_xyz=object_xyz,
+                                wrist_xyz=wrist_xyz,
+                                q_meas=meas,
+                            )
                         )
-                    )
-                    sleep_dt(dt)
+                        sleep_dt(dt)
 
         # --- B5: wrist micro-press ---
         wrist_msg = ""
@@ -317,6 +399,7 @@ class ContactGatedExecutor(CloseExecutor):
                 try:
                     wrist_press(float(req.wrist_press_m))
                     snap = contact.snapshot()
+                    meas = measure_hand() if measure_hand else None
                     steps.append(
                         make_step_log(
                             step=len(steps),
@@ -328,6 +411,7 @@ class ContactGatedExecutor(CloseExecutor):
                             snap=snap,
                             object_xyz=object_xyz,
                             wrist_xyz=wrist_xyz,
+                            q_meas=meas,
                         )
                     )
                     wrist_msg = f" + wrist_press={req.wrist_press_m:.3f}m"
@@ -339,6 +423,7 @@ class ContactGatedExecutor(CloseExecutor):
             ExecutorId.B4_GATED_RAMP: "B4 gate + ramp + tip_pinch",
             ExecutorId.B5_GATED_RAMP_WRIST: "B5 gate + ramp + wrist",
         }
+        stop_msg = " [soft_stop]" if soft_stopped else ""
         return base_result(
             req,
             profile,
@@ -347,5 +432,5 @@ class ContactGatedExecutor(CloseExecutor):
             q_final=q_cmd,
             steps=steps,
             ok=True,
-            message=labels.get(self._mode, self.id) + wrist_msg,
+            message=labels.get(self._mode, self.id) + wrist_msg + stop_msg,
         )

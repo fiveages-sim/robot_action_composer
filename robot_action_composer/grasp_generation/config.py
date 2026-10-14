@@ -32,7 +32,7 @@ class GraspGenerationConfig:
     camera_prim: str = (
         "/World/FiveAges_W2/Head_V1/head_link2/head_camera/head_camera"
     )
-    base_prim: str = "/World/FiveAges_W2/LinkHou_S2/base_footprint/base_link"
+    base_prim: str = "/World/FiveAges_W2/base_link"
     rgb_topic: str = "/head_camera/rgb"
     depth_topic: str = "/head_camera/depth"
     info_topic: str = "/head_camera/camera_info"
@@ -60,7 +60,7 @@ class GraspGenerationConfig:
     squeeze_amount: float = 0.5
     # Extra gain on thumb_cmc_abd when amplifying (deepen opposition along retarget sign).
     thumb_abd_boost: float = 1.25
-    # Close-phase executor (B0–B5). See docs/CLOSE_EXECUTORS.md
+    # Close-phase executor (B0–B5). Labels: execution/executors EXECUTOR_HELP_MD.
     close_executor: str = "B4"
     close_steps: int = 40
     close_dt_s: float = 0.04
@@ -73,7 +73,11 @@ class GraspGenerationConfig:
     tip_ramp_boost: float = 0.35
     tip_pinch_steps: int = 12
     tip_pinch_amount: float = 0.25
+    # Hold pose when any contact wrench exceeds this (N); skip leftover ramp/pinch.
+    soft_stop_force_n: float = 15.0
     wrist_press_m: float = 0.008
+    # After close: hold closed q (no further squeeze) before settle/lift.
+    post_close_firm_s: float = 2.0
     wrist_press_axis: str = "tip_neg_z"  # tip_neg_z | tip_z | world_neg_z
     # Close: recompute retarget → open-loop MANO shape → settle → executor
     auto_retarget_on_close: bool = True
@@ -83,17 +87,21 @@ class GraspGenerationConfig:
     shape_use_contact_gate: bool = False
     # World +Z lift before shape/close (table clearance for small objects)
     pre_close_lift_m: float = 0.015
-    # Ignore these partner substrings when gating (desk / ground)
+    # Stage settles (运控手 MOVEJ / target_command open 需要时间，避免 home 来回切)
+    fsm_hand_settle_s: float = 0.3  # after FSM OCS2 before hand open
+    hand_open_settle_s: float = 0.5  # after target_command(1) → home_1
+    post_wrist_settle_s: float = 0.4  # after wrist arrive, before shape
+    pre_shape_settle_s: float = 0.3  # inside run_close before first finger cmd
+    # Ignore these partner substrings when gating (desk / ground / self).
+    # Never include ``default_environment`` or bare ``table`` — props live under
+    # ``.../default_environment/EastRural_Table/sm_*`` and would be discarded.
     ignore_contact_partners: list[str] = field(
         default_factory=lambda: [
             "ground",
             "GroundPlane",
             "defaultGroundPlane",
-            "default_environment",
-            "table",
-            "desk",
+            "TableTop",
             "floor",
-            "Plane",
         ]
     )
     # If object_frame set, warn when object moves more than this (m)
@@ -102,6 +110,8 @@ class GraspGenerationConfig:
     contact_topic_prefix: str = ""
     use_contact_bool: bool = True
     force_mag_threshold_n: float = 0.0
+    # After MANO shape, scale B2 open-loop squeeze only (B3–B5 ignore; see runner).
+    post_shape_squeeze_scale: float = 1.0
     always_log_contact: bool = True
     # Optional TF frame for object Δpose logging (empty → skip)
     object_frame: str = ""

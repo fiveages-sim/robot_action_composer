@@ -15,9 +15,11 @@ _FINGER_JOINTS = {
     "pinky": (16, 17, 18, 19),
 }
 
-# Keep curling these after contact (MCP frozen) — wraps lime-sized objects.
+# Keep curling these after contact (proximal frozen) — wraps lime-sized objects.
+# Thumb: only IP. Including MCP here kept squeezing into the apple after contact
+# (~45 N) → object pop → visual open-then-reclose.
 _TIP_JOINTS = {
-    "thumb": (2, 3),  # mcp + ip
+    "thumb": (3,),  # ip only (freeze cmc_flex/abd + mcp)
     "index": (6, 7),  # pip + dip
     "middle": (10, 11),
     "ring": (14, 15),

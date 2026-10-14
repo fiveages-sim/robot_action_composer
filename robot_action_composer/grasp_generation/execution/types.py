@@ -71,13 +71,17 @@ class CloseStepLog:
     phase: str  # approach | ramp | wrist | done
     t_sec: float
     alpha: float
-    q: list[float]
+    q: list[float]  # commanded
     frozen_fingers: list[str]
     contact: dict[str, bool]
     any_contact: bool
     force_mag: dict[str, float] = field(default_factory=dict)
     object_xyz: Optional[list[float]] = None
     wrist_xyz: Optional[list[float]] = None
+    # Measured /joint_states (if available) — compare to q to see PhysX bounce.
+    q_meas: Optional[list[float]] = None
+    # Non-empty partner paths that passed ignore filter (debug false contact).
+    contact_partners: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -135,6 +139,9 @@ class CloseRequest:
     tip_ramp_boost: float = 0.35  # extra curl on tip joints during ramp
     tip_pinch_steps: int = 12  # post-ramp tip-only curl (small objects)
     tip_pinch_amount: float = 0.25
+    # Abort further ramp/pinch when any contact link exceeds this (N).
+    # Prevents over-squeeze → object pop → visual open-then-reclose.
+    soft_stop_force_n: float = 15.0
     # B5 wrist
     wrist_press_m: float = 0.008
     # optional object frame for Δpose (empty → skip)

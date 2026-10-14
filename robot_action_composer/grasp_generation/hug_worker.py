@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     out = {
         "T_camera_wrist": prop.T_camera_wrist.tolist(),
         "landmarks_3d": prop.landmarks_3d.tolist(),
+        "landmarks_2d": prop.landmarks_2d.tolist(),
         "click_uv_224": list(prop.click_uv_224),
         "depth_at_click_m": prop.depth_at_click_m,
         "camera_K_224": prop.camera_K_224.tolist(),

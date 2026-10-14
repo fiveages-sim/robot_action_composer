@@ -237,6 +237,17 @@ def run_auto_grasp(
             composer_root=composer_root,
         )
 
+        # Debug dump: RGB + purple UV + green MANO (no Viser needed).
+        try:
+            from .dump_hug_debug import dump_hug_debug_from_capture
+
+            debug_meta = dump_hug_debug_from_capture(
+                capture_dir, proposal_path=proposal_path
+            )
+            close_summary["hug_debug"] = debug_meta
+        except Exception as exc:
+            print(f"[auto_grasp] WARN hug_debug dump: {exc}")
+
         _check_cancel()
         T, meta = load_proposal_T_camera_wrist(proposal_path)
         plan = plan_wrist_from_proposal(
@@ -251,53 +262,78 @@ def run_auto_grasp(
 
         if dry_run:
             send_wrist_plan(
-                interface, plan, execute=False, arrival_timeout=cfg.arrival_timeout
+                interface,
+                plan,
+                execute=False,
+                arrival_timeout=cfg.arrival_timeout,
+                cfg=cfg,
             )
             return _partial(
                 ok=True, message="dry_run OK (propose + dry plan; no move/close)"
             )
 
+        arm = (cfg.arm or "right").lower()
+        q_ret: list[float] | None = None
+
         if execute:
             from .home import require_arm_handler
 
             require_arm_handler(interface, cfg.arm or "right")
-            # Open fingers before approach (leftover curl looks like fake close-open).
-            from .retarget.pipeline import run_open_hand
+            # Retarget compute only (no send). Wrist path holds current fingers after
+            # OCS2 so hand MOVEJ does not replay a stale fist — do not inject open_hand.
+            if do_close:
+                from .execution import ensure_q_retarget
 
-            arm_open = (cfg.arm or "right").lower()
-            if arm_open in ("left", "right"):
-                _status(status, f"Open {arm_open} hand before wrist approach ...")
-                run_open_hand(arm=arm_open, interface=interface)  # type: ignore[arg-type]
+                _check_cancel()
+                _status(status, "Retarget (compute q, no send) ...")
+                q_ret = ensure_q_retarget(
+                    cfg=cfg,
+                    workspace=workspace,
+                    proposal_path=proposal_path,
+                    arm=arm,
+                    force_recompute=True,
+                )
 
         _check_cancel()
-        _status(status, f"{'EXECUTE' if execute else 'DRY'} move wrist ...")
+        _status(status, f"{'EXECUTE' if execute else 'DRY'} move wrist (hand stays open) ...")
         info = send_wrist_plan(
             interface,
             plan,
             execute=bool(execute),
             arrival_timeout=cfg.arrival_timeout,
+            cfg=cfg,
         )
 
         if do_close and execute:
             from .execution import ensure_q_retarget, run_close
 
             _check_cancel()
-            arm = (cfg.arm or "right").lower()
             eid = str(getattr(cfg, "close_executor", "B4") or "B4").upper()
-            _status(status, f"Close {eid} (retarget → shape → grasp) ...")
-            q_ret = ensure_q_retarget(
-                cfg=cfg,
-                workspace=workspace,
-                proposal_path=proposal_path,
-                arm=arm,
-                force_recompute=True,
-            )
+            if q_ret is None:
+                q_ret = ensure_q_retarget(
+                    cfg=cfg,
+                    workspace=workspace,
+                    proposal_path=proposal_path,
+                    arm=arm,
+                    force_recompute=True,
+                )
+            # Let wrist settle; keep fingers open — do not toggle home_2/home_3 here.
+            post_wrist = float(getattr(cfg, "post_wrist_settle_s", 0.4) or 0.0)
+            if post_wrist > 0:
+                _status(status, f"Wrist settled; wait {post_wrist:.1f}s before shape ...")
+                time.sleep(post_wrist)
+            _status(status, f"Close {eid} (shape → grasp) ...")
             _check_cancel()
+            # Match manual Close: start from measured open pose after wrist.
+            from .retarget.pipeline import read_hand_q, send_hand_q
+
+            q_start = read_hand_q(interface, arm)
             result = run_close(
                 cfg=cfg,
                 interface=interface,
                 q_retarget=q_ret,
                 arm=arm,
+                q_start=q_start,
                 squeeze_amount=float(cfg.squeeze_amount),
                 executor_id=eid,
                 last_plan=plan,
@@ -306,32 +342,49 @@ def run_auto_grasp(
                 log=True,
                 do_shape_phase=bool(getattr(cfg, "auto_retarget_on_close", True)),
             )
+            hug_dbg = close_summary.get("hug_debug")
             close_summary = (
                 result.summary_row()
                 if hasattr(result, "summary_row")
                 else {"ok": result.ok, "message": result.message}
             )
+            if hug_dbg is not None:
+                close_summary["hug_debug"] = hug_dbg
             if not result.ok:
                 return _partial(ok=False, message=f"close failed: {result.message}")
+
+            # Keep commanding closed after soft_stop. Idle without re-send → yield-open.
+            # Do NOT blend toward q_goal here — post-contact squeeze/tip_pinch/firm-up
+            # toward goal reintroduced 抓取过程中张开.
+            q_hold = [float(x) for x in result.q_final]
+            send_hand_q(interface, arm, q_hold)
+
+            def _hold_closed(duration_s: float, *, label: str) -> None:
+                remaining = float(duration_s)
+                if remaining <= 1e-6:
+                    return
+                _status(status, f"{label} ({remaining:.1f}s, holding closed q) ...")
+                while remaining > 1e-6:
+                    _check_cancel()
+                    send_hand_q(interface, arm, q_hold)
+                    step = min(0.1, remaining)
+                    time.sleep(step)
+                    remaining -= step
+
+            firm_s = float(getattr(cfg, "post_close_firm_s", 1.0) or 0.0)
+            if firm_s > 1e-6:
+                _hold_closed(firm_s, label="Firm hold (closed q)")
+                close_summary["post_close_firm_s"] = firm_s
 
             if bool(getattr(cfg, "post_grasp_lift", True)):
                 from .home import lift_ee_world_z
 
                 settle = float(getattr(cfg, "post_grasp_settle_s", 1.5))
-                if settle > 0:
-                    _status(
-                        status,
-                        f"Waiting {settle:.1f}s for fingers to settle before lift ...",
-                    )
-                    remaining = settle
-                    while remaining > 1e-6:
-                        _check_cancel()
-                        step = min(0.2, remaining)
-                        time.sleep(step)
-                        remaining -= step
+                _hold_closed(settle, label="Post-grasp settle")
                 lift_m = float(getattr(cfg, "post_grasp_lift_m", 0.20))
                 _check_cancel()
                 _status(status, f"Post-grasp lift +Z {lift_m:.2f}m (verify grasp) ...")
+                send_hand_q(interface, arm, q_hold)
                 lift_info = lift_ee_world_z(
                     interface,
                     arm=arm,
@@ -340,8 +393,11 @@ def run_auto_grasp(
                     arrival_timeout=float(cfg.arrival_timeout),
                     last_plan=plan,
                 )
+                send_hand_q(interface, arm, q_hold)
                 close_summary["post_grasp_lift"] = lift_info
                 close_summary["post_grasp_settle_s"] = settle
+            else:
+                _hold_closed(0.5, label="Hold closed")
 
         return _partial(ok=True, message="auto grasp OK")
     except Exception as exc:

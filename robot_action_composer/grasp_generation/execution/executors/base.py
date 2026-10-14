@@ -17,6 +17,7 @@ SendHandFn = Callable[[Sequence[float]], None]
 WristPressFn = Callable[[float], None]  # press_m along tip approach
 ObjectPoseFn = Callable[[], Optional[list[float]]]
 WristPoseFn = Callable[[], Optional[list[float]]]
+MeasureHandFn = Callable[[], Optional[Sequence[float]]]
 
 
 class CloseExecutor(ABC):
@@ -35,6 +36,7 @@ class CloseExecutor(ABC):
         wrist_press: Optional[WristPressFn] = None,
         object_xyz: Optional[ObjectPoseFn] = None,
         wrist_xyz: Optional[WristPoseFn] = None,
+        measure_hand: Optional[MeasureHandFn] = None,
     ) -> CloseRunResult:
         ...
 
@@ -122,6 +124,8 @@ def run_gated_approach(
     object_xyz: Optional[ObjectPoseFn] = None,
     wrist_xyz: Optional[WristPoseFn] = None,
     early_exit_fingers: Optional[int] = None,
+    measure_hand: Optional[MeasureHandFn] = None,
+    soft_stop_force_n: float = 0.0,
 ) -> tuple[np.ndarray, set[str], list[CloseStepLog]]:
     """Contact-gated interpolate ``q_start → q_goal`` (retarget or squeeze)."""
     n_steps = max(1, int(n_steps))
@@ -130,6 +134,7 @@ def run_gated_approach(
     q_cmd = q_start.copy()
     q_hold = q_start.copy()
     steps: list[CloseStepLog] = []
+    soft_n = float(soft_stop_force_n or 0.0)
 
     for i in range(n_steps):
         snap = contact.snapshot()
@@ -139,6 +144,36 @@ def run_gated_approach(
             hold_counts=hold_counts,
             hold_frames=hold_frames,
         )
+        # Soft-stop: freeze contacting fingers and abort approach (skip ramp /
+        # tip_pinch). Continuing to wrap after high force reintroduced the
+        # open-then-reclose pulse; firmness comes from shape squeeze + hold.
+        if soft_n > 0.0:
+            mags = snap.link_force_mag or {}
+            peak = float(max(mags.values())) if mags else 0.0
+            if peak >= soft_n:
+                for finger, touching in snap.finger_in_contact.items():
+                    if touching:
+                        frozen.add(finger)
+                for finger in list(frozen):
+                    for idx in profile.finger_joint_indices.get(finger, ()):
+                        q_hold[idx] = q_cmd[idx]
+                send_hand(q_cmd)
+                meas = measure_hand() if measure_hand else None
+                steps.append(
+                    make_step_log(
+                        step=step_offset + i,
+                        phase="soft_stop",
+                        t0=t0,
+                        alpha=float(i + 1) / float(n_steps),
+                        q=q_cmd,
+                        frozen=set(frozen),
+                        snap=snap,
+                        object_xyz=object_xyz,
+                        wrist_xyz=wrist_xyz,
+                        q_meas=meas,
+                    )
+                )
+                break
         alpha = float(i + 1) / float(n_steps)
         mask = finger_mask(profile, frozen, freeze_mode=freeze_mode)
         for finger in frozen:
@@ -149,6 +184,7 @@ def run_gated_approach(
                 q_hold[idx] = q_cmd[idx]
         q_cmd = lerp_q(q_start, q_goal, alpha, mask=mask, hold=q_hold)
         send_hand(q_cmd)
+        meas = measure_hand() if measure_hand else None
         steps.append(
             make_step_log(
                 step=step_offset + i,
@@ -160,6 +196,7 @@ def run_gated_approach(
                 snap=snap,
                 object_xyz=object_xyz,
                 wrist_xyz=wrist_xyz,
+                q_meas=meas,
             )
         )
         sleep_dt(dt)
@@ -182,16 +219,29 @@ def run_open_loop_approach(
     step_offset: int = 0,
     object_xyz: Optional[ObjectPoseFn] = None,
     wrist_xyz: Optional[WristPoseFn] = None,
+    measure_hand: Optional[MeasureHandFn] = None,
+    stop_on_contact: bool = False,
+    hold_frames: int = 2,
 ) -> tuple[np.ndarray, list[CloseStepLog]]:
-    """Open-loop interpolate (no freeze) — used for MANO shape retarget."""
+    """Open-loop interpolate — used for MANO shape; optional soft contact stop."""
     n_steps = max(1, int(n_steps))
     q_cmd = q_start.copy()
     steps: list[CloseStepLog] = []
+    hold_counts: dict[str, int] = {}
+    frozen: set[str] = set()
     for i in range(n_steps):
         alpha = float(i + 1) / float(n_steps)
         q_cmd = lerp_q(q_start, q_goal, alpha)
         send_hand(q_cmd)
         snap = contact.snapshot()
+        if stop_on_contact:
+            frozen = update_freeze(
+                frozen,
+                snap,
+                hold_counts=hold_counts,
+                hold_frames=hold_frames,
+            )
+        meas = measure_hand() if measure_hand else None
         steps.append(
             make_step_log(
                 step=step_offset + i,
@@ -199,13 +249,16 @@ def run_open_loop_approach(
                 t0=t0,
                 alpha=alpha,
                 q=q_cmd,
-                frozen=set(),
+                frozen=set(frozen),
                 snap=snap,
                 object_xyz=object_xyz,
                 wrist_xyz=wrist_xyz,
+                q_meas=meas,
             )
         )
         sleep_dt(dt)
+        if stop_on_contact and frozen:
+            break
     return q_cmd, steps
 
 
@@ -256,9 +309,19 @@ def make_step_log(
     snap: ContactSnapshot,
     object_xyz: Optional[ObjectPoseFn],
     wrist_xyz: Optional[WristPoseFn],
+    q_meas: Optional[Sequence[float]] = None,
 ) -> CloseStepLog:
     ox = object_xyz() if object_xyz else None
     wx = wrist_xyz() if wrist_xyz else None
+    partners: dict[str, list[str]] = {}
+    raw = getattr(snap, "link_partners", None) or {}
+    if isinstance(raw, dict):
+        for link, paths in raw.items():
+            if paths:
+                partners[str(link)] = [str(p) for p in paths]
+    meas = None
+    if q_meas is not None:
+        meas = [float(x) for x in list(q_meas)]
     return CloseStepLog(
         step=step,
         phase=phase,
@@ -271,4 +334,6 @@ def make_step_log(
         force_mag={k: float(v) for k, v in snap.link_force_mag.items()},
         object_xyz=ox,
         wrist_xyz=wx,
+        q_meas=meas,
+        contact_partners=partners,
     )

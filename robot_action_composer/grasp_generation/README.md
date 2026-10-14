@@ -13,10 +13,11 @@ Hard-dep free: composer installs without HUG.
 | ``objects`` / ``privileged_pose`` / ``project_uv`` / ``auto_grasp`` | Sim-privilege select → UV → auto (table layout unchanged) |
 | ``service`` | Viser: manual click path + **Privileged auto** folder |
 
-Docs:
+文档（中文为主）：
 
-- [docs/GRASP_GENERATION.md](../../docs/GRASP_GENERATION.md)
-- [docs/CLOSE_EXECUTORS.md](../../docs/CLOSE_EXECUTORS.md)
+- [docs/GRASP_GENERATION.md](../../docs/GRASP_GENERATION.md) — CLI / Viser / **MANO·Retarget·Execute 替换接口** / 仿真环境
+- [docs/CLOSE_EXECUTORS.md](../../docs/CLOSE_EXECUTORS.md) — B0–B5（**B2≠B4**）、参数表、接触话题
+- 任务 skill **`dex_hand.auto_grasp`**：[docs/SKILLS_REFERENCE.md](../../docs/SKILLS_REFERENCE.md) §3b
 
 ```bash
 pip install -e ".[grasp]"

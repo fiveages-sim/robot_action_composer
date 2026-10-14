@@ -178,6 +178,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip B4 close even when --execute",
     )
 
+    p_dbg = sub.add_parser(
+        "dump-hug-debug",
+        help="Save RGB + purple UV + green MANO overlay from a capture dir",
+    )
+    _add_common(p_dbg)
+    p_dbg.add_argument(
+        "--from-dir",
+        type=str,
+        default=None,
+        help="Capture folder (default: cfg capture_dir)",
+    )
+    p_dbg.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Output folder (default: <from-dir>/hug_debug)",
+    )
+    p_dbg.add_argument("--proposal", type=str, default=None)
+
     return parser.parse_args(argv)
 
 
@@ -452,6 +471,24 @@ def main(argv: list[str] | None = None) -> None:
             do_close=not bool(args.no_close),
         )
         raise SystemExit(code)
+
+    if args.command == "dump-hug-debug":
+        from robot_action_composer.grasp_generation.dump_hug_debug import (
+            dump_hug_debug_from_capture,
+        )
+
+        from_dir = (
+            Path(args.from_dir)
+            if args.from_dir
+            else cfg.resolved_capture_dir(workspace)
+        )
+        meta = dump_hug_debug_from_capture(
+            from_dir,
+            out_dir=Path(args.out_dir) if args.out_dir else None,
+            proposal_path=Path(args.proposal) if args.proposal else None,
+        )
+        print(json.dumps(meta, indent=2))
+        raise SystemExit(0)
 
     raise SystemExit(f"unknown command {args.command}")
 

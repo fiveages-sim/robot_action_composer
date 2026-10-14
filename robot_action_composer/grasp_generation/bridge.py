@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -223,10 +224,16 @@ def send_wrist_plan(
     *,
     execute: bool,
     arrival_timeout: float = 8.0,
+    cfg: Any = None,
+    fsm_hand_settle_s: float | None = None,
+    hand_open_settle_s: float | None = None,
 ) -> dict[str, Any]:
     """Dry-run or ``send_target_stamped`` + ``wait_until_arrive``.
 
     Dry-run does **not** require a live arm handler (plan-only).
+
+    On execute: FSM OCS2 → settle → ``ensure_hand_open`` (运控 target_command) →
+    wrist move. Hands stay fully open through the approach.
     """
     info: dict[str, Any] = {
         "execute": execute,
@@ -253,13 +260,37 @@ def send_wrist_plan(
     from .home import require_arm_handler
 
     handler = require_arm_handler(interface, plan.arm)
-    # Best-effort: ensure OCS2 before cartesian (after STOP/PLAY / FSM HOME).
+    # 运控约定（与 RViz OCS2FSMPanel / GripperControlPanel 一致）：
+    #   /fsm_command 全局 — 臂 OCS2(3) ⇒ 手也进 MOVEJ；手非 MOVEJ 时
+    #   target_command / target_joint_position 会被丢弃。
+    # 期望：OCS2 → 等手进 MOVEJ → target_command open(home_1) → 保持张开 → 跟腕。
+    # 不要在跟腕前 snap home_2/home_3 或关节归零来回切。
+    if fsm_hand_settle_s is None:
+        fsm_hand_settle_s = float(getattr(cfg, "fsm_hand_settle_s", 0.3) or 0.3)
+    if hand_open_settle_s is None:
+        hand_open_settle_s = float(getattr(cfg, "hand_open_settle_s", 0.5) or 0.5)
+    fsm_settle = float(fsm_hand_settle_s)
+    open_settle = float(hand_open_settle_s)
     try:
         from ros2_robot_interface import FSM_OCS2
 
         interface.send_fsm_command(FSM_OCS2)
+        if fsm_settle > 0:
+            time.sleep(fsm_settle)
     except Exception as exc:
         print(f"[bridge] WARN could not send FSM_OCS2 before wrist: {exc}")
+    try:
+        from .retarget.pipeline import ensure_hand_open
+
+        if not ensure_hand_open(
+            interface, plan.arm, settle_s=open_settle  # type: ignore[arg-type]
+        ):
+            print(
+                "[bridge] WARN could not open hand after OCS2; "
+                "check robot_profile open_config→home_1 and MOVEJ state"
+            )
+    except Exception as exc:
+        print(f"[bridge] WARN ensure_hand_open after OCS2: {exc}")
     handler.send_target_stamped(plan.motion_frame_id, plan.wrist_pose)
     part = "right_arm" if plan.arm == "right" else "left_arm"
     result = interface.wait_until_arrive(part=part, timeout=arrival_timeout)

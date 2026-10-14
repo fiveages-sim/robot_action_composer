@@ -427,10 +427,15 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
     - `object_prim_path`（`str`）：目标物体 Prim 路径。
     - `object_key`（`str`）：从任务 `objects` / `.meta/objects` 解析 prim（与 prim 二选一；显式 prim 优先）。不回退 `active_object`。
   - **目标位姿配置**
-    - `approach_offset_x`（`float`，默认 `-0.20`）：导航点 X 偏移（米）。
-    - `approach_offset_y`（`float`，默认 `0.0`）：导航点 Y 偏移（米）。
-    - `yaw`（`float`，默认 `0.0`）：目标偏航（弧度）。
-    - `frame_id`（`str`，默认 `map`）：目标坐标系。
+    - `approach_offset_x`（`float`，默认 `-0.20`）：导航点相对物体的**世界系** X 偏移（米）。
+    - `approach_offset_y`（`float`，默认 `0.0`）：世界系 Y 偏移（米）。
+    - `yaw`（`float`，默认 `0.0`）：到达时世界系偏航（弧度）。
+    - `frame_id`（`str`，默认 `map`）：接近点如何换成 Nav2 目标。
+      - `map`：世界接近点直接当 map 目标（仓库等「出生点≈世界原点」）。
+      - `base_footprint` / `base_link` / `odom_relative`：世界接近点 → 机体系 `(dx,dy,dyaw)`，
+        再以 **`map`（Isaac GT 下即 odom 相对坐标）** 发给 Nav2。
+        车不在世界原点时（如 x=-2）必须用这个；不要让 Nav2 去变换 `base_footprint` 目标
+        （sim/wall 时钟不一致会 ABORT status=6）。
   - **执行控制**
     - `timeout`（`float`，默认 `60.0`）：最大等待时间（秒）。
     - `poll_period`（`float`，默认 `0.1`）：轮询周期（秒）。
@@ -448,6 +453,38 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
   - **执行控制**
     - `timeout`（`float`，默认 `60.0`）：最大等待时间（秒）。
     - `poll_period`（`float`，默认 `0.1`）：轮询周期（秒）。
+
+---
+
+## 3b. 灵巧手技能（`dex_hand.*`）
+
+与夹爪 `single_arm.pick` 不同：本技能走 **HUG + 特权 UV + retarget close**，复用 `grasp_generation` 库（与 Viser / `grasp-generation auto` 同一套）。手/相机/MANO 映射写在 `robots/<Robot>/grasp_generation.yaml`，**不在**任务 YAML 重复。详见 [`GRASP_GENERATION.md`](GRASP_GENERATION.md)。
+
+### 3b.1 `dex_hand.auto_grasp`
+
+- **效果**：特权选物 → 头相机采帧 → UV → HUG propose → 跟腕 →（可选）retarget close。**不**清场、不移动桌面道具。成功时把摘要写入 `ctx.scratch["dex_hand.last_auto_grasp"]`；无笛卡尔 `StageTarget`（内部直接用 `ctx.interface`）。
+- **参数**：
+  - **机器人 / 工作区**
+    - `robot_key`（`str`）：`robots/<key>/grasp_generation.yaml`；workspace 下仅一台时可省略。
+    - `workspace`（`str`）：含 `robots/` 的根（默认 `cwd`，通常 `examples/IsaacSim`）。
+  - **目标物体**（二选一或组合）
+    - `object_key`（`str`）：`grasp_objects` 键（如 `apple`）。
+    - `pose_prim` / `placement_prim` / `click_prim` / `click_offset`：任务级覆盖或内联新建条目（无 `object_key` 时用 `_task_inline`）。
+  - **可选覆盖 yaml**
+    - `arm`、`close_executor`、`squeeze_amount`
+  - **执行控制**
+    - `dry_run`（`bool`，默认 `false`）：只 propose + dry plan，不动臂。
+    - `do_close`（`bool`，默认 `true`）：`false` 则只跟腕不合手。
+- **备注**：常与 `nav.navigate_to_object` 串联；demo 见 `examples/IsaacSim/robots/FiveAges_W2/task_configs/dex_hand/navigate_and_dex_grasp.yaml`。
+- **YAML 示例**：
+  ```yaml
+  - skill: nav.navigate_to_object
+    id: nav_to_pick
+  - skill: dex_hand.auto_grasp
+    params:
+      robot_key: fiveages_w2
+      object_key: apple
+  ```
 
 ---
 

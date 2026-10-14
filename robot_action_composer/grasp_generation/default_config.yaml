@@ -12,7 +12,7 @@ camera_frames:
   - head_link2
 
 camera_prim: /World/FiveAges_W2/Head_V1/head_link2/head_camera/head_camera
-base_prim: /World/FiveAges_W2/LinkHou_S2/base_footprint/base_link
+base_prim: /World/FiveAges_W2/base_link
 
 rgb_topic: /head_camera/rgb
 depth_topic: /head_camera/depth
@@ -51,6 +51,8 @@ ramp_amount: 0.18
 tip_ramp_boost: 0.35
 tip_pinch_steps: 12
 tip_pinch_amount: 0.25
+soft_stop_force_n: 15.0
+post_close_firm_s: 2.0
 wrist_press_m: 0.008
 wrist_press_axis: tip_neg_z
 auto_retarget_on_close: true
@@ -58,15 +60,15 @@ shape_steps: 30
 shape_settle_s: 0.5
 shape_use_contact_gate: false
 pre_close_lift_m: 0
+# B2 only (after shape). B3–B5 ignore — their mechanism is gate/ramp, not open-loop squeeze.
+post_shape_squeeze_scale: 1.0
 ignore_contact_partners:
+  # Do NOT list default_environment / bare table — apple/bottle paths contain them.
   - ground
   - GroundPlane
   - defaultGroundPlane
-  - default_environment
-  - table
-  - desk
+  - TableTop
   - floor
-  - Plane
 object_push_warn_m: 0.015
 contact_topic_prefix: ""
 use_contact_bool: true

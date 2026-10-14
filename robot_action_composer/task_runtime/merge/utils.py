@@ -62,15 +62,21 @@ def reset_settle_entity_path_from_queue(
     objects: Mapping[str, Mapping[str, Any]] | None = None,
     active_object: str | None = None,
 ) -> str:
-    """首个 ``single_arm.pick`` 块若覆写 prim/object_key 则用之，否则用 ``task_cfg.pick`` 默认。"""
+    """Settle prim for Isaac reset：优先 ``single_arm.pick``，否则首个带物体路径的 ``nav.navigate_to_object``。
+
+    无夹爪 pick 的任务（如 ``nav.*`` + ``dex_hand.auto_grasp``）仍需一个 prim 做 reset/settle。
+    """
     from robot_action_composer.task_runtime.object_binding import resolve_object_prim_path
     from robot_action_composer.task_runtime.types import BlockSpec
 
     base = _default_pick_source_path(
         task_cfg, objects=objects, active_object=active_object
     )
+    nav_fallback = ""
     for s in iter_leaf_block_specs(specs):
-        if isinstance(s, BlockSpec) and s.skill == "single_arm.pick":
+        if not isinstance(s, BlockSpec):
+            continue
+        if s.skill == "single_arm.pick":
             p = dict(s.params)
             resolved = resolve_object_prim_path(
                 p,
@@ -83,5 +89,16 @@ def reset_settle_entity_path_from_queue(
             if resolved:
                 return resolved
             break
-    return base
+        if s.skill == "nav.navigate_to_object" and not nav_fallback:
+            resolved = resolve_object_prim_path(
+                dict(s.params),
+                objects=objects,
+                active_object=active_object,
+                use_active_object=False,
+                required=False,
+                label="reset nav.navigate_to_object",
+            )
+            if resolved:
+                nav_fallback = resolved
+    return base or nav_fallback
 

@@ -53,15 +53,15 @@ Pipeline after Plan: **lift (optional) → open-loop MANO shape → settle → e
 |----|----------------|-------------|
 | **B0** | Shape to HUG MANO only | Check retarget |
 | **B1** | Slow open-loop to retarget | Timing ablation |
-| **B2** | Slow open-loop squeeze | Baseline force |
-| **B3** | Freeze MCP on object contact; tip keeps curling | Less push-away |
-| **B4** | B3 + uniform ramp + tip pinch | **Default / best so far** |
-| **B5** | B4 + small wrist press | Hover / miss (tune axis) |
+| **B2** | **Open-loop** slow squeeze to `squeeze(q)` | Baseline force |
+| **B3** | Contact-gate `keep_tip` toward amplified goal | Less push-away |
+| **B4** | B3 + ramp + tip_pinch（**不是** B2 开环挤压） | **Default** |
+| **B5** | B4 + small wrist press | Hover / miss |
 
-Contact uses `/wuji_rh|lh/in_contact/*` (table/ground partners ignored).  
-`squeeze_gain` only affects B2–B5. Config: `robots/<Robot>/grasp_generation.yaml`.
+`squeeze_amount` = B3–B5 **goal** amplify；B2 才是全程开环挤压。  
+`post_shape_squeeze_scale` **仅 B2**。`soft_stop_force_n` 防接触后假张开。  
+Contact: `/wuji_rh|lh/in_contact/*`。配置：`robots/<Robot>/grasp_generation.yaml`。
 
-**vs motion-generation:** this UI owns a separate ROS node; do not run a motion
-task-queue execute at the same time as **execute_move** / Close.
+**vs motion-generation:** 勿与 task-queue 同时抢同一接口做 Close。
 """.strip()
 

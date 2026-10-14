@@ -143,6 +143,7 @@ flowchart TB
 | `nav.navigate_to_pose` | `navigation.py` | 导航到给定位姿（封装发送 + 等待） |
 | `nav.navigate_to_object` | `navigation.py` | 导航到物体附近位姿 |
 | `nav.navigate_relative` | `navigation.py` | 相对当前机器人位姿的平面运动 |
+| `dex_hand.auto_grasp` | `dex_hand.py` | 特权 HUG 抓取（复用 `grasp_generation`；见 [GRASP_GENERATION.md](docs/GRASP_GENERATION.md)） |
 | `joint.movej_to_config` | `joint.py` | MoveJ 到给定/部分/相对关节配置 |
 | `joint.goto_cached_joints` | `joint.py` | 回到 `robot.cache_joint_state` 缓存关节角 |
 | `session.scratch_put` | `session.py` | 写入通用 `scratch` 键值 |

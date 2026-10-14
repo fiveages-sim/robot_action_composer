@@ -56,6 +56,21 @@ def full_norm_to_224(
     return full_pixel_to_224(u_norm * (width - 1), v_norm * (height - 1), width, height)
 
 
+def uv224_to_full_pixel(
+    u224: float,
+    v224: float,
+    width: int,
+    height: int,
+) -> tuple[float, float]:
+    """Inverse of :func:`full_pixel_to_224` (224 crop space → full-res pixel)."""
+    size = min(height, width)
+    x_off = (width - size) // 2
+    y_off = (height - size) // 2
+    u_c = float(u224) * float(size) / 224.0
+    v_c = float(v224) * float(size) / 224.0
+    return u_c + x_off, v_c + y_off
+
+
 def K_from_fx_fy_cx_cy(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
     return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
 

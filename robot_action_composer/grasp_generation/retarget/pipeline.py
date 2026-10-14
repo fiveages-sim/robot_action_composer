@@ -12,7 +12,12 @@ import numpy as np
 from ..config import GraspGenerationConfig
 from .keypoints import load_landmarks_from_proposal, preprocess_keypoints
 from .squeeze import apply_squeeze, open_hand_q, squeeze_delta_named
-from .wuji_hand2 import RetargetResult, Side, WujiHand2Retarget
+from .wuji_hand2 import (
+    WUJI_HAND2_JOINT_SUFFIXES,
+    RetargetResult,
+    Side,
+    WujiHand2Retarget,
+)
 
 Arm = Literal["left", "right"]
 
@@ -57,6 +62,120 @@ def send_hand_q(interface: Any, arm: Arm, q: Sequence[float]) -> None:
         interface.send_left_hand_joint_positions(q_list)
     else:
         raise ValueError(f"arm must be left|right, got {arm!r}")
+
+
+def read_hand_q(
+    interface: Any,
+    arm: Arm,
+    *,
+    suffixes: Sequence[str] = WUJI_HAND2_JOINT_SUFFIXES,
+) -> list[float] | None:
+    """Read current dex-hand joint positions from ``/joint_states`` (suffix order).
+
+    Returns ``None`` if joint state is missing or incomplete. Category keys follow
+    ``ROS2RobotInterface`` dual-arm naming (``left_gripper`` / ``right_gripper``
+    also cover ``*_hand_*`` joints).
+    """
+    side: Arm = arm  # type: ignore[assignment]
+    if side not in ("left", "right"):
+        raise ValueError(f"arm must be left|right, got {arm!r}")
+    getter = getattr(interface, "get_joint_state", None)
+    if not callable(getter):
+        return None
+    try:
+        cats = getter(categorized=True)
+    except Exception:
+        return None
+    if not isinstance(cats, dict):
+        return None
+    key = "right_gripper" if side == "right" else "left_gripper"
+    block = cats.get(key) or cats.get("gripper")
+    if not isinstance(block, dict):
+        return None
+    names = [str(n) for n in (block.get("names") or [])]
+    positions = list(block.get("positions") or [])
+    if not names or len(names) != len(positions):
+        return None
+    by_suffix: dict[str, float] = {}
+    for name, pos in zip(names, positions):
+        low = name.lower()
+        for suf in suffixes:
+            if low.endswith(suf) or low.endswith(f"hand_{suf}"):
+                by_suffix[suf] = float(pos)
+                break
+    if len(by_suffix) < len(suffixes):
+        return None
+    return [by_suffix[s] for s in suffixes]
+
+
+def _hand_gripper_handler(interface: Any, arm: Arm) -> Any | None:
+    if arm == "right":
+        return getattr(interface, "right_gripper_handler", None)
+    if arm == "left":
+        return getattr(interface, "left_gripper_handler", None)
+    return None
+
+
+def hold_hand_current(
+    interface: Any,
+    arm: Arm,
+    *,
+    settle_s: float = 0.05,
+) -> list[float] | None:
+    """Re-command measured finger pose so hand MOVEJ does not replay a stale target.
+
+    **运控耦合：** ``/fsm_command`` 全局共享。臂切 ``FSM_OCS2``(3) / ``MOVEJ``(4) 时，
+    ``left/right_hand_controller`` 也进 MOVEJ；非 MOVEJ 时 ``target_joint_position``
+    / ``target_command`` 会被丢弃。期望流程是：OCS2 后先 ``ensure_hand_open``，
+    再 hold 当前（全开）姿态跟腕，直到 close/shape 才发关节轨迹。
+
+    Returns the held ``q`` or ``None`` if joint state was unavailable.
+    """
+    q = read_hand_q(interface, arm)
+    if q is None:
+        return None
+    send_hand_q(interface, arm, q)
+    if settle_s > 0:
+        time.sleep(float(settle_s))
+    return q
+
+
+def ensure_hand_open(
+    interface: Any,
+    arm: Arm,
+    *,
+    settle_s: float = 0.5,
+) -> bool:
+    """Fully open one hand via 运控 ``target_command(1)`` (RViz Open Hand).
+
+    Requires the hand controller already in **MOVEJ** (after FSM OCS2/MOVEJ).
+    ``target_command`` open index must map to ``home_1`` (zeros) — set via local
+    ``robot.profiles/wuji_hand2.yaml`` control.patch, not by editing wuji package.
+
+    Falls back to joint-space zeros only if no gripper handler is available.
+    """
+    side: Arm = arm  # type: ignore[assignment]
+    if side not in ("left", "right"):
+        raise ValueError(f"arm must be left|right, got {arm!r}")
+
+    handler = _hand_gripper_handler(interface, side)
+    if handler is not None and hasattr(handler, "send_target_command"):
+        try:
+            handler.send_target_command(1)  # 1 = open → open_config (home_1)
+            if settle_s > 0:
+                time.sleep(float(settle_s))
+            # Lock measured open pose so a later MOVEJ re-enter cannot replay mid.
+            hold_hand_current(interface, side, settle_s=min(0.1, float(settle_s) * 0.25))
+            return True
+        except Exception as exc:
+            print(f"[hand] WARN target_command open {side}: {exc}")
+
+    try:
+        run_open_hand(arm=side, interface=interface)
+        return True
+    except Exception as exc:
+        print(f"[hand] WARN joint-space open {side}: {exc}")
+        return False
 
 
 def run_retarget_pipeline(

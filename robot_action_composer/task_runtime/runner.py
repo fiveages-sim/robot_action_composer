@@ -7,6 +7,7 @@ import signal
 import sys
 import termios
 import threading
+import time
 from collections.abc import Mapping
 from typing import Any, Sequence, TextIO
 
@@ -376,6 +377,41 @@ def build_queue_runtime_context(
     )
 
 
+def _also_settle_base_path(robot_cfg: Any) -> str:
+    """Robot base prim to wait on after Isaac reset (PhysX + authored spawn)."""
+    return str(getattr(robot_cfg, "base_link_entity_path", "") or "").strip()
+
+
+def _wait_nav_tf_ready(
+    interface: Any,
+    *,
+    sim_time: SimTimeHelper | None = None,
+    max_wait: float = 8.0,
+    poll_s: float = 0.25,
+) -> bool:
+    """Block until ``map←base_footprint|base_link`` TF exists (Isaac GT after reset)."""
+    lookup = getattr(interface, "lookup_transform", None)
+    if not callable(lookup):
+        return False
+    sleep = sim_time.sleep if sim_time is not None else time.sleep
+    deadline = time.monotonic() + max(0.0, float(max_wait))
+    while time.monotonic() < deadline:
+        for base_frame in ("base_footprint", "base_link"):
+            try:
+                tf = lookup("map", base_frame, timeout=min(1.0, poll_s * 4.0))
+            except Exception:
+                tf = None
+            if tf is not None:
+                print(f"[OK] Nav TF ready after reset: map←{base_frame}")
+                return True
+        sleep(max(0.05, float(poll_s)))
+    print(
+        f"[WARN] map←base TF not ready within {max_wait:.1f}s after reset "
+        "(nav may fall back to body-delta map goal)"
+    )
+    return False
+
+
 def reset_queue_task_environment(
     *,
     specs: Sequence[QueueBlock],
@@ -387,7 +423,16 @@ def reset_queue_task_environment(
 
     需要扰动 prim 时，把 ``env.randomize_object_local_xyz`` 放在 ``task_queue`` **第一个**顺序块
     （若首块为 ``parallel``，则作为其子步骤之一，在并行开始前单独一步更稳妥）。
+
+    Also waits until ``base_link_entity_path`` answers ``/get_entity_state`` so
+    nav / dex that rely on Isaac GT odom after PLAY do not race re-init.
     """
+    also_base = _also_settle_base_path(robot_cfg)
+    reset_kw = dict(
+        post_reset_wait=robot_cfg.post_reset_wait,
+        sleep_fn=sim_time.sleep,
+        also_settle_entity_path=also_base,
+    )
     if runtime.drawer is not None:
         dcfg = runtime.drawer
         reset_source_path = reset_settle_entity_path_from_queue(
@@ -404,19 +449,11 @@ def reset_queue_task_environment(
                 "(task_cfg / single_arm.pick), and single_arm.drawer "
                 "object_prim_path or object_key (drawer layer prim)"
             )
-        reset_simulation_state(
-            apple_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
-        )
+        reset_simulation_state(apple_path, **reset_kw)
         sim_time.sleep(1)
         return
     if runtime.carry is not None:
-        reset_simulation_state(
-            runtime.carry.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
-        )
+        reset_simulation_state(runtime.carry.object_prim_path, **reset_kw)
         return
     if runtime.handover is not None:
         pk = runtime.single_arm.pick
@@ -425,23 +462,15 @@ def reset_queue_task_environment(
                 "handover task env reset requires object_prim_path on single_arm.pick "
                 "(skill_defaults.single_arm.pick or skill_params for pick block)"
             )
-        reset_simulation_state(
-            pk.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
-        )
+        reset_simulation_state(pk.object_prim_path, **reset_kw)
         return
     parallel_pick_cfg = _extract_parallel_pick_cfg_from_specs(specs)
     if parallel_pick_cfg is not None:
         reset_simulation_state(
-            parallel_pick_cfg.left_pick.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
+            parallel_pick_cfg.left_pick.object_prim_path, **reset_kw
         )
         reset_simulation_state(
-            parallel_pick_cfg.right_pick.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
+            parallel_pick_cfg.right_pick.object_prim_path, **reset_kw
         )
         return
     reset_source_path = reset_settle_entity_path_from_queue(
@@ -453,13 +482,10 @@ def reset_queue_task_environment(
     if not reset_source_path:
         raise ValueError(
             "object_prim_path or object_key is required for env reset "
-            "(set on task_cfg or under skill_defaults / skill_params for single_arm.pick)"
+            "(single_arm.pick skill_defaults/skill_params, or nav.navigate_to_object "
+            "object_prim_path / object_key on a queue block)"
         )
-    reset_simulation_state(
-        reset_source_path,
-        post_reset_wait=robot_cfg.post_reset_wait,
-        sleep_fn=sim_time.sleep,
-    )
+    reset_simulation_state(reset_source_path, **reset_kw)
 
 
 def run_task_queue(
@@ -506,6 +532,8 @@ def run_task_queue(
 
         if reset_env:
             reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+            # Isaac GT odom TF can lag PhysX after STOP→PLAY; nav goals need map←base.
+            _wait_nav_tf_ready(interface, sim_time=sim_time)
 
         ctx = build_queue_runtime_context(
             interface=interface,
@@ -584,6 +612,7 @@ def run_task_queue_on_connected_interface(
 
     if reset_env:
         reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+        _wait_nav_tf_ready(interface, sim_time=sim_time)
 
     ctx = build_queue_runtime_context(
         interface=interface,
@@ -725,6 +754,7 @@ def run_task_queue_interactive_on_connected_interface(
 
     if reset_env:
         reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+        _wait_nav_tf_ready(interface, sim_time=sim_time)
 
     ctx = build_queue_runtime_context(
         interface=interface,

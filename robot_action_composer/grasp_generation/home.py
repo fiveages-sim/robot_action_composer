@@ -77,16 +77,19 @@ def go_home(
     interface.send_fsm_command(FSM_OCS2)
     print("[home] FSM HOME done → OCS2")
 
-    # FSM/STOP→PLAY can leave Wuji fingers curled from USD defaults. Open both
-    # so the next wrist approach is not a "虚握再张开" pulse.
+    # After OCS2, hands are in MOVEJ. Open via 运控 target_command(1)→home_1
+    # (same as RViz "Open Hand") — not joint-space zeros thrashing home_2/3.
+    open_settle = float(getattr(cfg, "hand_open_settle_s", 0.5) or 0.5)
     try:
-        from .retarget.pipeline import run_open_hand
+        from .retarget.pipeline import ensure_hand_open
 
         for side in ("right", "left"):
             try:
-                run_open_hand(arm=side, interface=interface)  # type: ignore[arg-type]
+                ensure_hand_open(
+                    interface, side, settle_s=open_settle  # type: ignore[arg-type]
+                )
             except Exception as exc:
-                print(f"[home] WARN open {side} hand: {exc}")
+                print(f"[home] WARN reset {side} hand: {exc}")
     except Exception as exc:
         print(f"[home] WARN open hands after HOME: {exc}")
 

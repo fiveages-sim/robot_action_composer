@@ -54,6 +54,7 @@ def close_request_from_config(
         tip_ramp_boost=float(getattr(cfg, "tip_ramp_boost", 0.35)),
         tip_pinch_steps=int(getattr(cfg, "tip_pinch_steps", 12)),
         tip_pinch_amount=float(getattr(cfg, "tip_pinch_amount", 0.25)),
+        soft_stop_force_n=float(getattr(cfg, "soft_stop_force_n", 10.0)),
         wrist_press_m=float(getattr(cfg, "wrist_press_m", 0.008)),
         object_frame=str(getattr(cfg, "object_frame", "") or ""),
         base_frame=str(getattr(cfg, "base_frame", "base_link")),
@@ -121,6 +122,11 @@ def run_close(
     def _send(q: Sequence[float]) -> None:
         send_hand_q(interface, side, q)  # type: ignore[arg-type]
 
+    def _measure() -> list[float] | None:
+        from ..retarget.pipeline import read_hand_q
+
+        return read_hand_q(interface, side)
+
     def _wrist_press(press_m: float) -> None:
         press_wrist_along_tip_z(
             interface,
@@ -144,10 +150,30 @@ def run_close(
 
     n = profile.n_dof
     q_ret = np.asarray(req.q_retarget, dtype=np.float32).reshape(n)
+
+    # Start shape from the *current* open pose (wrist approach keeps home_1).
+    # Do not snap open_hand_q / home_2 / home_3 here — that causes 弯曲↔张开.
+    from ..retarget.pipeline import hold_hand_current, read_hand_q
+
+    pre_shape = float(getattr(cfg, "pre_shape_settle_s", 0.3) or 0.0)
+    if pre_shape > 0:
+        time.sleep(pre_shape)
+
     if req.q_start is not None:
         q_cur = np.asarray(req.q_start, dtype=np.float32).reshape(n)
+        send_hand_q(interface, side, q_cur)  # type: ignore[arg-type]
+        time.sleep(0.15)
     else:
-        q_cur = profile.open_hand_q()
+        held = hold_hand_current(interface, side, settle_s=0.2)
+        if held is not None and len(held) == n:
+            q_cur = np.asarray(held, dtype=np.float32).reshape(n)
+        else:
+            measured = read_hand_q(interface, side)
+            if measured is not None and len(measured) == n:
+                q_cur = np.asarray(measured, dtype=np.float32).reshape(n)
+            else:
+                # Reference only — do not send; avoid a second open pulse.
+                q_cur = profile.open_hand_q()
 
     prefix_steps: list[CloseStepLog] = []
     extras: dict[str, Any] = {}
@@ -174,11 +200,7 @@ def run_close(
 
         # --- Phase A: open-loop (default) → visible MANO shape ---
         if req.do_shape_phase:
-            # Snap to commanded start first. Otherwise leftover curled joints
-            # from a prior grasp / STOP→PLAY look like a "fake close", then the
-            # first interp frames jump open before the real MANO approach.
-            _send(q_cur)
-            time.sleep(min(0.25, max(0.05, float(req.close_dt_s) * 2.0)))
+            # Interpolate from held current → MANO (monotonic close, no open snap).
             t0 = time.time()
             if req.shape_use_contact_gate:
                 q_cur, _fr, shape_steps = run_gated_approach(
@@ -195,6 +217,7 @@ def run_close(
                     t0=t0,
                     object_xyz=_object_xyz if req.object_frame else None,
                     wrist_xyz=_wrist_xyz,
+                    measure_hand=_measure,
                 )
             else:
                 q_cur, shape_steps = run_open_loop_approach(
@@ -208,6 +231,7 @@ def run_close(
                     t0=t0,
                     object_xyz=_object_xyz if req.object_frame else None,
                     wrist_xyz=_wrist_xyz,
+                    measure_hand=_measure,
                 )
             prefix_steps.extend(shape_steps)
             # Snap to exact retarget (open-loop last step ≈ goal; enforce)
@@ -249,6 +273,16 @@ def run_close(
             )
             result.extras.update(extras)
         else:
+            # B2 is open-loop squeeze after shape — optionally soften that slam.
+            # B3–B5 use contact-gate / ramp / tip_pinch toward a squeeze-amplified
+            # *goal*; scaling squeeze here made B4 stop short (loose lift). Soft
+            # contact is handled by soft_stop_force_n, not by gutting B4's goal.
+            if req.do_shape_phase and eid == ExecutorId.B2_SLOW_SQUEEZE:
+                scale = float(getattr(cfg, "post_shape_squeeze_scale", 1.0) or 1.0)
+                scale = max(0.0, min(1.0, scale))
+                req.squeeze_amount = float(req.squeeze_amount) * scale
+                extras["post_shape_squeeze_scale"] = scale
+                extras["squeeze_amount_effective"] = float(req.squeeze_amount)
             req.q_start = [float(x) for x in q_cur.reshape(-1)]
             executor = get_executor(eid)
             result = executor.run(
@@ -261,6 +295,7 @@ def run_close(
                 else None,
                 object_xyz=_object_xyz if req.object_frame else None,
                 wrist_xyz=_wrist_xyz,
+                measure_hand=_measure,
             )
             if prefix_steps:
                 merged = list(prefix_steps)

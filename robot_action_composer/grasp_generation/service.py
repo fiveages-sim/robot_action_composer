@@ -381,20 +381,13 @@ def run_serve(
             # Always refresh dry hand from proposal (camera frame, like HUG).
             _show_hand_from_proposal(Path(prop_path))
             execute = bool(gui_execute.value)
-            if execute and interface is not None:
-                # Match auto path: open before approach so leftover curl does
-                # not look like a fake close-open before retarget.
-                from .retarget.pipeline import run_open_hand
-
-                try:
-                    run_open_hand(arm=arm, interface=interface)  # type: ignore[arg-type]
-                except Exception as exc:
-                    print(f"[serve] WARN open hand before move: {exc}")
+            # Wrist path: OCS2 → ensure_hand_open (运控 target_command) → stamped.
             info = send_wrist_plan(
                 interface,
                 plan,
                 execute=execute,
                 arrival_timeout=cfg.arrival_timeout,
+                cfg=cfg,
             )
             xyz = info["target_xyz"]
             hug = info.get("hug_wrist_xyz") or xyz
@@ -763,7 +756,11 @@ def run_follow_wrist_cli(
         dump_plan(plan, out)
         print(json.dumps(plan.to_dict(), indent=2))
         info = send_wrist_plan(
-            interface, plan, execute=execute, arrival_timeout=cfg.arrival_timeout
+            interface,
+            plan,
+            execute=execute,
+            arrival_timeout=cfg.arrival_timeout,
+            cfg=cfg,
         )
         print(json.dumps(info, indent=2, default=str))
         return 0
