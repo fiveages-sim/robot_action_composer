@@ -456,6 +456,36 @@ def wait_entity_pose_readable(
     return False
 
 
+def _timeline_stop_then_play(
+    *,
+    sim_state_reset: int,
+    sim_state_playing: int,
+    sim_service_timeout: float,
+    retries: int,
+    retry_delay: float,
+    stop_to_play_gap_s: float = 0.4,
+) -> None:
+    """STOP, then PLAY.
+
+    Wall-clock gap (not sim time): while stopped the sim clock does not advance,
+    and ``ArticulationController`` clears its handle on timeline STOP. PLAY too
+    soon recreates that handle before PhysX is back.
+    """
+    set_simulation_state(
+        sim_state_reset,
+        timeout=sim_service_timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    time.sleep(max(0.0, float(stop_to_play_gap_s)))
+    set_simulation_state(
+        sim_state_playing,
+        timeout=sim_service_timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+
+
 def reset_simulation_state(
     settle_entity_path: str,
     *,
@@ -476,22 +506,18 @@ def reset_simulation_state(
 ) -> None:
     """Reset/play Isaac sim，等待 ``post_reset_wait``，再可选对 ``settle_entity_path`` 做位姿稳定检测。
 
-    After PLAY, PhysX views are briefly invalid — we wait until
-    ``settle_entity_path`` (and optional ``also_settle_entity_path``, e.g. robot
-    base) answer ``/get_entity_state`` before the position-stable poll.
+    STOP and PLAY once. A short wall-clock gap sits between them so
+    ``ArticulationController`` drops its handle on STOP before PLAY creates a
+    new one. Then wait until ``settle_entity_path`` (and optional
+    ``also_settle_entity_path``) answer ``/get_entity_state``.
 
     **不**修改任何物体 prim 的平移；需要随机化时在任务队列**第一个顺序块**使用技能
     ``env.randomize_object_local_xyz``（或自行调用 ``randomize_object_xyz_after_reset``）。
     """
-    set_simulation_state(
-        sim_state_reset,
-        timeout=sim_service_timeout,
-        retries=retries,
-        retry_delay=retry_delay,
-    )
-    set_simulation_state(
-        sim_state_playing,
-        timeout=sim_service_timeout,
+    _timeline_stop_then_play(
+        sim_state_reset=sim_state_reset,
+        sim_state_playing=sim_state_playing,
+        sim_service_timeout=sim_service_timeout,
         retries=retries,
         retry_delay=retry_delay,
     )
