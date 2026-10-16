@@ -23,6 +23,78 @@ class RgbdFrame:
     stamp_sec: float = 0.0
 
 
+# Old W2 head (aperture 20.955×15.716, 640×480) vertical FOV. The remote
+# camera is ~94°×68° at 1280×800; a full-frame center-crop then shrinks the
+# apple to ~60% in HUG's 224 image. Crop back to this vertical FOV first.
+LEGACY_HEAD_VFOV_DEG = 46.8
+
+
+def suppress_depth_spikes(
+    depth_m: np.ndarray,
+    *,
+    rel: float = 0.06,
+    abs_m: float = 0.025,
+) -> np.ndarray:
+    """Replace flying pixels with the 3×3 median.
+
+    Wider-FOV Isaac depth is speckled; those spikes back-project as white
+    dots and also pollute the HUG point cloud.
+    """
+    z = np.asarray(depth_m, dtype=np.float32)
+    if z.ndim != 2:
+        return z
+    valid = np.isfinite(z) & (z > 0.05)
+    filled = np.where(valid, z, np.nan)
+    neigh = [
+        np.roll(np.roll(filled, dy, axis=0), dx, axis=1)
+        for dy in (-1, 0, 1)
+        for dx in (-1, 0, 1)
+    ]
+    med = np.nanmedian(np.stack(neigh, axis=0), axis=0)
+    dev = np.abs(filled - med)
+    spike = valid & np.isfinite(med) & (dev > np.maximum(abs_m, rel * med))
+    out = z.copy()
+    out[spike] = med[spike].astype(np.float32)
+    return out
+
+
+def crop_frame_to_legacy_vfov(
+    rgb: np.ndarray,
+    depth_m: np.ndarray,
+    K: np.ndarray,
+    *,
+    target_vfov_deg: float = LEGACY_HEAD_VFOV_DEG,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Center-crop so the square window matches the old head vertical FOV.
+
+    Returns ``(rgb, depth, K, x_off, y_off)`` in the cropped image. No-op when
+    the current vertical FOV is already at or under the target.
+    """
+    h, w = rgb.shape[:2]
+    fy = float(K[1, 1])
+    if fy < 1e-6 or h < 8 or w < 8:
+        return rgb, depth_m, K, 0, 0
+    cur_half = float(np.arctan((h / 2.0) / fy))
+    tgt_half = float(np.deg2rad(target_vfov_deg) / 2.0)
+    if cur_half <= tgt_half * 1.04:
+        return rgb, depth_m, K, 0, 0
+    crop = int(round(2.0 * fy * float(np.tan(tgt_half))))
+    crop = max(32, min(crop, h, w))
+    y_off = (h - crop) // 2
+    x_off = (w - crop) // 2
+    rgb_c = rgb[y_off : y_off + crop, x_off : x_off + crop]
+    depth_c = depth_m[y_off : y_off + crop, x_off : x_off + crop]
+    Kc = np.array(K, dtype=np.float64, copy=True)
+    Kc[0, 2] -= x_off
+    Kc[1, 2] -= y_off
+    print(
+        f"[hug] FOV crop {w}×{h} → {crop}² "
+        f"(vertical {np.rad2deg(2 * cur_half):.0f}° → {target_vfov_deg:.0f}°, "
+        f"so the object keeps the old scale in the 224 input)"
+    )
+    return rgb_c, depth_c, Kc, x_off, y_off
+
+
 def depth_to_uint16_mm(depth_m: np.ndarray, max_m: float = 10.0) -> np.ndarray:
     """Convert metric depth (32FC1) to HUG uint16 millimetres."""
     d = np.asarray(depth_m, dtype=np.float32)

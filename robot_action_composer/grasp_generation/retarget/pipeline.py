@@ -21,6 +21,14 @@ from .wuji_hand2 import (
 
 Arm = Literal["left", "right"]
 
+# ``right_hand_controller`` MOVEJ duration is 0.5s
+# (fa_w2_ws config/robot.profiles/wuji_hand2.yaml). A newer
+# ``target_joint_position`` while that move is still running starts
+# stop-to-zero, which rewinds the fingers toward open. Shape / B4 / manual
+# retarget all publish through ``send_hand_q``, so the gap lives here.
+_HAND_MOVEJ_GAP_S = 0.55
+_last_hand_send_mono: dict[str, float] = {}
+
 
 def resolve_retarget_model_side(
     arm: Arm,
@@ -55,6 +63,16 @@ def retarget_proposal(
 
 
 def send_hand_q(interface: Any, arm: Arm, q: Sequence[float]) -> None:
+    """Publish one hand target, at most once per MOVEJ duration.
+
+    Intermediate shape/close samples are dropped so the controller can finish
+    the interpolation it already started. The latest ``q`` still goes out on
+    the next allowed tick (hold loops cover the final pose).
+    """
+    now = time.monotonic()
+    last = _last_hand_send_mono.get(arm, 0.0)
+    if now - last < _HAND_MOVEJ_GAP_S:
+        return
     q_list = [float(x) for x in q]
     if arm == "right":
         interface.send_right_hand_joint_positions(q_list)
@@ -62,6 +80,7 @@ def send_hand_q(interface: Any, arm: Arm, q: Sequence[float]) -> None:
         interface.send_left_hand_joint_positions(q_list)
     else:
         raise ValueError(f"arm must be left|right, got {arm!r}")
+    _last_hand_send_mono[arm] = now
 
 
 def read_hand_q(

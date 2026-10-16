@@ -14,7 +14,7 @@ from typing import Any, Optional, Sequence
 import cv2
 import numpy as np
 
-from .rgbd_io import load_frame_from_dir
+from .rgbd_io import crop_frame_to_legacy_vfov, load_frame_from_dir
 from .scene_vis import (
     CLICK_MARKER_COLOR,
     HAND_KEYPOINT_COLOR,
@@ -106,6 +106,13 @@ def dump_hug_debug_from_capture(
         raise FileNotFoundError(f"missing proposal: {prop_path}")
 
     frame = load_frame_from_dir(capture_dir)
+    rgb_c, _, _, _, _ = crop_frame_to_legacy_vfov(frame.rgb, frame.depth_m, frame.K)
+    frame = type(frame)(
+        rgb=rgb_c,
+        depth_m=frame.depth_m,
+        K=frame.K,
+        stamp_sec=frame.stamp_sec,
+    )
     data = json.loads(prop_path.read_text(encoding="utf-8"))
     click = data.get("click_uv_224")
     K224 = np.asarray(data.get("camera_K_224"), dtype=np.float64)

@@ -12,7 +12,13 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .rgbd_io import RgbdFrame, depth_to_uint16_mm, full_norm_to_224, full_pixel_to_224
+from .rgbd_io import (
+    RgbdFrame,
+    crop_frame_to_legacy_vfov,
+    depth_to_uint16_mm,
+    full_pixel_to_224,
+    suppress_depth_spikes,
+)
 
 
 @dataclass
@@ -128,19 +134,34 @@ class HugAdapter:
         """Run HUG on one RGB-D frame at a click (full-image coords).
 
         Provide either normalized ``(u_norm, v_norm)`` or pixel ``(u_px, v_px)``
-        on the **full-resolution** image (e.g. 640×480). Internally mapped to the
-        center-crop 224 space used by HUG ``prepare_inputs``.
+        on the **full-resolution** image. A wide head camera is center-cropped
+        back to the legacy ~47° vertical FOV before the 224 mapping, and K moves
+        with that crop.
         """
         self.load()
         assert self._model is not None and self._torch is not None
 
         h, w = frame.rgb.shape[:2]
-        if u_px is not None and v_px is not None:
-            u_224, v_224 = full_pixel_to_224(u_px, v_px, w, h)
-        else:
+        if u_px is None or v_px is None:
             un = 0.5 if u_norm is None else float(u_norm)
             vn = 0.5 if v_norm is None else float(v_norm)
-            u_224, v_224 = full_norm_to_224(un, vn, w, h)
+            u_px = un * max(w - 1, 1)
+            v_px = vn * max(h - 1, 1)
+
+        depth = suppress_depth_spikes(frame.depth_m)
+        rgb_c, depth_c, K_c, x_off, y_off = crop_frame_to_legacy_vfov(
+            frame.rgb, depth, frame.K
+        )
+        u_c = float(np.clip(u_px - x_off, 0, rgb_c.shape[1] - 1))
+        v_c = float(np.clip(v_px - y_off, 0, rgb_c.shape[0] - 1))
+        ch, cw = rgb_c.shape[:2]
+        u_224, v_224 = full_pixel_to_224(u_c, v_c, cw, ch)
+        frame = RgbdFrame(
+            rgb=rgb_c,
+            depth_m=depth_c,
+            K=K_c,
+            stamp_sec=frame.stamp_sec,
+        )
 
         depth_u16 = depth_to_uint16_mm(frame.depth_m)
         from hug.dataloader.grasp_dataset import GraspDataset

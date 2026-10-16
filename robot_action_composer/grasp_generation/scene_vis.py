@@ -55,10 +55,12 @@ def backproject_rgbd(
 
         rgb_a = cv2.resize(rgb_a, (w, h), interpolation=cv2.INTER_LINEAR)
 
+    from .rgbd_io import suppress_depth_spikes
+
     fx, fy = float(K[0, 0]), float(K[1, 1])
     cx, cy = float(K[0, 2]), float(K[1, 2])
     u, v = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
-    z = depth
+    z = suppress_depth_spikes(depth)
     valid = np.isfinite(z) & (z > 0.05) & (z < float(max_depth))
     if not np.any(valid):
         return None
