@@ -147,6 +147,9 @@ def skill_auto_grasp(
         f"[dex_hand] auto_grasp robot={robot_key!r} object={object_key!r} "
         f"workspace={workspace} dry_run={dry_run} do_close={do_close}"
     )
+    from robot_action_composer.grasp_generation.preflight import warn_grasp_readiness
+
+    warn_grasp_readiness(workspace, cfg, command="auto")
 
     result = run_auto_grasp(
         cfg=cfg,

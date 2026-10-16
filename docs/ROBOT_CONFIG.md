@@ -108,8 +108,9 @@ ros2_interface:
 
 ## 安装与环境
 
-- **仅任务编排**：`./init.sh all-motion` 或菜单 3 / 5（无需 PyPI `lerobot`）。
-- **录制 / 推理**：`./init.sh install-lerobot` 或菜单 4 / 6 / `./init.sh all`。
+- **仅任务编排**：`./init.sh all-motion` 或菜单 6（无需 PyPI `lerobot`，也不装灵巧手）。
+- **录制 / 推理**：`./init.sh install-lerobot` 或菜单 5 / 7。
+- **可选灵巧手**：`./init.sh all-grasp` 或菜单 `g`。详见仓库根 `docs/SETUP.md`。
 
 ## 发现机制
 

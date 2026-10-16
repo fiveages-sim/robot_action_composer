@@ -22,10 +22,20 @@ def run_hug_propose(
     """Call ``hug_worker``; return path to proposal JSON."""
     hug_python = Path(hug_python)
     if not hug_python.is_file():
-        raise FileNotFoundError(
-            f"HUG python not found: {hug_python}. "
-            "Create with: cd submodules/hug && bash scripts/setup_uv.sh"
+        from robot_action_composer.grasp_generation.preflight import (
+            warn_hug_python_missing,
         )
+
+        raise FileNotFoundError(warn_hug_python_missing(hug_python))
+    from robot_action_composer.grasp_generation.preflight import (
+        _hug_root_from_python,
+        hug_asset_lines,
+    )
+
+    hug_root = _hug_root_from_python(hug_python)
+    if hug_root is not None:
+        for line in hug_asset_lines(hug_root):
+            print(f"[grasp] {line}", file=sys.stderr)
 
     if composer_root is None:
         # .../robot_action_composer/robot_action_composer/grasp_generation/hug_subprocess.py

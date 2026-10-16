@@ -72,8 +72,9 @@ grasp_generation/execution/
 
 ## Isaac 前提
 
-Wuji Hand2：`Side=right` + `Sensor=contact_force`（PhysX）。  
-见 FaSim `.../Wuji/Hand2/payloads/Sensor/CONTACT_FORCE_README.md`。
+接触门控（B3–B5）才需要手资产发布接触力。B0–B2 不读这些话题，没有传感器也能合手。进任务编排本身也不需要接触力。边界见仓库根 [`docs/ENV_AND_HAND_CONTRACT.md`](../../../docs/ENV_AND_HAND_CONTRACT.md)。
+
+参考手型 Wuji Hand2：`Side=right` + `Sensor=contact_force`（PhysX）。传感器挂在手 prim 上，不挂在某一张桌子上。说明在 FaSim `robots/dexhands/Wuji/Hand2/payloads/Sensor/CONTACT_FORCE_README.md`。另一只手换话题或换关节分组时，另选执行器，不要默认 B4 仍适用。
 
 ## 诊断
 

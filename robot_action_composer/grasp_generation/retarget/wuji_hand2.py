@@ -66,8 +66,11 @@ class WujiHand2Retarget:
         except ImportError as e:  # pragma: no cover
             raise ImportError(
                 "wuji-sdk is required for hand_profile=wuji_hand2. "
-                "Install: pip install 'wuji-sdk>=0.10.0' (Linux x86_64/aarch64). "
-                "See docs/WUJI_RETARGETING.md"
+                "Install into the parent repo env (not submodules/hug/.venv): "
+                "./init.sh install-grasp   "
+                "or: pip install 'wuji-sdk>=0.10.0' (Linux x86_64/aarch64). "
+                "Task orchestration does not need this package. "
+                "See docs/SETUP.md and docs/WUJI_RETARGETING.md"
             ) from e
         handed = Handedness.Right if self.side == "right" else Handedness.Left
         self._session = RetargetSession.for_hand(HandModel.WujiHand2, side=handed)

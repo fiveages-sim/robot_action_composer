@@ -1557,6 +1557,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    from robot_action_composer.grasp_generation.preflight import warn_motion_environment
+
+    warn_motion_environment()
     args = _parse_args()
     workspace_dir = resolve_workspace_dir(Path(args.workspace) if args.workspace else None)
     json_path = (

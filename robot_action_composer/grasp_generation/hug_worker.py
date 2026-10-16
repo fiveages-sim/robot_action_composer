@@ -39,7 +39,28 @@ def main(argv: list[str] | None = None) -> int:
 
     adapter = HugAdapter(sampling_steps=args.sampling_steps)
     if not adapter.available:
-        print("HUG not available:", adapter.describe(), file=sys.stderr)
+        info = adapter.describe()
+        print("HUG not available:", info, file=sys.stderr)
+        if not info.get("checkpoint_exists"):
+            print(
+                "缺少权重 checkpoints/hug_full.safetensors（gitignore，clone 不会带上）。"
+                "处理: bash scripts/download_assets.sh",
+                file=sys.stderr,
+            )
+        if not info.get("mano_present"):
+            print(
+                "缺少 MANO（gitignore，需自行注册下载）。"
+                "处理: https://mano.is.tue.mpg.de/ → "
+                "assets/mano_models/models/MANO_RIGHT.pkl 。"
+                "见 docs/SETUP_LOCAL.md",
+                file=sys.stderr,
+            )
+        if not info.get("hug_importable"):
+            print(
+                "当前解释器导入不了 hug。请用 submodules/hug/.venv："
+                " ./init.sh hug-env",
+                file=sys.stderr,
+            )
         return 2
 
     frame = load_frame_from_dir(args.from_dir)

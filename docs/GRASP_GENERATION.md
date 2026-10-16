@@ -1,18 +1,18 @@
 # Grasp generation CLI（与 ros2-stack / motion-generation 并列）
 
-`grasp-generation` 是 **新功能入口**：在运控已由 `ros2-stack` 拉起的前提下，用头相机 + HUG 生成相机系抓姿，再经 `ROS2RobotInterface` 把 **腕** 送到对应位姿。
+`grasp-generation` 是可选入口：运控已由 `ros2-stack` 拉起时，用头相机生成相机系抓姿，再经 `ROS2RobotInterface` 跟腕、retarget、收拢。没装 HUG 或手型 sdk 时，`motion-generation` 的其它技能不受影响；跑到 `dex_hand.auto_grasp` 或本 CLI 时会提示缺哪一块。
 
-**不替代** `motion-generation` 任务编排；task_queue 经 skill **`dex_hand.auto_grasp`** 调用同一抓取库。**不改** `ros2-stack`。
+**不替代** `motion-generation` 任务编排。task_queue 经 skill **`dex_hand.auto_grasp`** 调用同一抓取库。**不改** `ros2-stack`。
 
-## 角色分工
+参考配置：`examples/IsaacSim/robots/FiveAges_W2/grasp_generation.yaml`（Wuji Hand2 + W2）。新机器人复制该文件，改 `robot_key`、相机、`hand_profile`、`grasp_objects`。
+
+**文档分工：** 本文件讲 grasp CLI / Viser / 模块边界。从零安装见仓库根 [`docs/SETUP.md`](../../../docs/SETUP.md)。阶段笔记（腕对齐、参考手型、相机资产）在仓库根 [`docs/README.md`](../../../docs/README.md)。任务 YAML / 其它 skill 参数见 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md)、[`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md)。
 
 | 组件 | 职责 |
 |------|------|
 | `ros2-stack` | 启动 OCS2 运控 / Nav2（照旧） |
 | `motion-generation` | 任务队列；可用 skill **`dex_hand.auto_grasp`** 调用同一套抓取库 |
 | `grasp-generation` | HUG 抓取辅助 + **Viser 调试**（采帧 → 选点 → propose → 跟腕 → close） |
-
-**文档分工：** 本文件（composer `docs/`）讲 grasp CLI / Viser / 模块边界；仓库根 [`docs/`](../../../docs/) 讲仿真联调里程碑、HUG/Wuji 专项（`SIM_GRASP_*`、`WUJI_*`、`HUG_SUBMODULE`）。任务 YAML / 其它 skill 参数见同目录 [`TASK_CONFIG_YAML.md`](TASK_CONFIG_YAML.md)、[`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md)。
 
 ## Python 拆分
 
@@ -23,23 +23,26 @@
 
 ## 安装（环境要点）
 
-**开发与环境只使用本仓库** `/home/fiveages/lerobot_ros2`（见仓库根目录 [`docs/ENV_THIS_CHECKOUT.md`](../../../docs/ENV_THIS_CHECKOUT.md)）。
+父仓环境与 HUG 环境分开。步骤见仓库根 [`docs/SETUP.md`](../../../docs/SETUP.md)，坑见 [`docs/ENV_THIS_CHECKOUT.md`](../../../docs/ENV_THIS_CHECKOUT.md)。
 
 **不要**在 `submodules/hug/.venv`（Python 3.10）里装本 CLI；也 **不要**用系统 `pip`（Ubuntu 会报 `externally-managed-environment`）。
 
 ```bash
-cd /home/fiveages/lerobot_ros2
-bash scripts/setup_grasp_dev_env.sh
+# 仓库根目录
+./init.sh all-grasp          # 编排 + viser/wuji-sdk + HUG venv
+# 已有编排环境时只补抓取：
+# ./init.sh install-grasp && ./init.sh hug-env
 source .venv/bin/activate
 which python ros2-stack grasp-generation
-# python 必须落在本仓 .venv 下
+# python 必须落在本仓 .venv（或 .fa-env.toml 里的 conda）下，不能是 hug/.venv，也不能是 /usr
+./init.sh doctor
 ```
 
 每次开终端：
 
 ```bash
-cd /home/fiveages/lerobot_ros2
-source .venv/bin/activate   # 自动 source jazzy + ros2_ws + fa_w2_ws
+# 仓库根目录
+source .venv/bin/activate    # 会 source .fa-env.toml 里配置的 ROS 2 工作空间
 ```
 
 配置：
@@ -67,14 +70,13 @@ grasp-generation serve --robot fiveages_w2 --workspace .
 ```bash
 # 1) 仿真 Play + 头相机话题正常
 
-# 2) 运控（本仓 .venv）
-cd /home/fiveages/lerobot_ros2
+# 2) 运控（父仓环境）
 source .venv/bin/activate
 cd examples/IsaacSim
 ros2-stack launch --robot fiveages_w2
 
 # 3) 新开终端：同样 activate 后
-cd /home/fiveages/lerobot_ros2 && source .venv/bin/activate
+source .venv/bin/activate
 cd examples/IsaacSim
 grasp-generation serve --robot fiveages_w2 --workspace .
 ```
@@ -188,13 +190,13 @@ grasp-generation diagnose-frames --robot fiveages_w2 --workspace .
 | `auto_grasp` | capture → UV → HUG → wrist → close | `AutoGraspResult` |
 | `service` / `cli/grasp_main.py` | Viser / CLI | — |
 
-**新机器人：** 复制 `grasp_generation.yaml`；改 `robot_key`、相机 topic/prim、`mano_to_tip_rpy_deg`、`hand_profile`、`grasp_objects`。新手须 **同时** 加 retarget 后端与 `execution/profiles/`。
+**新机器人：** 复制 `grasp_generation.yaml`；改 `robot_key`、相机 topic/prim、`mano_to_tip_rpy_deg`、`hand_profile`、`grasp_objects`。新手须 **同时** 加 retarget 后端与 `execution/profiles/`，并只选用这只手支持的 `close_executor`。接触力是手资产上的变体，B3–B5 才需要；新场景只要机器人（含手）和物体 prim 就能进编排。见仓库根 [`docs/ENV_AND_HAND_CONTRACT.md`](../../../docs/ENV_AND_HAND_CONTRACT.md)。
 
 ```bash
 grasp-generation close-hand --robot fiveages_w2 --workspace . --mode B4 --trial-id t01
 ```
 
-### 仿真测试环境（W2 + Wuji Hand2）
+### 仿真测试环境（参考：FiveAges W2 + Wuji Hand2）
 
 | 项 | 要求 |
 |----|------|

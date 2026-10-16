@@ -20,7 +20,10 @@ Hard-dep free: composer installs without HUG.
 - 任务 skill **`dex_hand.auto_grasp`**：[docs/SKILLS_REFERENCE.md](../../docs/SKILLS_REFERENCE.md) §3b
 
 ```bash
-pip install -e ".[grasp]"
+# 父仓环境，不要用系统 pip，也不要装进 hug/.venv
+# 见仓库根 ./init.sh install-grasp
+pip install "viser>=0.2"
+# 参考手型 wuji_hand2 另需: pip install "wuji-sdk>=0.10.0"
 # ros2-stack already up:
 grasp-generation serve --robot fiveages_w2 --workspace examples/IsaacSim
 ```

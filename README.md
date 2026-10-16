@@ -17,6 +17,10 @@ https://github.com/user-attachments/assets/4c3bcf28-f2cd-4c47-83a0-ecccb30c1891
 | [docs/TASK_CONFIG_YAML.md](docs/TASK_CONFIG_YAML.md) | 任务 YAML 格式、`skill_defaults` / `skill_params`、加载与合并规则 |
 | [docs/ROBOT_CONFIG.md](docs/ROBOT_CONFIG.md) | `robot.yaml` / `lerobot_config.py` 与 `robots/` 目录约定 |
 | [docs/ROS2_STACK.md](docs/ROS2_STACK.md) | 场景级运控/导航启动（`.meta/ros2_stack.yaml`、`ros2-stack` CLI） |
+| [docs/GRASP_GENERATION.md](docs/GRASP_GENERATION.md) | 可选抓取 CLI / Viser / 换 MANO、retarget、close 的边界 |
+| [docs/CLOSE_EXECUTORS.md](docs/CLOSE_EXECUTORS.md) | 收拢执行器 B0–B5 |
+
+父仓从零安装（编排与可选灵巧手分开）见 monorepo [`docs/SETUP.md`](../../docs/SETUP.md)。
 
 monorepo 内 **Isaac Sim 环境、USD、工作空间** 步骤见 **`examples/IsaacSim/README.md`**。
 
@@ -187,11 +191,9 @@ motion-generation --robot fiveages_w2 --task-key ...
 # 运控/导航栈（既有）
 ros2-stack launch --robot fiveages_w2
 
-# 抓取生成（新增，不替代上面两者；见 docs/GRASP_GENERATION.md）
-# 勿用系统 pip / 勿在 hug/.venv 里装；用 uv + --no-deps：
-uv pip install -e submodules/ros2_robot_interface --no-deps
-uv pip install -e submodules/robot_action_composer --no-deps
-uv pip install "viser>=0.2"
+# 抓取生成（可选，不替代上面两者；见 docs/GRASP_GENERATION.md）
+# 父仓：./init.sh install-grasp && ./init.sh hug-env
+# 勿用系统 pip / 勿在 hug/.venv 里装 CLI
 grasp-generation serve --robot fiveages_w2 --workspace examples/IsaacSim
 ```
 

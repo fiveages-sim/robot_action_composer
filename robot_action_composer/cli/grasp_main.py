@@ -329,6 +329,9 @@ def _interactive_main(args: argparse.Namespace, workspace: Path) -> None:
             print("config_path:", yml)
         return
 
+    from robot_action_composer.grasp_generation.preflight import warn_grasp_readiness
+
+    warn_grasp_readiness(workspace, cfg, command="serve")
     connect = select_yes_no(
         title="Connect ROS2RobotInterface? (needed for Plan / Retarget / Close)",
         default_yes=True,
@@ -354,6 +357,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     _save_grasp_last(workspace, robot_key=robot_key)
     cfg = _build_cfg(workspace=workspace, robot_key=robot_key, args=args)
+    from robot_action_composer.grasp_generation.preflight import warn_grasp_readiness
+
+    warn_grasp_readiness(
+        workspace,
+        cfg,
+        command="serve" if args.command == "show-config" else args.command,
+    )
 
     if args.command == "show-config":
         from dataclasses import asdict
