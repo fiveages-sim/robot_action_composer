@@ -267,6 +267,66 @@ def capture_head_camera_ros_subprocess(
     return load_frame_from_dir(out_dir)
 
 
+def _image_msg_to_ndarray(msg: object) -> np.ndarray:
+    """Decode ``sensor_msgs/Image`` without ``cv_bridge``.
+
+    Jazzy ``cv_bridge`` is built against NumPy 1.x. A parent venv that resolved
+    ``numpy>=2`` (composer used to allow that, and ``install-lerobot`` still
+    pins NumPy 2) crashes inside ``cv_bridge_boost`` while capturing the head
+    camera.
+    """
+    encoding = str(getattr(msg, "encoding", "") or "").lower()
+    height = int(getattr(msg, "height", 0))
+    width = int(getattr(msg, "width", 0))
+    if height <= 0 or width <= 0:
+        raise ValueError(f"invalid image size {width}x{height} encoding={encoding!r}")
+
+    if encoding in ("rgb8", "bgr8"):
+        dtype: np.dtype = np.dtype(np.uint8)
+        channels = 3
+    elif encoding in ("rgba8", "bgra8"):
+        dtype = np.dtype(np.uint8)
+        channels = 4
+    elif encoding in ("mono8", "8uc1"):
+        dtype = np.dtype(np.uint8)
+        channels = 1
+    elif encoding in ("16uc1", "mono16"):
+        dtype = np.dtype(np.uint16)
+        channels = 1
+    elif encoding in ("32fc1",):
+        dtype = np.dtype(np.float32)
+        channels = 1
+    else:
+        raise ValueError(
+            f"unsupported Image encoding {encoding!r}; "
+            "expected rgb8/bgr8/rgba8/bgra8/mono8/16UC1/32FC1"
+        )
+
+    step = int(getattr(msg, "step", 0) or 0)
+    row_elems = step // int(dtype.itemsize) if step else width * channels
+    if row_elems < width * channels:
+        raise ValueError(
+            f"image step {step} too small for {width}x{channels} {encoding}"
+        )
+    flat = np.frombuffer(bytes(getattr(msg, "data")), dtype=dtype)
+    need = height * row_elems
+    if flat.size < need:
+        raise ValueError(
+            f"image data short: got {flat.size} {dtype} values, need {need}"
+        )
+    rows = flat[:need].reshape(height, row_elems)[:, : width * channels]
+    if channels == 1:
+        return rows.reshape(height, width).copy()
+    image = rows.reshape(height, width, channels).copy()
+    if encoding == "bgr8":
+        return image[:, :, ::-1]
+    if encoding == "bgra8":
+        return image[:, :, [2, 1, 0]]
+    if encoding == "rgba8":
+        return image[:, :, :3]
+    return image
+
+
 def capture_head_camera_ros(
     *,
     rgb_topic: str = "/head_camera/rgb",
@@ -295,14 +355,12 @@ def capture_head_camera_ros(
         )
 
     import rclpy
-    from cv_bridge import CvBridge
     from rclpy.executors import SingleThreadedExecutor
     from sensor_msgs.msg import CameraInfo, Image
 
     if not rclpy.ok():
         rclpy.init()
 
-    bridge = CvBridge()
     lock = threading.Lock()
     state: dict = {"rgb": None, "depth": None, "K": None, "stamp": 0.0}
     ready = threading.Event()
@@ -314,25 +372,18 @@ def capture_head_camera_ros(
             ready.set()
 
     def on_rgb(msg: Image) -> None:
-        try:
-            bgr = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        except Exception:
-            arr = bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-            if arr.ndim == 2:
-                rgb = cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB)
-            elif arr.shape[2] == 4:
-                rgb = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
-            else:
-                rgb = arr[:, :, :3]
+        arr = _image_msg_to_ndarray(msg)
+        if arr.ndim == 2:
+            rgb = np.repeat(arr[:, :, None], 3, axis=2)
+        else:
+            rgb = arr[:, :, :3]
         with lock:
             state["rgb"] = np.asarray(rgb, dtype=np.uint8)
             state["stamp"] = float(msg.header.stamp.sec) + 1e-9 * float(msg.header.stamp.nanosec)
             _maybe_ready()
 
     def on_depth(msg: Image) -> None:
-        depth = bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-        depth = np.asarray(depth)
+        depth = _image_msg_to_ndarray(msg)
         if depth.dtype == np.uint16:
             depth_m = depth.astype(np.float32) / 1000.0
         else:
