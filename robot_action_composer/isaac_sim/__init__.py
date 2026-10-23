@@ -26,13 +26,24 @@ from simulation_interfaces.srv import GetEntityState, SetSimulationState
 SERVICE_CALL_TIMEOUT = 8.0
 SERVICE_CALL_RETRIES = 3
 SERVICE_RETRY_DELAY = 0.2
+# Probe USD attrs via /get_prim_attribute: keep short — missing attrs are common and
+# should not burn retries×8s (that looked like a task-queue hang).
+PRIM_ATTR_PROBE_TIMEOUT = 2.0
+PRIM_ATTR_PROBE_RETRIES = 1
 T = TypeVar("T")
 
 _service_node: Node | None = None
-_service_lock = threading.Lock()
+_service_clients: dict[str, object] = {}
+# RLock: node/client create and call+spin share one lock (serialize reuse).
+_service_lock = threading.RLock()
 
 
 def _ensure_service_node() -> Node:
+    """Shared Isaac service client node.
+
+    Uses **wall clock** (``use_sim_time=False``). ``wait_for_service`` under sim time
+    can block forever if this node is not spun on ``/clock`` while waiting.
+    """
     global _service_node
     with _service_lock:
         if _service_node is not None:
@@ -41,10 +52,31 @@ def _ensure_service_node() -> Node:
             rclpy.init()
         _service_node = rclpy.create_node(
             "lerobot_isaac_service_client",
-            parameter_overrides=[Parameter("use_sim_time", value=True)],
+            parameter_overrides=[Parameter("use_sim_time", value=False)],
             automatically_declare_parameters_from_overrides=True,
         )
         return _service_node
+
+
+def _get_service_client(service_type: type, service_name: str) -> tuple[Node, object]:
+    """Reuse one client per service name (avoid destroy-after-timeout → Isaac sendResponse spam)."""
+    node = _ensure_service_node()
+    with _service_lock:
+        client = _service_clients.get(service_name)
+        if client is None:
+            client = node.create_client(service_type, service_name)
+            _service_clients[service_name] = client
+        return node, client
+
+
+def _wait_for_service_wall(client: object, node: Node, timeout: float) -> bool:
+    """Wait for a service using wall time + ``spin_once`` (discovery / responses)."""
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        if client.service_is_ready():
+            return True
+        rclpy.spin_once(node, timeout_sec=0.05)
+    return bool(client.service_is_ready())
 
 
 def _call_service_once(
@@ -54,10 +86,9 @@ def _call_service_once(
     *,
     timeout: float = SERVICE_CALL_TIMEOUT,
 ) -> object:
-    node = _ensure_service_node()
-    client = node.create_client(service_type, service_name)
-    try:
-        if not client.wait_for_service(timeout_sec=max(0.1, timeout)):
+    node, client = _get_service_client(service_type, service_name)
+    with _service_lock:
+        if not _wait_for_service_wall(client, node, timeout):
             raise RuntimeError(f"Service '{service_name}' unavailable within {timeout:.1f}s")
         future = client.call_async(request)
         start = time.monotonic()
@@ -68,11 +99,6 @@ def _call_service_once(
         if future.exception() is not None:
             raise RuntimeError(f"Service '{service_name}' call failed: {future.exception()}")
         return future.result()
-    finally:
-        try:
-            node.destroy_client(client)
-        except Exception:
-            pass
 
 
 def _call_service_with_retry(
@@ -162,6 +188,54 @@ def set_simulation_state(
         )
 
 
+def _parse_prim_attr_vec(value: str, *, expected_len: int, path: str, attribute: str) -> np.ndarray:
+    vec = np.fromstring(value.strip().strip("[]"), sep=",")
+    if vec.shape[0] != expected_len:
+        raise RuntimeError(
+            f"Invalid {attribute} for '{path}': expected {expected_len} values, got {value!r}"
+        )
+    return vec
+
+
+def try_get_prim_attribute(
+    path: str,
+    attribute: str,
+    *,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+    retries: int = PRIM_ATTR_PROBE_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> str | None:
+    """Return attribute value string, or ``None`` if missing / service unsuccessful."""
+    request = GetPrimAttribute.Request()
+    request.path = path
+    request.attribute = attribute
+    try:
+        result = _call_service_with_retry(
+            lambda: _call_service_once(
+                GetPrimAttribute,
+                "/get_prim_attribute",
+                request,
+                timeout=timeout,
+            ),
+            f"try_get_prim_attribute('{path}', '{attribute}')",
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+    except Exception as exc:
+        print(
+            f"[Isaac] WARN: get_prim_attribute failed for {path!r} "
+            f"{attribute!r}: {exc}"
+        )
+        return None
+    if not getattr(result, "success", False):
+        return None
+    raw = getattr(result, "value", None)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
 def get_prim_translate_local(
     path: str,
     timeout: float = SERVICE_CALL_TIMEOUT,
@@ -186,10 +260,58 @@ def get_prim_translate_local(
         raise RuntimeError(
             f"get_prim_attribute unsuccessful for '{path}': {result.message or 'unknown error'}"
         )
-    vec = np.fromstring(result.value.strip().strip("[]"), sep=",")
-    if vec.shape[0] != 3:
-        raise RuntimeError(f"Invalid translate vector for '{path}': {result.value}")
+    vec = _parse_prim_attr_vec(result.value, expected_len=3, path=path, attribute="xformOp:translate")
     return float(vec[0]), float(vec[1]), float(vec[2])
+
+
+def try_get_prim_translate_local(
+    path: str,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+    retries: int = PRIM_ATTR_PROBE_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> tuple[float, float, float] | None:
+    """Local translate, or ``None`` if attribute missing (treat as identity translate)."""
+    raw = try_get_prim_attribute(
+        path,
+        "xformOp:translate",
+        timeout=timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    if raw is None:
+        return None
+    try:
+        vec = _parse_prim_attr_vec(raw, expected_len=3, path=path, attribute="xformOp:translate")
+    except RuntimeError:
+        return None
+    return float(vec[0]), float(vec[1]), float(vec[2])
+
+
+def try_get_prim_orient_local_xyzw(
+    path: str,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+    retries: int = PRIM_ATTR_PROBE_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> tuple[float, float, float, float] | None:
+    """Local ``xformOp:orient`` as xyzw, or ``None`` if missing (treat as identity).
+
+    Omniverse authors orient as **wxyz**; return value is ROS-style **xyzw**.
+    """
+    raw = try_get_prim_attribute(
+        path,
+        "xformOp:orient",
+        timeout=timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    if raw is None:
+        return None
+    try:
+        vec = _parse_prim_attr_vec(raw, expected_len=4, path=path, attribute="xformOp:orient")
+    except RuntimeError:
+        return None
+    w, x, y, z = float(vec[0]), float(vec[1]), float(vec[2]), float(vec[3])
+    return x, y, z, w
 
 
 def set_prim_translate_local(
@@ -296,6 +418,74 @@ def randomize_object_xyz_after_reset(
     )
 
 
+def wait_entity_pose_readable(
+    entity: str,
+    *,
+    max_wait: float = 10.0,
+    poll_interval: float = 0.25,
+    timeout: float = SERVICE_CALL_TIMEOUT,
+    retries: int = 1,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> bool:
+    """Poll ``/get_entity_state`` until PhysX views are readable after STOP→PLAY.
+
+    Isaac reset briefly invalidates articulation / RigidBody views; callers that
+    immediately query poses or send Nav2 goals see intermittent failures.
+    """
+    sleep = sleep_fn or time.sleep
+    deadline = time.monotonic() + max(0.0, float(max_wait))
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            get_entity_pose_world_service(
+                entity,
+                timeout=timeout,
+                retries=max(1, int(retries)),
+                retry_delay=retry_delay,
+            )
+            print(f"[OK] Entity pose readable after reset: '{entity}'")
+            return True
+        except Exception as exc:
+            last_err = exc
+            sleep(max(0.05, float(poll_interval)))
+    print(
+        f"[WARN] Entity pose still unreadable after {max_wait:.1f}s: '{entity}'"
+        + (f" ({last_err})" if last_err is not None else "")
+    )
+    return False
+
+
+def _timeline_stop_then_play(
+    *,
+    sim_state_reset: int,
+    sim_state_playing: int,
+    sim_service_timeout: float,
+    retries: int,
+    retry_delay: float,
+    stop_to_play_gap_s: float = 0.4,
+) -> None:
+    """STOP, then PLAY.
+
+    Wall-clock gap (not sim time): while stopped the sim clock does not advance,
+    and ``ArticulationController`` clears its handle on timeline STOP. PLAY too
+    soon recreates that handle before PhysX is back.
+    """
+    set_simulation_state(
+        sim_state_reset,
+        timeout=sim_service_timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    time.sleep(max(0.0, float(stop_to_play_gap_s)))
+    set_simulation_state(
+        sim_state_playing,
+        timeout=sim_service_timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+
+
 def reset_simulation_state(
     settle_entity_path: str,
     *,
@@ -311,26 +501,50 @@ def reset_simulation_state(
     settle_sample_interval: float = 0.05,
     settle_stable_samples: int = 3,
     settle_position_epsilon: float = 0.002,
+    also_settle_entity_path: str = "",
+    physx_ready_max_wait: float = 8.0,
 ) -> None:
     """Reset/play Isaac sim，等待 ``post_reset_wait``，再可选对 ``settle_entity_path`` 做位姿稳定检测。
+
+    STOP and PLAY once. A short wall-clock gap sits between them so
+    ``ArticulationController`` drops its handle on STOP before PLAY creates a
+    new one. Then wait until ``settle_entity_path`` (and optional
+    ``also_settle_entity_path``) answer ``/get_entity_state``.
 
     **不**修改任何物体 prim 的平移；需要随机化时在任务队列**第一个顺序块**使用技能
     ``env.randomize_object_local_xyz``（或自行调用 ``randomize_object_xyz_after_reset``）。
     """
-    set_simulation_state(
-        sim_state_reset,
-        timeout=sim_service_timeout,
-        retries=retries,
-        retry_delay=retry_delay,
-    )
-    set_simulation_state(
-        sim_state_playing,
-        timeout=sim_service_timeout,
+    _timeline_stop_then_play(
+        sim_state_reset=sim_state_reset,
+        sim_state_playing=sim_state_playing,
+        sim_service_timeout=sim_service_timeout,
         retries=retries,
         retry_delay=retry_delay,
     )
     print("[OK] Simulation reset completed")
     (sleep_fn or time.sleep)(post_reset_wait)
+
+    ready_budget = max(0.0, float(physx_ready_max_wait))
+    if settle_entity_path and ready_budget > 0.0:
+        wait_entity_pose_readable(
+            settle_entity_path,
+            max_wait=ready_budget,
+            timeout=sim_service_timeout,
+            retries=1,
+            retry_delay=retry_delay,
+            sleep_fn=sleep_fn,
+        )
+    also = (also_settle_entity_path or "").strip()
+    if also and also != settle_entity_path and ready_budget > 0.0:
+        wait_entity_pose_readable(
+            also,
+            max_wait=ready_budget,
+            timeout=sim_service_timeout,
+            retries=1,
+            retry_delay=retry_delay,
+            sleep_fn=sleep_fn,
+        )
+
     if enable_settle_wait:
         wait_entity_position_stable(
             settle_entity_path,
@@ -343,6 +557,18 @@ def reset_simulation_state(
             retry_delay=retry_delay,
             sleep_fn=sleep_fn,
         )
+        if also and also != settle_entity_path:
+            wait_entity_position_stable(
+                also,
+                max_wait=settle_max_wait,
+                sample_interval=settle_sample_interval,
+                stable_samples=settle_stable_samples,
+                position_epsilon=settle_position_epsilon,
+                timeout=sim_service_timeout,
+                retries=retries,
+                retry_delay=retry_delay,
+                sleep_fn=sleep_fn,
+            )
 
 
 def wait_entity_position_stable(

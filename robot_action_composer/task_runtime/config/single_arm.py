@@ -19,6 +19,8 @@ class QueueSliceCommon:
     pose_tol_ori: float = 0.08
     require_orientation_reach: bool = False
     use_object_orientation: bool = False
+    gripper_open: float | None = None
+    gripper_closed: float | None = None
 
 
 @dataclass(frozen=True)
@@ -31,18 +33,38 @@ class QueueSlicePick:
     ee_lift_offset: tuple[float, float, float] | None = None
     ee_retreat_offset: tuple[float, float, float] | None = None
     retreat_open_gripper: bool = False
+    gripper_closed: float | None = None
     object_prim_path: str = ""
+    #: 任务 ``objects`` / ``active_object`` 引用
+    object_key: str | None = None
+    #: 相对刚体的抓取 frame id（见 objects.grasps）
+    grasp_id: str | None = None
+    #: 完整抓取 prim path（须为 object_prim_path 子孙）
+    grasp_prim_path: str | None = None
     ee_base_orientation: tuple[float, float, float, float] = (-0.7, 0.7, 0.0, 0.0)
     ee_pick_axis: str = "+z"
     ee_pick_direction_vector: tuple[float, float, float] | None = None
     motion_frame_id: str | None = None
     tf_lookup_timeout: float | None = None
     arm_movel_duration: float | None = None
+    # 标定语义：ee_base / 工具系偏移假定机物 X 对齐；object 时按物体姿态（默认仅 yaw）左乘。
+    ee_orientation_frame: str = "motion"
+    object_orientation_mode: str = "yaw"
+    # 标称物体 yaw：数值（弧度）或 "auto"（吸附到最近的 k·π/2）
+    aligned_object_yaw: float | str = "auto"
+    # 标称物体 roll：仅 object_orientation_mode=yaw_roll 时生效；数值或 "auto"
+    aligned_object_roll: float | str = "auto"
 
 
 @dataclass(frozen=True)
 class QueueSlicePlace:
     object_prim_path: str = ""
+    #: 任务 ``objects`` / ``.meta/objects`` 引用（放置参考物；不回退 active_object）
+    object_key: str | None = None
+    #: 相对刚体的放置 frame id（见 objects.grasps）
+    grasp_id: str | None = None
+    #: 完整放置 prim path（须为 object_prim_path 子孙）
+    grasp_prim_path: str | None = None
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     ee_place_axis: str | None = None
     prepare_offset: tuple[float, float, float] | None = None
@@ -50,6 +72,7 @@ class QueueSlicePlace:
     place_position: tuple[float, float, float] | None = None
     ee_base_orientation: tuple[float, float, float, float] | None = None
     ee_retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gripper_open: float | None = None
     motion_frame_id: str | None = None
     tf_lookup_timeout: float | None = None
     arm_movel_duration: float | None = None
@@ -104,8 +127,11 @@ def format_queue_single_arm_summary(scene: str, task: QueueSingleArmSlice) -> st
         f"object_position_offset={p.object_position_offset}",
         f"motion_frame_id={p.motion_frame_id}, arm_movel_duration={p.arm_movel_duration}",
     ]
-    if pl.object_prim_path:
-        parts.append(f"place_object={pl.object_prim_path}, place_offset={pl.object_position_offset}")
+    if pl.object_prim_path or pl.object_key:
+        parts.append(
+            f"place_object={pl.object_prim_path or pl.object_key}, "
+            f"place_offset={pl.object_position_offset}, grasp_id={pl.grasp_id}"
+        )
     else:
         parts.append(f"place_position={pl.place_position}")
     parts.append(f"ee_base_orientation={pl.ee_base_orientation}")
@@ -131,6 +157,14 @@ def overlay_single_arm_pick_place(
     return overlay_queue_single_arm_place_from_params(q, place_d)
 
 
+_GRIPPER_SLICE_ONLY_KEYS = frozenset({"gripper_open", "gripper_closed"})
+
+
+def _params_for_common_overlay(params: Mapping[str, Any]) -> dict[str, Any]:
+    """``gripper_*`` on pick/place blocks apply to that slice only, not ``common``."""
+    return {k: v for k, v in params.items() if k not in _GRIPPER_SLICE_ONLY_KEYS}
+
+
 def overlay_queue_single_arm_pick_from_params(
     queue: QueueSingleArmSlice,
     params: Mapping[str, Any],
@@ -139,7 +173,7 @@ def overlay_queue_single_arm_pick_from_params(
     if not params:
         return queue
     p = dict(params)
-    co = kwargs_for_dataclass(QueueSliceCommon, p)
+    co = kwargs_for_dataclass(QueueSliceCommon, _params_for_common_overlay(p))
     pc = kwargs_for_dataclass(QueueSlicePick, p)
     new_common = replace(queue.common, **co) if co else queue.common
     new_pick = replace(queue.pick, **pc) if pc else queue.pick
@@ -154,7 +188,7 @@ def overlay_queue_single_arm_place_from_params(
     if not params:
         return queue
     p = dict(params)
-    co = kwargs_for_dataclass(QueueSliceCommon, p)
+    co = kwargs_for_dataclass(QueueSliceCommon, _params_for_common_overlay(p))
     pl = kwargs_for_dataclass(QueueSlicePlace, p)
     new_common = replace(queue.common, **co) if co else queue.common
     new_place = replace(queue.place, **pl) if pl else queue.place
@@ -168,7 +202,7 @@ def overlay_queue_single_arm_from_params(
     if not params:
         return queue
     p = dict(params)
-    co = kwargs_for_dataclass(QueueSliceCommon, p)
+    co = kwargs_for_dataclass(QueueSliceCommon, _params_for_common_overlay(p))
     pc = kwargs_for_dataclass(QueueSlicePick, p)
     pl = kwargs_for_dataclass(QueueSlicePlace, p)
     new_common = replace(queue.common, **co) if co else queue.common

@@ -8,6 +8,7 @@ Drawer Cartesian 序列只读 :class:`DrawerGeometryConfig`，
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,11 +35,31 @@ class DrawerGeometryConfig:
     """Drawer cabinet / handle prim paths (structured overlays → ``MergedQueueConfig.drawer``)."""
 
     object_prim_path: str = ""
-    #: 拉手参考点在 **抽屉 Prim 局部坐标** 下的位移（米）。通常取包围盒中心 ``(handle_extent_max+handle_extent_min)/2*drawer_scale`` 各轴，离线算好写入，避免运行时再从 min/max 推导。
+    #: 从任务 ``objects`` / ``.meta/objects`` 解析 prim（与 ``object_prim_path`` 二选一；显式 prim 优先）。
+    object_key: str | None = None
+    #: 相对抽屉刚体的拉手 frame id（见 ``objects.grasps``）；运行时自动解析为物体系偏移。
+    grasp_id: str | None = None
+    #: 拉手完整 prim path（须为 ``object_prim_path`` 子孙）；与 ``grasp_id`` 二选一。
+    grasp_prim_path: str = ""
+    #: 拉手参考点在 **抽屉 Prim 局部坐标** 下的位移（米）。可与 ``grasp_id`` 叠加；无 grasp 时走旧路径（离线填包围盒中心）。
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    #: 标称机物相对朝向下的期望末端姿态 ``xyzw``（与 ``single_arm.pick.ee_base_orientation`` 同语义）。
+    #: 决定接近轴与张合方向；水平把手需张合轴大致垂直于杆长轴。默认保留历史硬编码。
+    ee_base_orientation: tuple[float, float, float, float] = (0.5, 0.5, 0.5, -0.5)
+    #: 对齐参考姿态来源：``handle`` 用拉手 frame 朝向；``drawer`` 用抽屉刚体朝向（旧行为）。
+    orient_from: str = "handle"
+    #: 传给 ``compose_aligned_ee_orientation``；默认 ``object``（柜体跟完整姿态，非导航 yaw-snap）。
+    ee_orientation_frame: str = "object"
+    object_orientation_mode: str = "full"
+    #: 标称物体 yaw；默认 ``0``（恒等标称 → ``q_ee = q_obj ⊗ ee_base``）。勿默认 ``auto``。
+    aligned_object_yaw: float | str = 0.0
+    #: 拉开方向在 **抽屉刚体局部** 下的轴（默认 −Y）；与张合对齐解耦。
+    pull_axis_local: tuple[float, float, float] = (0.0, -1.0, 0.0)
+    #: 关抽屉时相对 ``pull_open`` 缓存末端姿态的固定右乘 ``xyzw``（默认保留历史硬编码）。
+    close_ee_delta_xyzw: tuple[float, float, float, float] = (0.0, -0.2164396, 0.0, 0.976296)
     #: 拉手闭合段沿工具系 +Z 的位移（米），语义同 ``pick_clearance``；写入 ``skill_defaults.single_arm.drawer``。
     drawer_clearance: float = 0.01
-    #: 拉开抽屉时沿拉手拉出方向末段行程（米），语义同 pick 的 ``retreat_direction_extra``；在 ``skill_defaults.single_arm.drawer`` 中配置。
+    #: 拉开抽屉时沿拉手拉出方向的行程（米）；在 ``skill_defaults.single_arm.drawer`` 中配置。
     pull_distance: float = 0.18
     #: 拉手预接近（工具系 ``[x,y,z]``，语义与 ``single_arm.pick.prepare_offset`` 相同，但**仅**用于 ``pull_open`` / ``close_push``）。省略或 ``None`` 时不生成预接近段（**不**读取 ``pick.prepare_offset``）。
     prepare_offset: tuple[float, float, float] | None = None
@@ -82,6 +103,42 @@ def _clone_pose(src: Pose) -> Pose:
     dst.orientation.z = float(src.orientation.z)
     dst.orientation.w = float(src.orientation.w)
     return dst
+
+
+def _unit_direction_xyz(vec: tuple[float, float, float]) -> tuple[float, float, float]:
+    vx, vy, vz = float(vec[0]), float(vec[1]), float(vec[2])
+    norm = math.sqrt(vx * vx + vy * vy + vz * vz)
+    if norm < 1e-8:
+        raise ValueError(f"pull direction norm is too small: {vec!r}")
+    return (vx / norm, vy / norm, vz / norm)
+
+
+def _append_drawer_pull_stage(
+    arm_seq: list[ArmStage],
+    *,
+    pull_direction_xyz: tuple[float, float, float],
+    pull_distance: float,
+    gripper_closed: float,
+    stage_prefix: str,
+) -> list[ArmStage]:
+    """Grasp 后沿拉手方向拉开抽屉（``single_arm.drawer.pull_open`` 专用，不走通用 pick retreat）。"""
+    if pull_distance <= 1e-12:
+        return arm_seq
+    ux, uy, uz = _unit_direction_xyz(pull_direction_xyz)
+    grasp_pose = arm_seq[-1].target.pose
+    pull_pose = _clone_pose(grasp_pose)
+    pull_pose.position.x += ux * float(pull_distance)
+    pull_pose.position.y += uy * float(pull_distance)
+    pull_pose.position.z += uz * float(pull_distance)
+    idx = len(arm_seq) + 1
+    out = list(arm_seq)
+    out.append(
+        ArmStage(
+            f"{stage_prefix}-{idx}-Pull",
+            ArmTarget(pose=pull_pose, gripper=gripper_closed),
+        )
+    )
+    return out
 
 
 def _append_pull_open_release_retreat_stages(
@@ -141,15 +198,18 @@ def build_single_arm_pull_drawer_sequence(
             ee_base_orientation=ee_base_orientation,
             prepare_offset=prep,
             pick_clearance=drawer.drawer_clearance,
-            ee_pick_direction_vector=pull_direction_xyz,
             object_position_offset=(0.0, 0.0, 0.0),
-            retreat_direction_extra=pull_distance,
-            retreat_offset=(0.0, 0.0, 0.0),
-            retreat_xyz=None,
             gripper_open=gripper_open,
             gripper_closed=gripper_closed,
             stage_prefix=stage_prefix,
         )
+    )
+    arm_seq = _append_drawer_pull_stage(
+        arm_seq,
+        pull_direction_xyz=pull_direction_xyz,
+        pull_distance=pull_distance,
+        gripper_closed=gripper_closed,
+        stage_prefix=stage_prefix,
     )
     arm_seq = _append_pull_open_release_retreat_stages(
         arm_seq,
@@ -179,11 +239,7 @@ def build_single_arm_close_drawer_sequence(
             ee_base_orientation=ee_base_orientation,
             prepare_offset=prep,
             pick_clearance=drawer.drawer_clearance,
-            ee_pick_direction_vector=pull_direction_xyz,
             object_position_offset=(0.0, 0.0, 0.0),
-            retreat_direction_extra=0,
-            retreat_offset=(0.0, 0.0, 0.0),
-            retreat_xyz=None,
             gripper_open=gripper_open,
             gripper_closed=gripper_closed,
             stage_prefix="PickPlaceFlow",

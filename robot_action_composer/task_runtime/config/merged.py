@@ -141,13 +141,36 @@ def _resolve_place_config(
     return cfg
 
 
-def _try_drawer(values: Mapping[str, Any]) -> Any | None:
-    raw = values.get("object_prim_path")
+def _try_drawer(
+    values: Mapping[str, Any],
+    *,
+    objects: Mapping[str, Mapping[str, Any]] | None = None,
+    active_object: str | None = None,
+) -> Any | None:
+    flat = dict(values)
+    raw = flat.get("object_prim_path")
     if raw is None or (isinstance(raw, str) and not str(raw).strip()):
-        return None
+        from robot_action_composer.task_runtime.object_binding import (  # pyright: ignore[reportMissingImports]
+            resolve_object_prim_path,
+        )
+
+        resolved = resolve_object_prim_path(
+            flat,
+            objects=objects,
+            prim_param="object_prim_path",
+            key_params="object_key",
+            active_object=active_object,
+            use_active_object=False,
+            required=False,
+            label="single_arm.drawer",
+        )
+        if resolved:
+            flat["object_prim_path"] = resolved
+        else:
+            return None
     from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 
-    return DrawerGeometryConfig(**kwargs_for_dataclass(DrawerGeometryConfig, values))
+    return DrawerGeometryConfig(**kwargs_for_dataclass(DrawerGeometryConfig, flat))
 
 
 @dataclass(frozen=True)
@@ -161,6 +184,10 @@ class MergedQueueConfig:
     drawer: DrawerGeometryConfig | None = None
     # 可选：任务 YAML（如 runtime_defaults / 场景 root 覆盖）覆盖 robot_config 的 Isaac base prim 路径
     base_link_entity_path: str | None = None
+    #: 合并后的物体清单（``.meta`` ∪ 任务 ``objects`` ∪ scene ``objects``）
+    objects: Mapping[str, Mapping[str, Any]] | None = None
+    #: 技能省略 ``object_key`` 时的默认物体
+    active_object: str | None = None
 
 
 def _optional_base_link_entity_path(overrides: Mapping[str, Any]) -> str | None:
@@ -179,6 +206,8 @@ def build_merged_queue_config(
     skill_defaults: Mapping[str, Any] | None = None,
     scene_preset: Mapping[str, object] | None = None,
     base_runtime: MergedQueueConfig | None = None,
+    objects: Mapping[str, Mapping[str, Any]] | None = None,
+    active_object: str | None = None,
 ) -> MergedQueueConfig:
     """Build runtime config from structured overlays."""
     root_base = validate_runtime_defaults_keys(runtime_defaults or {}, context="runtime_defaults")
@@ -231,12 +260,17 @@ def build_merged_queue_config(
         from robot_action_composer.motion_generation.tasks.drawer import DrawerGeometryConfig  # pyright: ignore[reportMissingImports]
 
         drawer_base = {f.name: getattr(base_runtime.drawer, f.name) for f in fields(DrawerGeometryConfig)}
+    objs = objects if objects is not None else (base_runtime.objects if base_runtime is not None else None)
+    act = active_object if active_object is not None else (
+        base_runtime.active_object if base_runtime is not None else None
+    )
+
     drawer_flat = {
         **drawer_base,
         **dict(sd.get("single_arm.drawer") or {}),
         **dict(scene_sp.get("single_arm.drawer") or {}),
     }
-    drawer = _try_drawer(drawer_flat)
+    drawer = _try_drawer(drawer_flat, objects=objs, active_object=act)
 
     place_base = (
         {f.name: getattr(base_runtime.place, f.name) for f in fields(BimanualPlaceTaskConfig)}
@@ -261,6 +295,8 @@ def build_merged_queue_config(
         handover=handover,
         drawer=drawer,
         base_link_entity_path=base_path,
+        objects=objs,
+        active_object=act,
     )
 
 
@@ -281,6 +317,10 @@ def format_merged_queue_summary(scene: str, cfg: MergedQueueConfig) -> str:
     parts = [format_queue_single_arm_summary(scene, cfg.single_arm)]
     if cfg.base_link_entity_path:
         parts.append(f"base_link_entity_path={cfg.base_link_entity_path}")
+    if cfg.objects:
+        parts.append(f"objects={sorted(cfg.objects)}")
+    if cfg.active_object:
+        parts.append(f"active_object={cfg.active_object}")
     if cfg.drawer is not None:
         from robot_action_composer.motion_generation.tasks.drawer import format_drawer_task_cfg_summary  # pyright: ignore[reportMissingImports]
 

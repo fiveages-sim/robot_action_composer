@@ -1,0 +1,95 @@
+# Default grasp-generation settings (package).
+# Override per robot: examples/IsaacSim/robots/<Robot>/grasp_generation.yaml
+
+robot_key: fiveages_w2
+arm: right
+motion_frame_id: base_link
+base_frame: base_link
+
+camera_frames:
+  - head_camera
+  - head_camera_optical_frame
+  - head_link2
+
+camera_prim: /World/FiveAges_W2/Head_V1/head_link2/head_camera/head_camera
+base_prim: /World/FiveAges_W2/base_link
+
+rgb_topic: /head_camera/rgb
+depth_topic: /head_camera/depth
+info_topic: /head_camera/camera_info
+
+viser_port: 8080
+capture_dir: data/w2_head_capture
+
+# Leave empty to auto-resolve submodules/hug/.venv/bin/python
+hug_python: ""
+hug_root: ""
+sampling_steps: 1
+
+# Phase 2A: HUG wrist maps to hug_tip_frame; OCS2 tracks control_tip_frame
+# (W2+O7: hand mounts on tcp; env may reorient tcp — use live TF offset)
+hug_tip_frame: "{arm}_tcp"
+control_tip_frame: "{arm}_eef"
+mano_to_tip_rpy_deg: [0.0, 0.0, 0.0]
+hand_profile: wuji_hand2
+keypoint_rpy_deg: [0.0, 0.0, 0.0]
+hug_mano_is_right: true
+# Amplify retarget curl (not slam to joint limits)
+squeeze_amount: 0.5
+thumb_abd_boost: 1.25
+
+# Close-phase ablations B0–B5 (docs/CLOSE_EXECUTORS.md)
+# Close button: gated retarget → settle → executor (one click)
+close_executor: B4
+close_steps: 40
+close_dt_s: 0.04
+contact_hold_frames: 2
+min_contact_fingers: 2
+freeze_mode: keep_tip
+ramp_steps: 25
+ramp_amount: 0.18
+tip_ramp_boost: 0.35
+tip_pinch_steps: 12
+tip_pinch_amount: 0.25
+soft_stop_force_n: 15.0
+post_close_firm_s: 2.0
+wrist_press_m: 0.008
+wrist_press_axis: tip_neg_z
+auto_retarget_on_close: true
+shape_steps: 30
+shape_settle_s: 0.5
+shape_use_contact_gate: false
+pre_close_lift_m: 0
+# B2 only (after shape). B3–B5 ignore — their mechanism is gate/ramp, not open-loop squeeze.
+post_shape_squeeze_scale: 1.0
+ignore_contact_partners:
+  # Do NOT list default_environment / bare table — apple/bottle paths contain them.
+  - ground
+  - GroundPlane
+  - defaultGroundPlane
+  - TableTop
+  - floor
+object_push_warn_m: 0.015
+contact_topic_prefix: ""
+use_contact_bool: true
+force_mag_threshold_n: 0.0
+always_log_contact: true
+object_frame: ""
+close_log_dir: ""
+
+position_only: true
+arrival_timeout: 8.0
+tf_timeout: 2.0
+execute_default: false
+
+# Privileged auto-grasp (override per robot yaml). Empty grasp_objects → UI hides auto.
+# No scene clear / exile — table props stay as authored in the env USD.
+default_object_key: ""
+grasp_objects: {}
+
+home_joints: {}
+home_settle_s: 5.0
+grasp_home_lift_m: 0.20
+post_grasp_lift: true
+post_grasp_lift_m: 0.20
+post_grasp_settle_s: 1.5

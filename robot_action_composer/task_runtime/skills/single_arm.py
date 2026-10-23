@@ -36,14 +36,26 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     SERVICE_RETRY_DELAY,
     get_object_pose_from_service,
 )
+from robot_action_composer.task_runtime.object_binding import resolve_pick_object_binding
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
     apply_object_local_offset_to_pose,
     resolve_place_skill_from_entity,
 )
+from robot_action_composer.motion_generation.tasks.object_orientation import (  # pyright: ignore[reportMissingImports]
+    compose_aligned_ee_orientation,
+)
 
 from robot_action_composer.task_runtime.context import QueueRuntimeContext, queue_primary_ee_frame_id
+from robot_action_composer.task_runtime.ee_motion_frame import (
+    clone_pose,
+    current_ee_orientation_xyzw,
+    param_vec3,
+    pose_quat_xyzw,
+    read_current_ee_pose_in_motion_frame,
+    set_pose_quat_xyzw,
+)
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.config.single_arm import (
     QueueSingleArmSlice,
@@ -139,6 +151,36 @@ def _scratch_pose_entry_to_geometry_pose(entry: Mapping[str, Any]) -> Pose:
     return pose
 
 
+def _binding_params_for_pick(params: Mapping[str, Any], pk: Any) -> dict[str, Any]:
+    """Build resolve_pick_object_binding input; preserve explicit offset key presence from ``params``."""
+    out: dict[str, Any] = {}
+    for key in ("object_prim_path", "object_position_offset", "object_key", "grasp_id", "grasp_prim_path"):
+        if key in params:
+            out[key] = params[key]
+    for key in ("object_prim_path", "object_key", "grasp_id", "grasp_prim_path"):
+        if key in out:
+            continue
+        val = getattr(pk, key, None)
+        if val is None:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        out[key] = val
+    return out
+
+
+def _clone_pose(pose: Pose) -> Pose:
+    out = Pose()
+    out.position.x = float(pose.position.x)
+    out.position.y = float(pose.position.y)
+    out.position.z = float(pose.position.z)
+    out.orientation.x = float(pose.orientation.x)
+    out.orientation.y = float(pose.orientation.y)
+    out.orientation.z = float(pose.orientation.z)
+    out.orientation.w = float(pose.orientation.w)
+    return out
+
+
 def _resolve_object_target_pose_from_pick_like_params(
     *,
     ctx: QueueRuntimeContext,
@@ -147,13 +189,18 @@ def _resolve_object_target_pose_from_pick_like_params(
     motion_frame_id: Any,
     tf_lookup_timeout: Any,
     label: str,
-) -> tuple[Pose, str]:
-    """Resolve object pose (+ local offset) into execution frame, mirroring ``single_arm.pick``."""
+) -> tuple[Pose, Pose, str]:
+    """Resolve grasp target + object orientation from ``object_prim_path``.
+
+    Returns ``(grasp_pose, object_orient_pose, exec_frame)``. Orientation for
+    ``compose_aligned_ee_orientation`` must come from the rigid-body prim pose
+    (after TF), not from the grasp-offset position.
+    """
     exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
     arm_side = ctx.task_cfg.common.arm.strip().lower()
     object_role = "pick_target" if label == "single_arm.pick" else "move_to_object_target"
     if ctx.object_resolution is not None:
-        target = resolve_object_pose_for_task(
+        obj_pose = resolve_object_pose_for_task(
             ctx,
             object_prim_path=object_prim_path,
             include_orientation=True,
@@ -164,7 +211,7 @@ def _resolve_object_target_pose_from_pick_like_params(
             retry_delay=SERVICE_RETRY_DELAY,
         )
     else:
-        target = get_object_pose_from_service(
+        obj_pose = get_object_pose_from_service(
             ctx.base_world_pos,
             ctx.base_world_quat,
             object_prim_path,
@@ -175,19 +222,20 @@ def _resolve_object_target_pose_from_pick_like_params(
         if not hasattr(iface, "transform_pose"):
             raise TypeError(f"{label}: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)")
         transformed = iface.transform_pose(
-            target,
+            obj_pose,
             str(ctx.frame_id),
             exec_f,
             timeout=_pick_tf_timeout(tf_lookup_timeout),
         )
         if transformed is None:
             raise RuntimeError(
-                f"{label}: TF {ctx.frame_id!r} -> {exec_f!r} failed for object pose; "
-                "check motion_frame_id and TF."
+                f"{label}: TF {ctx.frame_id!r} -> {exec_f!r} failed for "
+                f"object_prim_path={object_prim_path!r}; check motion_frame_id and TF."
             )
-        target = transformed
-    target = apply_object_local_offset_to_pose(target, object_position_offset)
-    return target, exec_f
+        obj_pose = transformed
+    orient_pose = _clone_pose(obj_pose)
+    grasp_pose = apply_object_local_offset_to_pose(_clone_pose(obj_pose), object_position_offset)
+    return grasp_pose, orient_pose, exec_f
 
 
 def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
@@ -196,30 +244,31 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     qt = overlay_queue_single_arm_pick_from_params(ctx.task_cfg, params)
     arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
     pk = qt.pick
-    path = pk.object_prim_path
-    object_position_offset = pk.object_position_offset
+    path, object_position_offset = resolve_pick_object_binding(
+        _binding_params_for_pick(params, pk),
+        objects=ctx.objects,
+        active_object=ctx.active_object,
+        cache=ctx.grasp_offset_cache,
+    )
     prepare_offset = pk.prepare_offset
     pick_clearance = pk.pick_clearance
     ee_base_orientation = pk.ee_base_orientation
-    ee_pick_axis = pk.ee_pick_axis
-    ee_pick_direction_vector = pk.ee_pick_direction_vector
     motion_frame_id = pk.motion_frame_id
     tf_lookup_timeout = pk.tf_lookup_timeout
     arm_movel_duration = pk.arm_movel_duration
-    retreat_offset = (
-        rotate_vector_by_quat(pk.ee_lift_offset, ee_base_orientation)
-        if pk.ee_lift_offset is not None
-        else (0.0, 0.0, 0.0)
-    )
-    retreat_xyz = (
-        rotate_vector_by_quat(pk.ee_retreat_offset, ee_base_orientation)
-        if pk.ee_retreat_offset is not None
-        else None
-    )
+    # common.use_object_orientation=true 时等价于 ee_orientation_frame=object（兼容旧字段）
+    ee_frame = str(pk.ee_orientation_frame or "motion")
+    if bool(qt.common.use_object_orientation) and ee_frame in ("", "motion", "base", "world"):
+        ee_frame = "object"
+    ori_mode = str(pk.object_orientation_mode or "yaw")
     if not path:
         raise ValueError("object_prim_path is required for skill single_arm.pick")
     _apply_arm_movel_duration(ctx, duration=arm_movel_duration, label="single_arm.pick")
-    target, exec_f = _resolve_object_target_pose_from_pick_like_params(
+    gripper_open = float(ctx.gripper_open)
+    gripper_closed = (
+        float(pk.gripper_closed) if pk.gripper_closed is not None else float(ctx.gripper_closed)
+    )
+    target, object_orient, exec_f = _resolve_object_target_pose_from_pick_like_params(
         ctx=ctx,
         object_prim_path=path,
         object_position_offset=object_position_offset,
@@ -227,23 +276,40 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         tf_lookup_timeout=tf_lookup_timeout,
         label="single_arm.pick",
     )
+    ee_orientation = compose_aligned_ee_orientation(
+        ee_base_orientation,
+        object_orient,
+        ee_orientation_frame=ee_frame,
+        object_orientation_mode=ori_mode,
+        aligned_object_yaw=pk.aligned_object_yaw,
+        aligned_object_roll=pk.aligned_object_roll,
+        object_prim_path=path,
+    )
+    retreat_offset = (
+        rotate_vector_by_quat(pk.ee_lift_offset, ee_orientation)
+        if pk.ee_lift_offset is not None
+        else None
+    )
+    retreat_xyz = (
+        rotate_vector_by_quat(pk.ee_retreat_offset, ee_orientation)
+        if pk.ee_retreat_offset is not None
+        else None
+    )
     arm_seq = build_single_arm_pick_sequence(
         target_pose=target,
-        ee_base_orientation=ee_base_orientation,
+        ee_base_orientation=ee_orientation,
         prepare_offset=prepare_offset,
         pick_clearance=pick_clearance,
-        ee_pick_axis=ee_pick_axis,
-        ee_pick_direction_vector=ee_pick_direction_vector,
         retreat_offset=retreat_offset,
         retreat_xyz=retreat_xyz,
         retreat_open_gripper=pk.retreat_open_gripper,
-        gripper_open=ctx.gripper_open,
-        gripper_closed=ctx.gripper_closed,
+        gripper_open=gripper_open,
+        gripper_closed=gripper_closed,
         stage_prefix="TaskQ-Pick",
     )
     stages = assign_to_arm(arm_seq, arm_side)
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
-    ctx.gripper_for_return_home = ctx.gripper_open if pk.retreat_open_gripper else ctx.gripper_closed
+    ctx.gripper_for_return_home = gripper_open if pk.retreat_open_gripper else gripper_closed
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
@@ -264,7 +330,7 @@ def skill_move_to_object(ctx: QueueRuntimeContext, params: Mapping[str, Any]) ->
         raise ValueError("object_prim_path is required for skill single_arm.move_to_object")
 
     _apply_arm_movel_duration(ctx, duration=pk.arm_movel_duration, label="single_arm.move_to_object")
-    target, exec_f = _resolve_object_target_pose_from_pick_like_params(
+    target, object_orient, exec_f = _resolve_object_target_pose_from_pick_like_params(
         ctx=ctx,
         object_prim_path=pk.object_prim_path,
         object_position_offset=pk.object_position_offset,
@@ -273,11 +339,23 @@ def skill_move_to_object(ctx: QueueRuntimeContext, params: Mapping[str, Any]) ->
         label="single_arm.move_to_object",
     )
 
-    # Target orientation is explicitly driven by pick-like ee_base_orientation.
-    target.orientation.x = float(pk.ee_base_orientation[0])
-    target.orientation.y = float(pk.ee_base_orientation[1])
-    target.orientation.z = float(pk.ee_base_orientation[2])
-    target.orientation.w = float(pk.ee_base_orientation[3])
+    # Target orientation: 对齐标定下的 ee_base，可选按物体 yaw/姿态左乘。
+    ee_frame = str(pk.ee_orientation_frame or "motion")
+    if bool(qt.common.use_object_orientation) and ee_frame in ("", "motion", "base", "world"):
+        ee_frame = "object"
+    ee_orientation = compose_aligned_ee_orientation(
+        pk.ee_base_orientation,
+        object_orient,
+        ee_orientation_frame=ee_frame,
+        object_orientation_mode=str(pk.object_orientation_mode or "yaw"),
+        aligned_object_yaw=pk.aligned_object_yaw,
+        aligned_object_roll=pk.aligned_object_roll,
+        object_prim_path=pk.object_prim_path,
+    )
+    target.orientation.x = float(ee_orientation[0])
+    target.orientation.y = float(ee_orientation[1])
+    target.orientation.z = float(ee_orientation[2])
+    target.orientation.w = float(ee_orientation[3])
 
     grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
     arm_seq = build_single_arm_return_home_sequence(
@@ -300,54 +378,85 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
     qt = overlay_queue_single_arm_place_from_params(ctx.task_cfg, params)
     arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
     pl = qt.place
+    explicit_orientation = pl.ee_base_orientation is not None
     pl2 = resolve_place_skill_from_entity(
         pl,
         base_world_pos=ctx.base_world_pos,
         base_world_quat=ctx.base_world_quat,
         ctx=ctx,
     )
-    if pl2.ee_base_orientation is None:
-        pl2 = replace(pl2, ee_base_orientation=qt.pick.ee_base_orientation)
+    iface = ctx.interface
+    handler = iface.left_arm_handler if arm_side == ArmSide.LEFT else iface.right_arm_handler
+    if handler is None:
+        raise TypeError("single_arm.place requires arm handler")
+
+    exec_f = _pick_execution_frame_id(ctx, pl2.motion_frame_id)
+    base_f = str(ctx.frame_id).strip() or "base_link"
+    if not explicit_orientation:
+        ori, exec_f = current_ee_orientation_xyzw(
+            iface, handler, base_f, params, label="single_arm.place"
+        )
+        pl2 = replace(pl2, ee_base_orientation=ori)
+
     if pl2.place_position is None:
         raise ValueError(
             "place_position is required for single_arm.place "
-            "(set via skill params, object_prim_path, or skill_defaults.single_arm.place)"
+            "(set via skill params, object_prim_path / object_key, or skill_defaults.single_arm.place)"
         )
     if pl2.ee_base_orientation is None:
         raise ValueError("ee_base_orientation is required for single_arm.place")
+
     _apply_arm_movel_duration(ctx, duration=pl2.arm_movel_duration, label="single_arm.place")
-    exec_f = _pick_execution_frame_id(ctx, pl2.motion_frame_id)
-    if exec_f != ctx.frame_id:
-        iface = ctx.interface
+    if exec_f != base_f:
         if not hasattr(iface, "transform_pose"):
             raise TypeError("single_arm.place: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)")
-        pose_in = pose_from_tuple(pl2.place_position, pl2.ee_base_orientation)
-        transformed = iface.transform_pose(
-            pose_in,
-            str(ctx.frame_id),
-            exec_f,
-            timeout=_pick_tf_timeout(pl2.tf_lookup_timeout),
-        )
-        if transformed is None:
-            raise RuntimeError(
-                f"single_arm.place: TF {ctx.frame_id!r} -> {exec_f!r} failed for place pose; "
-                "check motion_frame_id and TF."
+        tft = _pick_tf_timeout(pl2.tf_lookup_timeout)
+        if explicit_orientation:
+            pose_in = pose_from_tuple(pl2.place_position, pl2.ee_base_orientation)
+            transformed = iface.transform_pose(pose_in, base_f, exec_f, timeout=tft)
+            if transformed is None:
+                raise RuntimeError(
+                    f"single_arm.place: TF {base_f!r} -> {exec_f!r} failed for place pose; "
+                    "check motion_frame_id and TF."
+                )
+            pl2 = replace(
+                pl2,
+                place_position=(
+                    float(transformed.position.x),
+                    float(transformed.position.y),
+                    float(transformed.position.z),
+                ),
+                ee_base_orientation=(
+                    float(transformed.orientation.x),
+                    float(transformed.orientation.y),
+                    float(transformed.orientation.z),
+                    float(transformed.orientation.w),
+                ),
             )
-        pl2 = replace(
-            pl2,
-            place_position=(
-                float(transformed.position.x),
-                float(transformed.position.y),
-                float(transformed.position.z),
-            ),
-            ee_base_orientation=(
-                float(transformed.orientation.x),
-                float(transformed.orientation.y),
-                float(transformed.orientation.z),
-                float(transformed.orientation.w),
-            ),
-        )
+        else:
+            pose_in = Pose()
+            pose_in.position.x = float(pl2.place_position[0])
+            pose_in.position.y = float(pl2.place_position[1])
+            pose_in.position.z = float(pl2.place_position[2])
+            pose_in.orientation.w = 1.0
+            transformed = iface.transform_pose(pose_in, base_f, exec_f, timeout=tft)
+            if transformed is None:
+                raise RuntimeError(
+                    f"single_arm.place: TF {base_f!r} -> {exec_f!r} failed for place position; "
+                    "check motion_frame_id and TF."
+                )
+            pl2 = replace(
+                pl2,
+                place_position=(
+                    float(transformed.position.x),
+                    float(transformed.position.y),
+                    float(transformed.position.z),
+                ),
+            )
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, place=pl2)
+    gripper_open = (
+        float(pl2.gripper_open) if pl2.gripper_open is not None else float(ctx.gripper_open)
+    )
     arm_seq = build_single_arm_place_sequence(
         place_position=pl2.place_position,
         place_orientation=pl2.ee_base_orientation,
@@ -355,13 +464,12 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
         prepare_offset=pl2.prepare_offset,
         place_insert_clearance=pl2.place_insert_clearance,
         ee_retreat_offset=pl2.ee_retreat_offset,
-        gripper_open=ctx.gripper_open,
-        gripper_closed=ctx.gripper_closed,
+        gripper_open=gripper_open,
         stage_prefix="TaskQ-Place",
         start_index=1,
     )
     stages = assign_to_arm(arm_seq, arm_side)
-    ctx.gripper_for_return_home = ctx.gripper_open
+    ctx.gripper_for_return_home = gripper_open
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
@@ -523,77 +631,6 @@ def skill_move_to_pose(
     )
 
 
-def _clone_pose(p: Pose) -> Pose:
-    q = Pose()
-    q.position.x = p.position.x
-    q.position.y = p.position.y
-    q.position.z = p.position.z
-    q.orientation.x = p.orientation.x
-    q.orientation.y = p.orientation.y
-    q.orientation.z = p.orientation.z
-    q.orientation.w = p.orientation.w
-    return q
-
-
-def _param_vec3(
-    params: Mapping[str, Any],
-    key: str,
-    default: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    v = params.get(key)
-    if v is None:
-        return default
-    if not isinstance(v, (list, tuple)) or len(v) != 3:
-        raise ValueError(f"{key} must be a length-3 list [x, y, z]")
-    return (float(v[0]), float(v[1]), float(v[2]))
-
-
-def _pose_quat_xyzw(p: Pose) -> tuple[float, float, float, float]:
-    return (
-        float(p.orientation.x),
-        float(p.orientation.y),
-        float(p.orientation.z),
-        float(p.orientation.w),
-    )
-
-
-def _set_pose_quat_xyzw(p: Pose, q: tuple[float, float, float, float]) -> None:
-    x, y, z, w = q
-    p.orientation.x = x
-    p.orientation.y = y
-    p.orientation.z = z
-    p.orientation.w = w
-
-
-def _single_arm_pose_in_motion_frame(
-    iface: Any,
-    pose_raw: Pose,
-    pose_frame: str,
-    params: Mapping[str, Any],
-    *,
-    label: str,
-) -> tuple[Pose, str]:
-    raw_mf = params.get("motion_frame_id")
-    if raw_mf is None or (isinstance(raw_mf, str) and not str(raw_mf).strip()):
-        motion_frame = pose_frame
-    else:
-        motion_frame = str(raw_mf).strip()
-    try:
-        tft = float(params.get("tf_lookup_timeout", 2.0))
-    except (TypeError, ValueError):
-        tft = 2.0
-    if motion_frame == pose_frame:
-        return _clone_pose(pose_raw), motion_frame
-    if not hasattr(iface, "transform_pose"):
-        raise TypeError(f"{label}: motion_frame_id requires ROS2RobotInterface.transform_pose (TF buffer)")
-    out = iface.transform_pose(pose_raw, pose_frame, motion_frame, timeout=tft)
-    if out is None:
-        raise RuntimeError(
-            f"{label}: TF {pose_frame!r} -> {motion_frame!r} failed (timeout={tft}s)."
-        )
-    return out, motion_frame
-
-
 def skill_move_relative(
     ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
@@ -604,7 +641,7 @@ def skill_move_relative(
         position_delta (list): ``[dx, dy, dz]``（米），在 ``motion_frame_id`` 下叠加到当前位置，默认 ``[0,0,0]``。
         orientation_delta_rpy (list): ``[roll, pitch, yaw]``（弧度），左乘当前姿态四元数，默认 ``[0,0,0]``。
         motion_frame_id (str, 可选): 增量与位姿计算坐标系，默认与末端反馈 frame 一致。
-        gripper (float, 可选): 目标夹爪值，默认 ``ctx.gripper_for_return_home``。
+        gripper (float, 可选): 目标夹爪值；**未写则不发夹爪指令**（保持当前开合）。
         arm_movel_duration (float, 可选): 写入 ``arm_controller.movel_duration``。
     """
     label = "single_arm.move_relative"
@@ -616,16 +653,13 @@ def skill_move_relative(
     handler = iface.right_arm_handler if arm == "right" else iface.left_arm_handler
     if handler is None:
         raise TypeError(f"{label}: {arm} arm handler is not available")
-    p0_raw = handler.get_pose()
-    if p0_raw is None:
-        raise RuntimeError(f"{label}: could not read current {arm} EE pose")
+    base_f = str(ctx.frame_id).strip() or "base_link"
+    p0, motion_frame = read_current_ee_pose_in_motion_frame(
+        iface, handler, base_f, params, label=label
+    )
 
-    gf = getattr(handler, "get_frame_id", None)
-    pose_frame = str(gf()).strip() if callable(gf) and gf() else str(ctx.frame_id).strip() or "base_link"
-    p0, motion_frame = _single_arm_pose_in_motion_frame(iface, p0_raw, pose_frame, params, label=label)
-
-    dx, dy, dz = _param_vec3(params, "position_delta", (0.0, 0.0, 0.0))
-    dr, dp, dyaw = _param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
+    dx, dy, dz = param_vec3(params, "position_delta", (0.0, 0.0, 0.0))
+    dr, dp, dyaw = param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
     try:
         min_abs = float(params.get("min_abs_delta", 1e-4))
     except (TypeError, ValueError):
@@ -646,22 +680,24 @@ def skill_move_relative(
 
     _apply_arm_movel_duration(ctx, duration=params.get("arm_movel_duration"), label=label)
 
-    p1 = _clone_pose(p0)
+    p1 = clone_pose(p0)
     if move:
         p1.position.x += dx
         p1.position.y += dy
         p1.position.z += dz
     if has_ori:
         qd = quat_normalize(euler_rpy_to_quat_xyzw(dr, dp, dyaw))
-        q_new = quat_normalize(quat_multiply(qd, _pose_quat_xyzw(p1)))
-        _set_pose_quat_xyzw(p1, q_new)
+        q_new = quat_normalize(quat_multiply(qd, pose_quat_xyzw(p1)))
+        set_pose_quat_xyzw(p1, q_new)
 
-    grip_v = float(params["gripper"]) if params.get("gripper") is not None else ctx.gripper_for_return_home
+    skip_gripper = params.get("gripper") is None
+    grip_v = float(params["gripper"]) if not skip_gripper else 0.0
     arm_side = ArmSide.RIGHT if arm == "right" else ArmSide.LEFT
     arm_seq = build_single_arm_return_home_sequence(
         home_pose=p1,
         gripper=grip_v,
         stage_name="TaskQ-MoveRelative",
+        skip_gripper_command=skip_gripper,
     )
     stages = assign_to_arm(arm_seq, arm_side)
     if ctx.use_stamped:

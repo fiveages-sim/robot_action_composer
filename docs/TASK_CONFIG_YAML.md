@@ -75,19 +75,24 @@ scene_presets:
 - 忽略隐藏路径段（`.` 开头）与 `__pycache__`
 - 返回 `TaskConfigDiscovery`：
   - `tasks`：全局 `task_key -> 配置`
-  - `task_groups`：按一级子目录分组
+  - `task_groups`：按**叶子目录**相对路径分组（posix，如 `siemens/nested`）
+
+**与 ROS2 栈启动配置的边界**：运控 / 导航启动写在叶子目录 **`.meta/ros2_stack.yaml`**（或 `robot.yaml` 的 `ros2_stack:`），**不是**任务编排文件。隐藏 `.meta/` 不会进入任务发现，也不触发叶子目录规则冲突。详见 [`ROS2_STACK.md`](ROS2_STACK.md)。
 
 ### 唯一性约束
 
 - 同目录下，同基名不能同时有 `.yaml` 与 `.yml`
 - 不同子目录可有同名文件
 - 同机器人范围内，`task_key` 必须全局唯一
+- **仅叶子目录可放 YAML**：若某目录既有任务 YAML，其子目录下也有任务 YAML，发现阶段报错  
+  （例如同时存在 `siemens/a.yaml` 与 `siemens/nested/b.yaml` 非法；应把 YAML 只放在叶子，如仅保留 `siemens/nested/`）
 
 ### 分组交互
 
 - 根目录文件属于 `task_groups[""]`（CLI 显示 Top level）
-- `task_configs/<folder>/...` 属于 `<folder>` 分组（更深层仍归该一级分组）
-- 有多个分组时，CLI 先选 folder 再选 task
+- `task_configs/<a>/<b>/foo.yaml` 属于分组 `a/b`（完整父目录路径）
+- 有多个叶子分组时，CLI **逐级下钻**选目录（每层只显示下一段名），再到叶子后选 task；单层仅一个子节点时自动进入
+- 链式任务整链锁定同一个叶子分组
 - 非交互入口（例如 `--task`）仍按 `task_key` 定位
 
 ---
@@ -102,17 +107,79 @@ scene_presets:
 - `skill_defaults`
 - `task_queue`
 - `scene_presets`
+- `objects` / `active_object`（可选；物体清单与默认目标，见下）
+
+### 物体清单（`objects` / `active_object`）
+
+用于声明刚体 prim 与 USD 抓取 frame，避免每个 skill 手写 `object_position_offset`。
+
+**任务 YAML 内联（推荐单任务）：**
+
+```yaml
+objects:
+  wind_turbo_blade:
+    object_prim_path: /World/scene/wind_turbo_blade/turbo_blade
+    grasps:
+      left: small_side/point_01   # 相对刚体的相对 path
+      right: big_side/point_01
+active_object: wind_turbo_blade
+
+skill_defaults:
+  dual_arm.parallel_pick:
+    left_pick:
+      grasp_id: left
+```
+
+**同叶子多任务复用：** 放到 `<leaf>/.meta/objects/*.yaml`（不进任务发现，同 `ros2_stack.yaml`）。单文件可写一个物体（`object_key` + `object_prim_path`），也可写多个：
+
+```yaml
+# .meta/objects/apples.yaml
+apple_1:
+  object_prim_path: /World/apple_01/Geometry/model_normalized_0_vis_obj
+apple_2:
+  object_prim_path: /World/apple_02/Geometry/model_normalized_0_vis_obj
+```
+
+或显式 `objects: { apple_1: {…}, … }`。合并顺序：
+
+`.meta/objects` → 任务 `objects` → `scene_presets.<scene>.objects`（后写覆盖）。
+
+**链式：** 整链锁定同一叶子；每段按上式**重新合并**该段 task+scene。跨 task 共享 grasps 请用 `.meta`，不要指望 task A 内联自动出现在 task B。
+
+**兼容：** 仅写 `object_prim_path` + `object_position_offset` 的旧 YAML 行为不变。若同时写了 `grasp_id` / `grasp_prim_path` 与 `object_position_offset`，两者在**同一物体系**下相加（grasp 自动偏移 + 额外微调）。
+
+导航 / 放置参考物也可复用同一清单：
+
+```yaml
+# .meta/objects/bg_cube.yaml
+object_key: bg_cube
+object_prim_path: /World/scene/bg_1/collision/Cube
+
+skill_defaults:
+  nav_to_bg_cube:
+    object_key: bg_cube          # → objects[bg_cube].object_prim_path
+  place_on_cube:
+    reference_object_key: bg_cube  # 同理；也可写 object_key
+    object_position_offset: [0.0, 0.3, 0.2]  # 本任务放置点，仍写在 skill 上
+```
+
+显式 `object_prim_path` / `reference_object_prim_path` 仍优先。导航**不会**回退到 `active_object`（避免误导航到抓取目标）。
+
+Newton kit 下勿对子 frame 调 `/get_entity_state` 当世界位姿；自动 offset 走 `/get_prim_attribute` 局部链。缺 `xformOp:translate`/`orient` 的中间 prim 视为恒等。
 
 ### `runtime_defaults` 允许键（严格）
 
-`runtime_defaults`（以及 `scene_presets.<scene>` 根层）仅允许以下 4 个键：
+`runtime_defaults`（以及 `scene_presets.<scene>` 根层中计入 runtime 的键）仅允许：
 
 - `base_link_entity_path`
 - `max_stage_duration`
 - `pose_tol_pos`
 - `pose_tol_ori`
+- （以及实现中已支持的 `gripper_open` / `gripper_closed`）
 
-其他字段（抓取/放置几何、双臂参数、drawer/handover 参数等）必须写在：
+`skill_params` / `objects` / `active_object` 可写在 scene 根层，但**不**当作 `runtime_defaults` 校验。
+
+其他抓取/放置几何仍写在：
 
 - `skill_defaults.<skill_or_id>`
 - `scene_presets.<scene>.skill_params.<skill_or_id>`
@@ -138,7 +205,68 @@ scene_presets:
 
 - pick/place 都有 `arm` 时：全局主臂以 pick 为准；place 的 `arm` 只作用于其块执行。
 - `base_link_entity_path` 可在 `runtime_defaults` 或场景根覆盖机器人默认 base prim。
-- `pose_tol_pos` / `pose_tol_ori` / `max_stage_duration` 可在 `runtime_defaults` 或场景根配置，作用于流程级判定。
+- `pose_tol_pos` / `pose_tol_ori` / `max_stage_duration` 可在 `runtime_defaults` 或场景根配置，作用于**笛卡尔**流程级判定：
+  - `max_stage_duration`：覆盖机器人默认 `arrival_timeout`，作为每段笛卡尔到位等待上限（秒）。**不等于** `arm_movel_duration`（后者只改控制器轨迹时长）。
+  - `pose_tol_pos`：位置容差（米）。
+  - `pose_tol_ori`：姿态容差，单位是四元数距离 `1-|dot|`（无量纲）；runner 会换算成度再交给 `check_arrival`。常见写法 `0.03`～`0.08`，**不要**当成角度度数值。
+  - 关节 skill（`joint.*`）仍用块内 `arrival_timeout`，不受 `max_stage_duration` 覆盖。
+
+### 机物偏航对齐（pick / parallel_pick）
+
+导航到位后，机物常有固定相对偏航（如侧对 `±π/2`）。`ee_base_orientation` 按该**标称**标定；运行时只补相对偏差。细节见 [SKILLS_REFERENCE §6.2](SKILLS_REFERENCE.md)。
+
+```yaml
+# 0/90/180° 档：自动吸附
+dual_arm.parallel_pick:
+  ee_orientation_frame: object
+  object_orientation_mode: yaw
+  aligned_object_yaw: auto
+  left_pick: { object_prim_path: /World/obj, ee_base_orientation: [1,0,0,0], ... }
+  right_pick: { ... }
+
+# 斜向标称（如 45°）：显式角度；斜抓姿态写在 ee_base_orientation
+dual_arm.parallel_pick:
+  ee_orientation_frame: object
+  object_orientation_mode: yaw
+  aligned_object_yaw: 0.7854
+  left_pick: { ... }
+  right_pick: { ... }
+```
+
+### WBC 双臂耦合示例
+
+抓取后切耦合，再只发左臂相对移动（右臂跟随）：
+
+```yaml
+runtime_defaults:
+  max_stage_duration: 8.0
+  pose_tol_pos: 0.05
+  pose_tol_ori: 0.03
+
+skill_defaults:
+  dual_arm.parallel_pick:
+    ee_orientation_frame: object
+    object_orientation_mode: yaw
+    aligned_object_yaw: auto
+    left_pick: { ... }
+    right_pick: { ... }
+  enable_arms_coupled:
+    command: ARMS_COUPLED
+  coupled_left_move_relative:
+    arm: left
+    motion_frame_id: base_footprint
+    position_delta: [0.2, 0.0, 0.3]
+    orientation_delta_rpy: [0.0, -1.57, 0.0]
+    arm_movel_duration: 4.0
+    gripper: 0.0
+
+task_queue:
+  - skill: dual_arm.parallel_pick
+  - skill: robot.send_mode_command
+    id: enable_arms_coupled
+  - skill: single_arm.move_relative
+    id: coupled_left_move_relative
+```
 
 ---
 
@@ -147,6 +275,14 @@ scene_presets:
 ### handover（推荐）
 
 `robot.cache_ee_pose(which=both)` -> `single_arm.pick` -> `dual_arm.handover_sync` -> `single_arm.place` -> `dual_arm.goto_cache_pose`
+
+### 导航后灵巧手 HUG 抓取
+
+`nav.navigate_to_object` -> `dex_hand.auto_grasp`
+
+- 物体/手/相机配置在 `robots/<Robot>/grasp_generation.yaml`（`grasp_objects` + `hand_profile`），任务 YAML 只传 `object_key` / `robot_key`。
+- 与夹爪 `navigate_and_pick`（`single_arm.pick`）并行存在；demo：`dex_hand/navigate_and_dex_grasp.yaml`。
+- 技能语义见 [`SKILLS_REFERENCE.md`](SKILLS_REFERENCE.md) §3b；抓取库见 [`GRASP_GENERATION.md`](GRASP_GENERATION.md)。
 
 ### 导航后回起势
 
@@ -189,7 +325,7 @@ task_queue:
 
 - `skip_when_not_first_scene`（`bool`，默认 `false`）：写在 block 顶层，与 `skill` / `id` 同级。
 - **单任务 + `__all__`**：同一会话内从第 2 个 scene preset 起跳过（如 `default` → `box2`，`box2` 会跳过带 flag 的块）。
-- **多段 chain**：先选 **task folder**（整链锁定同一目录），再逐段选 task + scene；某段可选 ``__all__`` 展开该任务尚未用过的 scene（如 ``black_box_pick/__all__`` → ``default``、``box2``）。仅当本 segment 与前一段**连续且 task_key 相同**时跳过预备块；**不同 task**（搬运 → 黑盒）不跳过。同 task+scene 可重复加入（如首尾各一段搬运）。
+- **多段 chain**：逐级下钻选 **叶子 task folder**（整链锁定同一叶子目录），再逐段选 task + scene；某段可选 ``__all__`` 展开该任务尚未用过的 scene（如 ``black_box_pick/__all__`` → ``default``、``box2``）。仅当本 segment 与前一段**连续且 task_key 相同**时跳过预备块；**不同 task**（搬运 → 黑盒）不跳过。同 task+scene 可重复加入（如首尾各一段搬运）。
 - 单 scene、单段首次执行时照常运行；并行块中可对子步骤分别设置。
 
 ### real/object-resolution replay 中的导航跳过
@@ -235,6 +371,7 @@ real/object-resolution replay 使用交互式 task queue runner。遇到 `nav.*`
 - `examples/IsaacSim/robots/Agibot_G1/task_configs/handover.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/bimanual_carry.yaml`
 - `examples/IsaacSim/robots/FiveAges_W2/task_configs/navigate_and_carry.yaml`
+- `examples/IsaacSim/robots/FiveAges_W2/task_configs/dex_hand/navigate_and_dex_grasp.yaml`
 
 ---
 

@@ -22,15 +22,10 @@ from robot_action_composer.task_runtime.config.single_arm import (  # pyright: i
     QueueSlicePlace,
 )
 from robot_action_composer.task_runtime.context import QueueRuntimeContext  # pyright: ignore[reportMissingImports]
+from robot_action_composer.task_runtime.object_binding import (  # pyright: ignore[reportMissingImports]
+    resolve_pick_object_binding,
+)
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
-
-
-def _apply_target_pose_offset(pose: Any, offset: tuple[float, float, float]) -> Any:
-    ox, oy, oz = offset
-    pose.position.x += ox
-    pose.position.y += oy
-    pose.position.z += oz
-    return pose
 
 
 def apply_object_local_offset_to_pose(pose: Any, offset: tuple[float, float, float]) -> Any:
@@ -48,6 +43,33 @@ def apply_object_local_offset_to_pose(pose: Any, offset: tuple[float, float, flo
     return pose
 
 
+def _place_binding_params(place: QueueSlicePlace) -> dict[str, Any]:
+    """Build ``resolve_pick_object_binding`` input for place (no ``active_object`` fallback)."""
+    out: dict[str, Any] = {}
+    if place.object_prim_path:
+        out["object_prim_path"] = place.object_prim_path
+    if place.object_key:
+        out["object_key"] = place.object_key
+    if place.grasp_id:
+        out["grasp_id"] = place.grasp_id
+    if place.grasp_prim_path:
+        out["grasp_prim_path"] = place.grasp_prim_path
+
+    off = place.object_position_offset
+    off_t = (
+        (float(off[0]), float(off[1]), float(off[2]))
+        if isinstance(off, (list, tuple)) and len(off) == 3
+        else (0.0, 0.0, 0.0)
+    )
+    # 有 grasp 时：仅非零 offset 视为显式覆盖；否则走 USD grasp 自动解析
+    if place.grasp_id or place.grasp_prim_path:
+        if any(abs(v) > 1e-12 for v in off_t):
+            out["object_position_offset"] = off_t
+    else:
+        out["object_position_offset"] = off_t
+    return out
+
+
 def resolve_place_skill_from_entity(
     place: QueueSlicePlace,
     *,
@@ -55,19 +77,34 @@ def resolve_place_skill_from_entity(
     base_world_quat: Any,
     ctx: QueueRuntimeContext | None = None,
 ) -> QueueSlicePlace:
-    """When ``object_prim_path`` is set, fill ``place_position`` from the Isaac
-    entity service (plus ``object_position_offset``).
+    """Resolve place target from ``object_prim_path`` / ``object_key`` (+ optional grasp).
 
-    Place orientation is resolved by caller (``single_arm.place``) via
-    ``ee_base_orientation`` / pick fallback.
+    Fills ``place_position`` from the Isaac entity service (plus offset in **object
+    local frame**). Place orientation: when unset, ``single_arm.place`` uses current
+    EE orientation (see ``skill_place``); not inherited from pick.
+
+    ``active_object`` is **not** used (pick target must not leak into place).
     """
+    objects = getattr(ctx, "objects", None) if ctx is not None else None
+    binding = _place_binding_params(place)
+    if binding.get("object_key") or binding.get("object_prim_path") or binding.get("grasp_id") or binding.get(
+        "grasp_prim_path"
+    ):
+        path, offset = resolve_pick_object_binding(
+            binding,
+            objects=objects,
+            active_object=None,
+            cache=getattr(ctx, "grasp_offset_cache", None) if ctx is not None else None,
+        )
+        place = replace(place, object_prim_path=path, object_position_offset=offset)
+
     if not place.object_prim_path:
         return place
     if ctx is not None and ctx.object_resolution is not None:
         place_pose = resolve_object_pose_for_task(
             ctx,
             object_prim_path=place.object_prim_path,
-            include_orientation=False,
+            include_orientation=True,
             arm_side="none",
             object_role="place_target",
             entity_state_timeout=SERVICE_CALL_TIMEOUT,
@@ -79,9 +116,9 @@ def resolve_place_skill_from_entity(
             base_world_pos,
             base_world_quat,
             place.object_prim_path,
-            include_orientation=False,
+            include_orientation=True,
         )
-    place_pose = _apply_target_pose_offset(place_pose, place.object_position_offset)
+    place_pose = apply_object_local_offset_to_pose(place_pose, place.object_position_offset)
     resolved_place_position = (
         place_pose.position.x,
         place_pose.position.y,

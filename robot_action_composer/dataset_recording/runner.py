@@ -9,7 +9,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,11 +23,8 @@ from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMis
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import StageTarget  # pyright: ignore[reportMissingImports]
 
-from lerobot.datasets.lerobot_dataset import LeRobotDataset  # pyright: ignore[reportMissingImports]
-from lerobot_robot_ros2 import (  # pyright: ignore[reportMissingImports]
-    ROS2Robot,
-    ROS2RobotConfig,
-)
+from robot_action_composer.config.lerobot_bridge import build_ros2_robot_config
+from robot_action_composer.config.robot_profiles import LeRobotRobotConfig, MotionRobotConfig
 from robot_action_composer.dataset_recording.recorder import DatasetRecorder  # pyright: ignore[reportMissingImports]
 import robot_action_composer.task_runtime.skills  # noqa: F401 - register skills
 
@@ -126,19 +123,31 @@ class DepthCameraInfoListener:
         self._node.destroy_node()
 
 
-def _build_robot_config(*, robot_cfg: Any, record_cfg: Any) -> ROS2RobotConfig:
-    if not getattr(robot_cfg, "cameras", None):
-        raise ValueError("robot_cfg.cameras must contain at least one camera definition")
-    camera_cfg = {name: replace(cam, fps=record_cfg.fps) for name, cam in robot_cfg.cameras.items()}
-    robot_id = getattr(robot_cfg, "robot_id", None)
-    if not robot_id:
-        robot_id = getattr(robot_cfg, "ROBOT_KEY", None) or robot_cfg.__class__.__name__.lower()
-    return ROS2RobotConfig(
-        id=str(robot_id),
-        cameras=camera_cfg,
-        ros2_interface=robot_cfg.ros2_interface,
-        gripper_control_mode=robot_cfg.gripper_control_mode,
+def _build_robot_config(
+    *,
+    motion_cfg: MotionRobotConfig,
+    lerobot_cfg: LeRobotRobotConfig,
+    record_cfg: Any,
+) -> Any:
+    if not lerobot_cfg.cameras:
+        raise ValueError("lerobot_cfg.cameras must contain at least one camera definition")
+    return build_ros2_robot_config(
+        motion_cfg=motion_cfg,
+        lerobot_cfg=lerobot_cfg,
+        fps=int(record_cfg.fps),
     )
+
+
+def _import_ros2_robot():
+    from lerobot_robot_ros2 import ROS2Robot  # pyright: ignore[reportMissingImports]
+
+    return ROS2Robot
+
+
+def _import_lerobot_dataset():
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset  # pyright: ignore[reportMissingImports]
+
+    return LeRobotDataset
 
 
 def _save_pointcloud_frame(
@@ -205,7 +214,9 @@ def _make_recorder_stage_start_bridge(
 
 def run_recording(
     *,
-    robot_cfg: Any,
+    motion_cfg: MotionRobotConfig | None = None,
+    lerobot_cfg: LeRobotRobotConfig | None = None,
+    robot_cfg: Any | None = None,
     task_cfg: Any,
     record_cfg: Any,
     loops: int,
@@ -215,14 +226,29 @@ def run_recording(
     use_stamped: bool = True,
     merged_task_queue: list[Any] | None = None,
 ) -> None:
+    from robot_action_composer.config.lerobot_bridge import lerobot_profile_from_legacy
+
+    if motion_cfg is None:
+        motion_cfg = robot_cfg
+    if motion_cfg is None:
+        raise ValueError("run_recording requires motion_cfg")
+    if lerobot_cfg is None:
+        lerobot_cfg = lerobot_profile_from_legacy(motion_cfg)
+    if lerobot_cfg is None:
+        raise ValueError(
+            "run_recording requires lerobot_cfg (define lerobot_config.py or install lerobot stack)"
+        )
+
     resolved_task_name = str(task_name if task_name else getattr(record_cfg, "task_name", "queue_task"))
-    robot = ROS2Robot(_build_robot_config(robot_cfg=robot_cfg, record_cfg=record_cfg))
+    ROS2Robot = _import_ros2_robot()
+    LeRobotDataset = _import_lerobot_dataset()
+    robot = ROS2Robot(_build_robot_config(motion_cfg=motion_cfg, lerobot_cfg=lerobot_cfg, record_cfg=record_cfg))
     depth_required = bool(enable_keypoint_pcd)
-    default_cam_name = next(iter(robot_cfg.cameras.keys()), "")
-    depth_cam_name = getattr(robot_cfg, "depth_camera_name", default_cam_name)
-    depth_cam = robot_cfg.cameras.get(depth_cam_name) if getattr(robot_cfg, "cameras", None) else None
-    depth_topic = getattr(depth_cam, "depth_topic_name", None) if depth_cam is not None else None
-    depth_info_topic = getattr(robot_cfg, "depth_info_topic", None)
+    default_cam_name = next(iter(lerobot_cfg.cameras.keys()), "")
+    depth_cam_name = lerobot_cfg.depth_camera_name or default_cam_name
+    depth_cam = lerobot_cfg.cameras.get(depth_cam_name)
+    depth_topic = depth_cam.depth_topic_name if depth_cam is not None else None
+    depth_info_topic = lerobot_cfg.depth_info_topic or None
     depth_listener: RawDepthListener | None = None
     cam_info_listener: DepthCameraInfoListener | None = None
     if depth_required:
@@ -251,9 +277,9 @@ def run_recording(
     try:
         robot.connect()
         robot.ros2_interface.send_fsm_command(FSM_HOLD)
-        sim_time.sleep(robot_cfg.fsm_switch_delay)
+        sim_time.sleep(motion_cfg.fsm_switch_delay)
         robot.ros2_interface.send_fsm_command(FSM_OCS2)
-        sim_time.sleep(robot_cfg.fsm_switch_delay)
+        sim_time.sleep(motion_cfg.fsm_switch_delay)
         in_ocs2 = True
 
         intrinsics = (
@@ -343,19 +369,19 @@ def run_recording(
             if not in_ocs2:
                 print("[FSM] Re-enter OCS2 before next episode")
                 robot.ros2_interface.send_fsm_command(FSM_OCS2)
-                sim_time.sleep(robot_cfg.fsm_switch_delay)
+                sim_time.sleep(motion_cfg.fsm_switch_delay)
                 in_ocs2 = True
             episode_index = kept_episode
 
             reset_queue_task_environment(
                 specs=pick_specs,
                 runtime=task_runtime,
-                robot_cfg=robot_cfg,
+                robot_cfg=motion_cfg,
                 sim_time=sim_time,
             )
             ctx = build_queue_runtime_context(
                 interface=robot.ros2_interface,
-                robot_cfg=robot_cfg,
+                robot_cfg=motion_cfg,
                 sim_time=sim_time,
                 runtime=task_runtime,
                 use_stamped=use_stamped,
@@ -409,8 +435,8 @@ def run_recording(
                         left_initial_positions=left_initial_joint_positions,
                         right_initial_positions=right_initial_joint_positions,
                         body_initial_positions=body_initial_joint_positions,
-                        arrival_timeout=robot_cfg.arrival_timeout,
-                        arrival_poll=robot_cfg.arrival_poll,
+                        arrival_timeout=motion_cfg.arrival_timeout,
+                        arrival_poll=motion_cfg.arrival_poll,
                         sim_time=sim_time,
                     )
                     if moved_by_movej:

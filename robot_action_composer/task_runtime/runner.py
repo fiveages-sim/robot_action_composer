@@ -7,10 +7,11 @@ import signal
 import sys
 import termios
 import threading
+import time
 from collections.abc import Mapping
 from typing import Any, Sequence, TextIO
 
-from ros2_robot_interface import FSM_HOLD, FSM_OCS2  # pyright: ignore[reportMissingImports]
+from ros2_robot_interface import FSM_HOLD  # pyright: ignore[reportMissingImports]
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import execute_stage_sequence  # pyright: ignore[reportMissingImports]
 
@@ -140,6 +141,14 @@ def _execute_block(
     task_slice = getattr(ctx, "task_cfg", None)
     common = getattr(task_slice, "common", None) if task_slice is not None else None
     if common is not None:
+        # runtime_defaults.max_stage_duration 覆盖机器人默认 arrival_timeout
+        # （否则 arm_movel_duration=4 时仍会在默认 3s 就判超时）
+        msd = getattr(common, "max_stage_duration", None)
+        if msd is not None:
+            try:
+                exec_kw["arrival_timeout"] = float(msd)
+            except (TypeError, ValueError):
+                pass
         exec_kw["pose_tol_pos"] = common.pose_tol_pos
         exec_kw["pose_tol_ori"] = common.pose_tol_ori
     if execute_stage_kwargs:
@@ -315,10 +324,18 @@ def build_queue_runtime_context(
     task_key: str = "",
     scene: str = "",
     object_resolution: Any | None = None,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> QueueRuntimeContext:
     """FSM / connect 之后构造 :class:`QueueRuntimeContext`。"""
     queue_task = runtime.single_arm
-    gripper_open, gripper_closed = _resolve_gripper_open_close(robot_cfg.gripper_control_mode)
+    base_open, base_closed = _resolve_gripper_open_close(robot_cfg.gripper_control_mode)
+    common = queue_task.common
+    gripper_open = (
+        float(common.gripper_open) if common.gripper_open is not None else base_open
+    )
+    gripper_closed = (
+        float(common.gripper_closed) if common.gripper_closed is not None else base_closed
+    )
     base_path = effective_base_link_entity_path(robot_cfg=robot_cfg, runtime=runtime)
     frame_id = base_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
     if use_isaac_base_pose:
@@ -331,6 +348,7 @@ def build_queue_runtime_context(
     if initial_arm not in {"left", "right"}:
         raise ValueError("arm must be 'left' or 'right'")
 
+    objs = dict(runtime.objects) if runtime.objects else None
     return QueueRuntimeContext(
         interface=interface,
         robot_cfg=robot_cfg,
@@ -353,7 +371,45 @@ def build_queue_runtime_context(
         task_key=task_key,
         scene=scene,
         object_resolution=object_resolution,
+        objects=objs,
+        active_object=runtime.active_object,
+        grasp_offset_cache=grasp_offset_cache if grasp_offset_cache is not None else {},
     )
+
+
+def _also_settle_base_path(robot_cfg: Any) -> str:
+    """Robot base prim to wait on after Isaac reset (PhysX + authored spawn)."""
+    return str(getattr(robot_cfg, "base_link_entity_path", "") or "").strip()
+
+
+def _wait_nav_tf_ready(
+    interface: Any,
+    *,
+    sim_time: SimTimeHelper | None = None,
+    max_wait: float = 8.0,
+    poll_s: float = 0.25,
+) -> bool:
+    """Block until ``map←base_footprint|base_link`` TF exists (Isaac GT after reset)."""
+    lookup = getattr(interface, "lookup_transform", None)
+    if not callable(lookup):
+        return False
+    sleep = sim_time.sleep if sim_time is not None else time.sleep
+    deadline = time.monotonic() + max(0.0, float(max_wait))
+    while time.monotonic() < deadline:
+        for base_frame in ("base_footprint", "base_link"):
+            try:
+                tf = lookup("map", base_frame, timeout=min(1.0, poll_s * 4.0))
+            except Exception:
+                tf = None
+            if tf is not None:
+                print(f"[OK] Nav TF ready after reset: map←{base_frame}")
+                return True
+        sleep(max(0.05, float(poll_s)))
+    print(
+        f"[WARN] map←base TF not ready within {max_wait:.1f}s after reset "
+        "(nav may fall back to body-delta map goal)"
+    )
+    return False
 
 
 def reset_queue_task_environment(
@@ -367,30 +423,37 @@ def reset_queue_task_environment(
 
     需要扰动 prim 时，把 ``env.randomize_object_local_xyz`` 放在 ``task_queue`` **第一个**顺序块
     （若首块为 ``parallel``，则作为其子步骤之一，在并行开始前单独一步更稳妥）。
+
+    Also waits until ``base_link_entity_path`` answers ``/get_entity_state`` so
+    nav / dex that rely on Isaac GT odom after PLAY do not race re-init.
     """
+    also_base = _also_settle_base_path(robot_cfg)
+    reset_kw = dict(
+        post_reset_wait=robot_cfg.post_reset_wait,
+        sleep_fn=sim_time.sleep,
+        also_settle_entity_path=also_base,
+    )
     if runtime.drawer is not None:
         dcfg = runtime.drawer
-        reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
+        reset_source_path = reset_settle_entity_path_from_queue(
+            specs,
+            runtime.single_arm,
+            objects=runtime.objects,
+            active_object=runtime.active_object,
+        )
         apple_path = reset_source_path
         drawer_prim = dcfg.object_prim_path
         if not apple_path or not drawer_prim:
             raise ValueError(
-                "drawer task queue requires object_prim_path (task_cfg or single_arm.pick params), "
-                "and single_arm.drawer.object_prim_path (drawer layer prim)"
+                "drawer task queue requires object_prim_path or object_key "
+                "(task_cfg / single_arm.pick), and single_arm.drawer "
+                "object_prim_path or object_key (drawer layer prim)"
             )
-        reset_simulation_state(
-            apple_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
-        )
+        reset_simulation_state(apple_path, **reset_kw)
         sim_time.sleep(1)
         return
     if runtime.carry is not None:
-        reset_simulation_state(
-            runtime.carry.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
-        )
+        reset_simulation_state(runtime.carry.object_prim_path, **reset_kw)
         return
     if runtime.handover is not None:
         pk = runtime.single_arm.pick
@@ -399,36 +462,30 @@ def reset_queue_task_environment(
                 "handover task env reset requires object_prim_path on single_arm.pick "
                 "(skill_defaults.single_arm.pick or skill_params for pick block)"
             )
-        reset_simulation_state(
-            pk.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
-        )
+        reset_simulation_state(pk.object_prim_path, **reset_kw)
         return
     parallel_pick_cfg = _extract_parallel_pick_cfg_from_specs(specs)
     if parallel_pick_cfg is not None:
         reset_simulation_state(
-            parallel_pick_cfg.left_pick.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
+            parallel_pick_cfg.left_pick.object_prim_path, **reset_kw
         )
         reset_simulation_state(
-            parallel_pick_cfg.right_pick.object_prim_path,
-            post_reset_wait=robot_cfg.post_reset_wait,
-            sleep_fn=sim_time.sleep,
+            parallel_pick_cfg.right_pick.object_prim_path, **reset_kw
         )
         return
-    reset_source_path = reset_settle_entity_path_from_queue(specs, runtime.single_arm)
+    reset_source_path = reset_settle_entity_path_from_queue(
+        specs,
+        runtime.single_arm,
+        objects=runtime.objects,
+        active_object=runtime.active_object,
+    )
     if not reset_source_path:
         raise ValueError(
-            "object_prim_path is required for env reset "
-            "(set on task_cfg or under skill_defaults / skill_params for single_arm.pick)"
+            "object_prim_path or object_key is required for env reset "
+            "(single_arm.pick skill_defaults/skill_params, or nav.navigate_to_object "
+            "object_prim_path / object_key on a queue block)"
         )
-    reset_simulation_state(
-        reset_source_path,
-        post_reset_wait=robot_cfg.post_reset_wait,
-        sleep_fn=sim_time.sleep,
-    )
+    reset_simulation_state(reset_source_path, **reset_kw)
 
 
 def run_task_queue(
@@ -445,6 +502,7 @@ def run_task_queue(
     scene: str = "",
     object_resolution: Any | None = None,
     use_isaac_base_pose: bool = True,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> None:
     """Single entry: connect → FSM → execute ``task_queue`` blocks (and parallel groups)."""
     queue_tc = runtime.single_arm
@@ -471,12 +529,11 @@ def run_task_queue(
         interface.connect()
         robot_connected = True
         print("[OK] Robot connected (unified task queue)")
-        interface.send_fsm_command(FSM_HOLD)
-        sim_time.sleep(robot_cfg.fsm_switch_delay)
-        interface.send_fsm_command(FSM_OCS2)
 
         if reset_env:
             reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+            # Isaac GT odom TF can lag PhysX after STOP→PLAY; nav goals need map←base.
+            _wait_nav_tf_ready(interface, sim_time=sim_time)
 
         ctx = build_queue_runtime_context(
             interface=interface,
@@ -490,6 +547,7 @@ def run_task_queue(
             task_key=task_key,
             scene=scene,
             object_resolution=object_resolution,
+            grasp_offset_cache=grasp_offset_cache,
         )
 
         for idx, spec in enumerate(specs):
@@ -545,18 +603,16 @@ def run_task_queue_on_connected_interface(
     task_key: str = "",
     scene: str = "",
     object_resolution: Any | None = None,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> None:
     """Execute one task_queue on an already-connected interface (no connect/disconnect)."""
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
     if not specs:
         raise ValueError("task queue blocks list is empty")
 
-    interface.send_fsm_command(FSM_HOLD)
-    sim_time.sleep(robot_cfg.fsm_switch_delay)
-    interface.send_fsm_command(FSM_OCS2)
-
     if reset_env:
         reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+        _wait_nav_tf_ready(interface, sim_time=sim_time)
 
     ctx = build_queue_runtime_context(
         interface=interface,
@@ -570,6 +626,7 @@ def run_task_queue_on_connected_interface(
         task_key=task_key,
         scene=scene,
         object_resolution=object_resolution,
+        grasp_offset_cache=grasp_offset_cache,
     )
 
     for idx, spec in enumerate(specs):
@@ -688,18 +745,16 @@ def run_task_queue_interactive_on_connected_interface(
     task_key: str = "",
     scene: str = "",
     object_resolution: Any | None = None,
+    grasp_offset_cache: dict[tuple[str, str], tuple[float, float, float]] | None = None,
 ) -> None:
     """逐 block 等待 Enter 后执行；输入 ``q`` 则 ``FSM_HOLD`` 并提前退出。"""
     specs: list[QueueBlock] = [b if isinstance(b, BlockSpec) else block_spec_from_mapping(b) for b in blocks]
     if not specs:
         raise ValueError("task queue blocks list is empty")
 
-    interface.send_fsm_command(FSM_HOLD)
-    sim_time.sleep(robot_cfg.fsm_switch_delay)
-    interface.send_fsm_command(FSM_OCS2)
-
     if reset_env:
         reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+        _wait_nav_tf_ready(interface, sim_time=sim_time)
 
     ctx = build_queue_runtime_context(
         interface=interface,
@@ -713,6 +768,7 @@ def run_task_queue_interactive_on_connected_interface(
         task_key=task_key,
         scene=scene,
         object_resolution=object_resolution,
+        grasp_offset_cache=grasp_offset_cache,
     )
 
     total = len(specs)

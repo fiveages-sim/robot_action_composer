@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Callable
 from geometry_msgs.msg import Pose
 
 from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+    euler_rpy_to_quat_xyzw,
+    quat_multiply,
     quat_normalize,
     rotate_vector_by_quat,
 )
@@ -266,6 +268,7 @@ class ArmStage:
     target: ArmTarget
     wait_gripper_settle: bool = False
     skip_arrival_check: bool = False
+    skip_gripper_command: bool = False
 
 
 @dataclass
@@ -408,21 +411,26 @@ def build_single_arm_pick_sequence(
     ee_base_orientation: tuple[float, float, float, float],
     prepare_offset: tuple[float, float, float] | None = None,
     pick_clearance: float = 0.01,
-    ee_pick_axis: str = "+z",
-    ee_pick_direction_vector: DirectionVec | None = None,
     object_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    retreat_direction_extra: float = 0.0,
-    retreat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    retreat_offset: tuple[float, float, float] | None = None,
     retreat_xyz: tuple[float, float, float] | None = None,
     retreat_open_gripper: bool = False,
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Pickup",
 ) -> list[ArmStage]:
-    direction_vec = _resolve_axis_direction_unit_vec(
-        axis_label=ee_pick_axis,
-        explicit_direction_vector=ee_pick_direction_vector,
-    )
+    """Build pick stages: Approach (optional) → CloseIn → Grasp → Lift (optional) → Retreat (optional).
+
+    Used by ``single_arm.pick`` and ``dual_arm.parallel_pick`` only. Drawer pull uses
+    :func:`robot_action_composer.motion_generation.tasks.drawer.build_single_arm_pull_drawer_sequence`.
+
+    Lift / Retreat (aligned with :func:`build_bimanual_carry_sequence`):
+
+    - ``retreat_offset`` (motion/output frame): **Lift** delta from CloseIn; ``None`` → skip Lift
+      (YAML ``ee_lift_offset`` omitted).
+    - ``retreat_xyz`` (motion/output frame): **Retreat** delta from the post-lift pose (CloseIn when
+      Lift skipped); ``None`` → skip Retreat (YAML ``ee_retreat_offset`` omitted).
+    """
     # pick_clearance 采用工具系语义：沿 ee_base_orientation 的局部 +Z 偏移到 close-in。
     cdx, cdy, cdz = rotate_vector_by_quat((0.0, 0.0, pick_clearance), ee_base_orientation)
     close_in_pose = Pose()
@@ -448,22 +456,27 @@ def build_single_arm_pick_sequence(
         approach_pose.orientation = close_in_pose.orientation
     else:
         approach_pose = close_in_pose
+    lift_dx, lift_dy, lift_dz = (
+        (float(retreat_offset[0]), float(retreat_offset[1]), float(retreat_offset[2]))
+        if retreat_offset is not None
+        else (0.0, 0.0, 0.0)
+    )
     lift_pose = Pose()
-    lift_pose.position.x = close_in_pose.position.x + retreat_offset[0]
-    lift_pose.position.y = close_in_pose.position.y + retreat_offset[1]
-    lift_pose.position.z = close_in_pose.position.z + retreat_offset[2]
+    lift_pose.position.x = close_in_pose.position.x + lift_dx
+    lift_pose.position.y = close_in_pose.position.y + lift_dy
+    lift_pose.position.z = close_in_pose.position.z + lift_dz
     lift_pose.orientation = close_in_pose.orientation
+    has_lift = retreat_offset is not None
+    retreat_pose: Pose | None
     if retreat_xyz is not None:
+        rdx, rdy, rdz = (float(retreat_xyz[0]), float(retreat_xyz[1]), float(retreat_xyz[2]))
         retreat_pose = Pose()
-        retreat_pose.position.x = lift_pose.position.x + retreat_xyz[0]
-        retreat_pose.position.y = lift_pose.position.y + retreat_xyz[1]
-        retreat_pose.position.z = lift_pose.position.z + retreat_xyz[2]
+        retreat_pose.position.x = lift_pose.position.x + rdx
+        retreat_pose.position.y = lift_pose.position.y + rdy
+        retreat_pose.position.z = lift_pose.position.z + rdz
         retreat_pose.orientation = lift_pose.orientation
     else:
-        retreat_pose = _make_pose_from_target(
-            close_in_pose, offset=retreat_direction_extra,
-            direction_vec=direction_vec, orientation=ee_base_orientation,
-        )
+        retreat_pose = None
     stages: list[ArmStage] = []
     i = 1
     if has_prepare:
@@ -489,20 +502,25 @@ def build_single_arm_pick_sequence(
             skip_arrival_check=True,
         )
     )
-    i += 1
-    stages.append(
-        ArmStage(
-            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[3]),
-            ArmTarget(pose=lift_pose, gripper=gripper_closed),
+    if has_lift:
+        i += 1
+        stages.append(
+            ArmStage(
+                _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[3]),
+                ArmTarget(pose=lift_pose, gripper=gripper_closed),
+            )
         )
-    )
-    i += 1
-    stages.append(
-        ArmStage(
-            _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[4]),
-            ArmTarget(pose=retreat_pose, gripper=gripper_open if retreat_open_gripper else gripper_closed),
+    if retreat_pose is not None:
+        i += 1
+        stages.append(
+            ArmStage(
+                _stage_name(stage_prefix, i, PICK_STAGE_SUFFIXES[4]),
+                ArmTarget(
+                    pose=retreat_pose,
+                    gripper=gripper_open if retreat_open_gripper else gripper_closed,
+                ),
+            )
         )
-    )
     return stages
 
 
@@ -512,7 +530,6 @@ def build_single_arm_place_sequence(
     place_orientation: tuple[float, float, float, float],
     ee_retreat_offset: tuple[float, float, float],
     gripper_open: float,
-    gripper_closed: float,
     place_axis: str = "top",
     prepare_offset: tuple[float, float, float] | None = None,
     place_insert_clearance: float = 0.0,
@@ -584,7 +601,8 @@ def build_single_arm_place_sequence(
         stages.append(
             ArmStage(
                 _stage_name(stage_prefix, idx, "Approach"),
-                ArmTarget(pose=approach_pose, gripper=gripper_closed),
+                ArmTarget(pose=approach_pose, gripper=0.0),
+                skip_gripper_command=True,
             ),
         )
         idx += 1
@@ -592,7 +610,8 @@ def build_single_arm_place_sequence(
     stages.append(
         ArmStage(
             _stage_name(stage_prefix, idx, PLACE_STAGE_SUFFIXES[0]),
-            ArmTarget(pose=final_pose, gripper=gripper_closed),
+            ArmTarget(pose=final_pose, gripper=0.0),
+            skip_gripper_command=True,
         ),
     )
     idx += 1
@@ -618,8 +637,15 @@ def build_single_arm_return_home_sequence(
     home_pose: Pose,
     gripper: float,
     stage_name: str = "Return-1-ReturnHome",
+    skip_gripper_command: bool = False,
 ) -> list[ArmStage]:
-    return [ArmStage(stage_name, ArmTarget(pose=home_pose, gripper=gripper))]
+    return [
+        ArmStage(
+            stage_name,
+            ArmTarget(pose=home_pose, gripper=gripper),
+            skip_gripper_command=skip_gripper_command,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +666,7 @@ def assign_to_arm(
                     left=spec.target,
                     wait_gripper_settle=spec.wait_gripper_settle,
                     skip_arrival_check=spec.skip_arrival_check,
+                    skip_gripper_command=spec.skip_gripper_command,
                 ),
             )
         else:
@@ -649,6 +676,7 @@ def assign_to_arm(
                     right=spec.target,
                     wait_gripper_settle=spec.wait_gripper_settle,
                     skip_arrival_check=spec.skip_arrival_check,
+                    skip_gripper_command=spec.skip_gripper_command,
                 ),
             )
     return result
@@ -1195,6 +1223,9 @@ def build_bimanual_place_relative_sequence(
     gripper_closed: float,
     stage_prefix: str = "PlaceRel",
     output_frame_id: str | None = None,
+    orientation_delta_rpy: tuple[float, float, float] | None = None,
+    post_release_right_delta_xyz: tuple[float, float, float] | None = None,
+    post_release_right_orientation_delta_rpy: tuple[float, float, float] | None = None,
 ) -> list[StageTarget]:
     """基于**当前**左右末端位姿的相对放置（与物体/货架 prim 无关）。
 
@@ -1206,12 +1237,15 @@ def build_bimanual_place_relative_sequence(
     1. 左右同加一段平移（夹爪仍闭合）。
        - 未配置 ``post_release_lower_xyz``：该段就是完整 ``translation_xyz``（一段到参考 offset）。
        - 配置了 ``post_release_lower_xyz``：该段先走 ``translation_xyz - post_release_lower_xyz``。
-    2. 同一位姿松爪（``wait_gripper_settle``）。
-    3. （可选）在松爪后再同加 ``post_release_lower_xyz``（米），使两段合计到达 ``translation_xyz``（两段到参考 offset）。
-    4. 沿「右→左」在 XY 平面的方向各外张 ``spread_half``（米）。
-    5. 再对左右同加 ``retreat_xyz`` 后撤。
+    2. （可选）左右手同时左乘 ``orientation_delta_rpy``，用于松爪前整体调整姿态。
+    3. 同一位姿松爪（``wait_gripper_settle``）。
+    4. （可选）在松爪后再同加 ``post_release_lower_xyz``（米），使两段合计到达 ``translation_xyz``（两段到参考 offset）。
+    5. （可选）再单独对右手同加 ``post_release_right_delta_xyz``，用于先避开卡点再外抽。
+    6. （可选）再单独对右手左乘 ``post_release_right_orientation_delta_rpy``，用于小角度避让。
+    7. （可选）若 ``spread_half`` 非零：沿「右→左」在 XY 平面的方向各外张 ``spread_half``（米）；为 0 则跳过。
+    8. 再对左右同加 ``retreat_xyz`` 后撤。
 
-    姿态全程保持与平移前一致（仅位置变）。
+    未配置姿态增量时，姿态全程保持与平移前一致（仅位置变）。
     """
     tx, ty, tz = translation_xyz
     if post_release_lower_xyz is not None:
@@ -1227,14 +1261,18 @@ def build_bimanual_place_relative_sequence(
         r1 = _pose_translate_copy(right_current, tx, ty, tz)
         l_mid, r_mid = l1, r1
 
-    ux, uy = _lr_unit_xy_left_from_right(l_mid, r_mid)
-    sh = float(spread_half)
-    l2 = _pose_translate_copy(l_mid, ux * sh, uy * sh, 0.0)
-    r2 = _pose_translate_copy(r_mid, -ux * sh, -uy * sh, 0.0)
+    if orientation_delta_rpy is not None:
+        dr, dp, dyaw = orientation_delta_rpy
+        qd = quat_normalize(euler_rpy_to_quat_xyzw(dr, dp, dyaw))
 
-    rx, ry, rz = retreat_xyz
-    l3 = _pose_translate_copy(l2, rx, ry, rz)
-    r3 = _pose_translate_copy(r2, rx, ry, rz)
+        def _rotate_pose(p: Pose) -> Pose:
+            q = quat_normalize(quat_multiply(qd, _object_orientation_xyzw(p)))
+            return _pose_xyz_orientation(p.position.x, p.position.y, p.position.z, q)
+
+        l1 = _rotate_pose(l1)
+        r1 = _rotate_pose(r1)
+        l_mid = _rotate_pose(l_mid)
+        r_mid = _rotate_pose(r_mid)
 
     stages = [
         StageTarget(
@@ -1259,14 +1297,48 @@ def build_bimanual_place_relative_sequence(
             ),
         )
         idx += 1
-    stages.append(
-        StageTarget(
-            name=_stage_name(stage_prefix, idx, PLACE_RELATIVE_SUFFIXES[3]),
-            left=ArmTarget(pose=l2, gripper=gripper_open),
-            right=ArmTarget(pose=r2, gripper=gripper_open),
-        ),
-    )
-    idx += 1
+    if post_release_right_delta_xyz is not None:
+        rdx, rdy, rdz = post_release_right_delta_xyz
+        r_mid = _pose_translate_copy(r_mid, rdx, rdy, rdz)
+    if post_release_right_orientation_delta_rpy is not None:
+        dr, dp, dyaw = post_release_right_orientation_delta_rpy
+        qd = quat_normalize(euler_rpy_to_quat_xyzw(dr, dp, dyaw))
+        qr = quat_normalize(quat_multiply(qd, _object_orientation_xyzw(r_mid)))
+        r_mid = _pose_xyz_orientation(
+            r_mid.position.x,
+            r_mid.position.y,
+            r_mid.position.z,
+            qr,
+        )
+    if post_release_right_delta_xyz is not None or post_release_right_orientation_delta_rpy is not None:
+        stages.append(
+            StageTarget(
+                name=_stage_name(stage_prefix, idx, "PostReleaseRightAdjust"),
+                left=ArmTarget(pose=l_mid, gripper=gripper_open),
+                right=ArmTarget(pose=r_mid, gripper=gripper_open),
+            ),
+        )
+        idx += 1
+
+    sh = float(spread_half)
+    l2, r2 = l_mid, r_mid
+    if abs(sh) >= 1e-12:
+        ux, uy = _lr_unit_xy_left_from_right(l_mid, r_mid)
+        l2 = _pose_translate_copy(l_mid, ux * sh, uy * sh, 0.0)
+        r2 = _pose_translate_copy(r_mid, -ux * sh, -uy * sh, 0.0)
+        stages.append(
+            StageTarget(
+                name=_stage_name(stage_prefix, idx, PLACE_RELATIVE_SUFFIXES[3]),
+                left=ArmTarget(pose=l2, gripper=gripper_open),
+                right=ArmTarget(pose=r2, gripper=gripper_open),
+            ),
+        )
+        idx += 1
+
+    rx, ry, rz = retreat_xyz
+    l3 = _pose_translate_copy(l2, rx, ry, rz)
+    r3 = _pose_translate_copy(r2, rx, ry, rz)
+
     stages.append(
         StageTarget(
             name=_stage_name(stage_prefix, idx, PLACE_RELATIVE_SUFFIXES[4]),
@@ -1306,6 +1378,30 @@ def _send_arm_targets(
             interface.right_arm_handler.send_target(stage.right.pose)
 
 
+def _send_one_gripper_command(handler: Any, gripper: float, gripper_mode: GripperMode) -> None:
+    """Send gripper target; prefer ``target_percent`` when the handler exposes it."""
+    g = float(gripper)
+    if gripper_mode == GripperMode.TARGET_COMMAND:
+        if getattr(handler, "target_percent_pub", None) is not None:
+            handler.send_position_percent(g)
+            return
+        if g >= 1.0 - 1e-6:
+            handler.send_target_command(1)
+            return
+        if g <= 1e-6:
+            handler.send_target_command(0)
+            return
+        if getattr(handler, "command_pub", None) is not None:
+            cfg = handler.config
+            lo = float(cfg.gripper_min_position)
+            hi = float(cfg.gripper_max_position)
+            handler.send_joint_positions(lo + g * (hi - lo))
+            return
+        handler.send_target_command(1 if g >= 0.5 else 0)
+        return
+    handler.send_joint_positions(g)
+
+
 def _send_gripper_commands(
     interface: ROS2RobotInterface,
     stage: StageTarget,
@@ -1314,20 +1410,37 @@ def _send_gripper_commands(
     if stage.skip_gripper_command:
         return
     if stage.left and interface.left_gripper_handler:
-        if gripper_mode == GripperMode.TARGET_COMMAND:
-            interface.left_gripper_handler.send_target_command(int(stage.left.gripper))
-        else:
-            interface.left_gripper_handler.send_joint_positions(stage.left.gripper)
+        _send_one_gripper_command(
+            interface.left_gripper_handler, stage.left.gripper, gripper_mode
+        )
     if stage.right and interface.right_gripper_handler:
-        if gripper_mode == GripperMode.TARGET_COMMAND:
-            interface.right_gripper_handler.send_target_command(int(stage.right.gripper))
-        else:
-            interface.right_gripper_handler.send_joint_positions(stage.right.gripper)
+        _send_one_gripper_command(
+            interface.right_gripper_handler, stage.right.gripper, gripper_mode
+        )
 
 
 # ---------------------------------------------------------------------------
 # Main executor
 # ---------------------------------------------------------------------------
+
+def pose_tol_ori_to_orient_deg(pose_tol_ori: float | None) -> float | None:
+    """将 ``QueueSliceCommon.pose_tol_ori``（四元数距离 ``1-|dot|``）转为 handler 使用的角度（度）。
+
+    ``ArmHandler.check_arrival`` 的 ``orient_threshold`` 单位是度。
+    若传入值 ``> 1``，视为已是度（兼容误填），原样返回。
+    """
+    if pose_tol_ori is None:
+        return None
+    try:
+        d = float(pose_tol_ori)
+    except (TypeError, ValueError):
+        return None
+    if d > 1.0:
+        return d
+    d = max(0.0, min(1.0, d))
+    abs_dot = max(0.0, min(1.0, 1.0 - d))
+    return math.degrees(2.0 * math.acos(abs_dot))
+
 
 def execute_stage_sequence(
     *,
@@ -1361,7 +1474,9 @@ def execute_stage_sequence(
 
     ``pose_tol_pos`` / ``pose_tol_ori``（米 / 无量纲姿态距离，与 ``QueueSliceCommon`` 一致）若给出，
     则传给 ``ROS2RobotInterface.wait_until_arrive`` 用于左右臂笛卡尔到位判定；否则使用接口默认阈值。
+    ``pose_tol_ori`` 会换算成度再交给 handler（见 :func:`pose_tol_ori_to_orient_deg`）。
     """
+    arm_orient_threshold = pose_tol_ori_to_orient_deg(pose_tol_ori)
     for stage in sequence:
         logger.info("[Stage] %s", stage.name)
         if on_stage_start is not None:
@@ -1382,7 +1497,7 @@ def execute_stage_sequence(
                     time_now_fn=time_now_fn,
                     sleep_fn=sleep_fn,
                     arm_pose_threshold=pose_tol_pos,
-                    arm_orient_threshold=pose_tol_ori,
+                    arm_orient_threshold=arm_orient_threshold,
                     on_poll=(
                         (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "left_arm", _r, _e))
                         if on_stage_poll is not None
@@ -1397,7 +1512,7 @@ def execute_stage_sequence(
                     time_now_fn=time_now_fn,
                     sleep_fn=sleep_fn,
                     arm_pose_threshold=pose_tol_pos,
-                    arm_orient_threshold=pose_tol_ori,
+                    arm_orient_threshold=arm_orient_threshold,
                     on_poll=(
                         (lambda _r, _e, _sn=stage.name: on_stage_poll(_sn, "right_arm", _r, _e))
                         if on_stage_poll is not None
@@ -1469,4 +1584,5 @@ __all__ = [
     "build_single_arm_return_home_sequence",
     "compose_bimanual_synchronized_sequence",
     "execute_stage_sequence",
+    "pose_tol_ori_to_orient_deg",
 ]

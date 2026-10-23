@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from geometry_msgs.msg import Pose
@@ -17,6 +16,11 @@ from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMiss
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     StageTarget,
     build_bimanual_carry_sequence,
+)
+from robot_action_composer.motion_generation.tasks.object_orientation import (  # pyright: ignore[reportMissingImports]
+    compose_aligned_ee_orientation,
+    filter_object_pose_orientation,
+    object_orientation_xyzw,
 )
 
 
@@ -130,73 +134,14 @@ def _select_carry_linear_displacement_frame(task_cfg: BimanualCarryTaskConfig) -
 
 
 def _object_orientation_xyzw(p: Pose) -> tuple[float, float, float, float]:
-    return quat_normalize(
-        (
-            float(p.orientation.x),
-            float(p.orientation.y),
-            float(p.orientation.z),
-            float(p.orientation.w),
-        ),
-    )
-
-
-def _quat_xyzw_to_rpy(q_xyzw: tuple[float, float, float, float]) -> tuple[float, float, float]:
-    x, y, z, w = quat_normalize(q_xyzw)
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    sinp = 2.0 * (w * y - z * x)
-    if abs(sinp) >= 1.0:
-        pitch = math.copysign(math.pi * 0.5, sinp)
-    else:
-        pitch = math.asin(sinp)
-
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-    return roll, pitch, yaw
-
-
-def _copy_pose_with_orientation(
-    p: Pose,
-    q_xyzw: tuple[float, float, float, float],
-) -> Pose:
-    qx, qy, qz, qw = quat_normalize(q_xyzw)
-    out = Pose()
-    out.position.x = p.position.x
-    out.position.y = p.position.y
-    out.position.z = p.position.z
-    out.orientation.x = qx
-    out.orientation.y = qy
-    out.orientation.z = qz
-    out.orientation.w = qw
-    return out
+    return object_orientation_xyzw(p)
 
 
 def _filter_object_orientation_for_carry(
     object_position: Pose,
     mode: str,
 ) -> Pose:
-    mode_norm = str(mode or "full").strip().lower()
-    if mode_norm in ("", "full", "object"):
-        return object_position
-
-    q_obj = _object_orientation_xyzw(object_position)
-    roll, pitch, _yaw = _quat_xyzw_to_rpy(q_obj)
-
-    if mode_norm in ("tilt", "no_yaw", "roll_pitch", "roll_pitch_only"):
-        q_filtered = euler_rpy_to_quat_xyzw(roll, pitch, 0.0)
-    elif mode_norm in ("pitch", "pitch_only"):
-        q_filtered = euler_rpy_to_quat_xyzw(0.0, pitch, 0.0)
-    elif mode_norm in ("none", "identity", "motion"):
-        q_filtered = (0.0, 0.0, 0.0, 1.0)
-    else:
-        raise ValueError(
-            f"unsupported object_orientation_mode {mode!r}; expected 'full', 'tilt', 'pitch', or 'none'"
-        )
-
-    return _copy_pose_with_orientation(object_position, q_filtered)
+    return filter_object_pose_orientation(object_position, mode)
 
 
 def _apply_object_orientation_to_ee(
@@ -205,15 +150,20 @@ def _apply_object_orientation_to_ee(
     right_xyzw: tuple[float, float, float, float],
     ee_orientation_frame: str,
 ) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]]:
-    frame = str(ee_orientation_frame or "motion").strip().lower()
-    if frame in ("", "motion", "base", "world"):
-        return left_xyzw, right_xyzw
-    if frame not in ("object", "object_body", "body", "local"):
-        raise ValueError(f"unsupported ee_orientation_frame {ee_orientation_frame!r}; expected 'motion' or 'object'")
-    q_obj = _object_orientation_xyzw(object_position)
+    # carry 历史语义：ee_orientation_frame=object 时用完整物体姿态（mode 已在上层过滤）。
     return (
-        quat_normalize(quat_multiply(q_obj, left_xyzw)),
-        quat_normalize(quat_multiply(q_obj, right_xyzw)),
+        compose_aligned_ee_orientation(
+            left_xyzw,
+            object_position,
+            ee_orientation_frame=ee_orientation_frame,
+            object_orientation_mode="full",
+        ),
+        compose_aligned_ee_orientation(
+            right_xyzw,
+            object_position,
+            ee_orientation_frame=ee_orientation_frame,
+            object_orientation_mode="full",
+        ),
     )
 
 
