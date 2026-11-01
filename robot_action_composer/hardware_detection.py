@@ -10,6 +10,8 @@ MotionEnvironment = Literal["sim", "real"]
 SIMULATION_ROS2_CONTROL_PLUGINS = {
     "topic_based_ros2_control/TopicBasedSystem",
     "gz_ros2_control/GazeboSimSystem",
+    # In-process Controller Manager (FaSim ROS2ControlLaunch / Isaac Sim 6.2).
+    "isaacsim_ros2_control/IsaacSimSystem",
     # "mock_components/GenericSystem",
 }
 
@@ -51,9 +53,12 @@ def read_robot_description_from_ros(*, timeout_sec: float = 5.0) -> str:
     try:
         deadline = time.monotonic() + timeout_sec
 
+        # External stacks expose this service. The in-process Controller Manager
+        # does not, so only probe briefly and leave time for the latched topic.
         client = node.create_client(GetParameters, "/robot_state_publisher/get_parameters")
-        while time.monotonic() < deadline:
-            if client.wait_for_service(timeout_sec=0.1):
+        service_deadline = min(deadline, time.monotonic() + 0.8)
+        while time.monotonic() < service_deadline:
+            if client.wait_for_service(timeout_sec=0.2):
                 future = client.call_async(GetParameters.Request(names=["robot_description"]))
                 while time.monotonic() < deadline and not future.done():
                     rclpy.spin_once(node, timeout_sec=0.05)
@@ -71,7 +76,19 @@ def read_robot_description_from_ros(*, timeout_sec: float = 5.0) -> str:
             if msg.data.strip():
                 received["robot_description"] = msg.data
 
-        subscription = node.create_subscription(String, "/robot_description", callback, 1)
+        # Match robot_state_publisher and FaSim's latched publisher. A volatile
+        # subscription never receives a transient_local message sent at Play.
+        from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+
+        description_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        subscription = node.create_subscription(
+            String, "/robot_description", callback, description_qos
+        )
         try:
             while time.monotonic() < deadline and "robot_description" not in received:
                 rclpy.spin_once(node, timeout_sec=0.05)
