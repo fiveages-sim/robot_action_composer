@@ -21,6 +21,7 @@ from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMiss
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
     ArmSide,
+    ArmStage,
     ArmTarget,
     SendMode,
     StageTarget,
@@ -47,7 +48,10 @@ from robot_action_composer.motion_generation.tasks.object_orientation import (  
     compose_aligned_ee_orientation,
 )
 
-from robot_action_composer.task_runtime.context import QueueRuntimeContext, queue_primary_ee_frame_id
+from robot_action_composer.task_runtime.context import (
+    QueueRuntimeContext,
+    queue_primary_ee_frame_id,
+)
 from robot_action_composer.task_runtime.ee_motion_frame import (
     clone_pose,
     current_ee_orientation_xyzw,
@@ -56,15 +60,29 @@ from robot_action_composer.task_runtime.ee_motion_frame import (
     read_current_ee_pose_in_motion_frame,
     set_pose_quat_xyzw,
 )
+from robot_action_composer.task_runtime.placement import (
+    align_correction,
+    align_ee_to_object_axis,
+    compute_insert_geometry,
+    feedback_pose_as_eef,
+    object_axis_in_world,
+    pick_tf_timeout as _pick_tf_timeout,
+    resolve_held_object_pose,
+    retreat_point,
+    stages_in_command_ee_frame as _stages_in_command_ee_frame,
+    vec_add,
+    vec_scale,
+    vec_sub,
+    xyz,
+)
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.config.single_arm import (
     QueueSingleArmSlice,
-    QueueSlicePlace,
     overlay_queue_single_arm_pick_from_params,
     overlay_queue_single_arm_place_from_params,
     overlay_queue_single_arm_from_params,
 )
-from robot_action_composer.task_runtime.types import ExecutionMeta
+from robot_action_composer.task_runtime.types import ExecutionMeta, SkillPlan
 
 
 def _arm_side_and_ee_prefix(qt: QueueSingleArmSlice) -> tuple[ArmSide, bool, str]:
@@ -115,15 +133,6 @@ def _pick_execution_frame_id(ctx: QueueRuntimeContext, motion_frame_id: Any) -> 
         return base_f
     raw = str(motion_frame_id).strip()
     return raw or base_f
-
-
-def _pick_tf_timeout(raw: Any) -> float:
-    if raw is None:
-        return 2.0
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 2.0
 
 
 def _is_bimanual_ee_cache(raw: Mapping[str, Any]) -> bool:
@@ -189,6 +198,8 @@ def _resolve_object_target_pose_from_pick_like_params(
     motion_frame_id: Any,
     tf_lookup_timeout: Any,
     label: str,
+    object_role: str | None = None,
+    arm_side: str | None = None,
 ) -> tuple[Pose, Pose, str]:
     """Resolve grasp target + object orientation from ``object_prim_path``.
 
@@ -197,14 +208,15 @@ def _resolve_object_target_pose_from_pick_like_params(
     (after TF), not from the grasp-offset position.
     """
     exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
-    arm_side = ctx.task_cfg.common.arm.strip().lower()
-    object_role = "pick_target" if label == "single_arm.pick" else "move_to_object_target"
+    arm_side_resolved = (arm_side or ctx.task_cfg.common.arm).strip().lower()
+    if object_role is None:
+        object_role = "pick_target" if label == "single_arm.pick" else "move_to_object_target"
     if ctx.object_resolution is not None:
         obj_pose = resolve_object_pose_for_task(
             ctx,
             object_prim_path=object_prim_path,
             include_orientation=True,
-            arm_side=arm_side,
+            arm_side=arm_side_resolved,
             object_role=object_role,
             entity_state_timeout=SERVICE_CALL_TIMEOUT,
             retries=SERVICE_CALL_RETRIES,
@@ -276,6 +288,11 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         tf_lookup_timeout=tf_lookup_timeout,
         label="single_arm.pick",
     )
+    print(
+        f"[single_arm.pick] {path} offset={object_position_offset} "
+        f"grasp=({float(target.position.x):.4f},{float(target.position.y):.4f},"
+        f"{float(target.position.z):.4f}) frame={exec_f}"
+    )
     ee_orientation = compose_aligned_ee_orientation(
         ee_base_orientation,
         object_orient,
@@ -306,8 +323,17 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
         gripper_open=gripper_open,
         gripper_closed=gripper_closed,
         stage_prefix="TaskQ-Pick",
+        hold_current_pose_on_grasp=pk.hold_current_pose_on_grasp,
     )
-    stages = assign_to_arm(arm_seq, arm_side)
+    stages = _stages_in_command_ee_frame(
+        ctx,
+        assign_to_arm(arm_seq, arm_side),
+        arm_side=arm_side,
+        ee_target_frame=pk.ee_target_frame,
+        ee_command_frame=pk.ee_command_frame,
+        tf_lookup_timeout=tf_lookup_timeout,
+        label="single_arm.pick",
+    )
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
     ctx.gripper_for_return_home = gripper_open if pk.retreat_open_gripper else gripper_closed
     return stages, ExecutionMeta(
@@ -363,7 +389,15 @@ def skill_move_to_object(ctx: QueueRuntimeContext, params: Mapping[str, Any]) ->
         gripper=grip_v,
         stage_name="TaskQ-MoveToObject",
     )
-    stages = assign_to_arm(arm_seq, arm_side)
+    stages = _stages_in_command_ee_frame(
+        ctx,
+        assign_to_arm(arm_seq, arm_side),
+        arm_side=arm_side,
+        ee_target_frame=pk.ee_target_frame,
+        ee_command_frame=pk.ee_command_frame,
+        tf_lookup_timeout=pk.tf_lookup_timeout,
+        label="single_arm.move_to_object",
+    )
     ctx.task_cfg = replace(ctx.task_cfg, common=qt.common, pick=pk)
     return stages, ExecutionMeta(
         send_mode=_stamped_mode(ctx),
@@ -457,6 +491,11 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
     gripper_open = (
         float(pl2.gripper_open) if pl2.gripper_open is not None else float(ctx.gripper_open)
     )
+    meta = ExecutionMeta(
+        send_mode=_stamped_mode(ctx),
+        frame_id=exec_f,
+        warn_prefix="TaskQ place timeout",
+    )
     arm_seq = build_single_arm_place_sequence(
         place_position=pl2.place_position,
         place_orientation=pl2.ee_base_orientation,
@@ -469,11 +508,340 @@ def skill_place(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[li
         start_index=1,
     )
     stages = assign_to_arm(arm_seq, arm_side)
+    stages = _stages_in_command_ee_frame(
+        ctx,
+        stages,
+        arm_side=arm_side,
+        ee_target_frame=params.get("ee_target_frame"),
+        ee_command_frame=params.get("ee_command_frame"),
+        tf_lookup_timeout=pl2.tf_lookup_timeout,
+        label="single_arm.place",
+    )
+    if ctx.use_stamped:
+        for st in stages:
+            st.frame_id = exec_f
     ctx.gripper_for_return_home = gripper_open
-    return stages, ExecutionMeta(
+    return stages, meta
+
+
+def skill_insert(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> SkillPlan:
+    """持物精确插入：孔口对齐 → 实测补偿 → 沿物体轴下探 → 松爪 → 回撤。
+
+    参数（``skill_defaults.single_arm.insert`` 或块内 ``params``）：
+        object_key / grasp_id / object_prim_path / object_position_offset：
+            放置参考物（孔口）及其偏移。
+        insert_axis：**目标物体局部系**的插入方向，默认 ``-z``。
+        insert_depth：孔口 → 落底距离（米，0 < d <= 0.3）。
+        approach_distance：孔口前悬停距离（沿插入反方向），默认 0.05。
+        held_object_key / held_grasp_id（或 held_object_prim_path）：
+            手中物体及其对齐点。
+        live_align_compensate：默认 true；对齐后重测并补偿。
+        max_align_corr：补偿上限（米），默认 0.03。
+        max_tilt_deg：管轴与插入轴允许夹角，默认 15°（超出只告警）。
+        retreat_distance：松爪后沿插入轴**反向**退出的距离，默认等于 insert_depth。
+        align_orientation：默认 true；把手中物体 held_axis 用最小旋转对齐到
+            -insert_axis（保留绕轴 yaw），并重算 EE 位置使物体底部落在孔口。
+        held_axis：手中物体参与对齐的局部轴，默认 ``+z``。
+    """
+    if not isinstance(ctx.task_cfg, QueueSingleArmSlice):
+        raise TypeError(
+            f"single_arm.insert expects QueueSingleArmSlice on ctx.task_cfg, got {type(ctx.task_cfg)}"
+        )
+    qt = overlay_queue_single_arm_from_params(ctx.task_cfg, params)
+    common = qt.common
+    pick = qt.pick
+    arm = str(params.get("arm") or common.arm).strip().lower()
+    if arm not in ("left", "right"):
+        raise ValueError(f"single_arm.insert: 'arm' must be left|right, got {arm!r}")
+    arm_side = ArmSide.RIGHT if arm == "right" else ArmSide.LEFT
+
+    label = "single_arm.insert"
+    iface = ctx.interface
+    handler = iface.right_arm_handler if arm_side == ArmSide.RIGHT else iface.left_arm_handler
+    if handler is None:
+        raise TypeError("single_arm.insert requires arm handler")
+
+    base_f = str(ctx.frame_id).strip() or "base_link"
+    exec_f = _pick_execution_frame_id(ctx, params.get("motion_frame_id"))
+    tft = _pick_tf_timeout(params.get("tf_lookup_timeout"))
+
+    binding = _binding_params_for_pick(params, pick)
+    target_path, target_offset = resolve_pick_object_binding(
+        binding,
+        objects=ctx.objects,
+        active_object=None,
+        cache=ctx.grasp_offset_cache,
+    )
+    target_pose, _target_orient, exec_f = _resolve_object_target_pose_from_pick_like_params(
+        ctx=ctx,
+        object_prim_path=target_path,
+        object_position_offset=target_offset,
+        motion_frame_id=params.get("motion_frame_id"),
+        tf_lookup_timeout=tft,
+        label=label,
+        object_role="insert_target",
+        arm_side=arm,
+    )
+
+    held = resolve_held_object_pose(ctx, params)
+    if held is None:
+        raise ValueError(
+            "single_arm.insert requires held_object_key/held_grasp_id "
+            "(or held_object_prim_path)"
+        )
+    held_pose, held_label = held
+
+    insert_depth = params.get("insert_depth")
+    if insert_depth is None:
+        raise ValueError("single_arm.insert requires insert_depth")
+    approach_distance = float(params.get("approach_distance", 0.05))
+    insert_axis = str(params.get("insert_axis") or "-z")
+    insert_dir = object_axis_in_world(target_pose, insert_axis)
+
+    live_compensate = bool(params.get("live_align_compensate", True))
+    max_align_corr = float(params.get("max_align_corr", 0.03))
+    max_tilt_deg = float(params.get("max_tilt_deg", 15.0))
+    gripper_open = (
+        float(params["gripper_open"])
+        if params.get("gripper_open") is not None
+        else (
+            float(common.gripper_open)
+            if common.gripper_open is not None
+            else float(ctx.gripper_open)
+        )
+    )
+    # 退出沿插入轴反向（不是工具系）；省略时默认退出到孔口。
+    retreat_raw = params.get("retreat_distance")
+    retreat_distance = (
+        float(retreat_raw) if retreat_raw is not None else float(insert_depth)
+    )
+    if retreat_distance < 0.0:
+        raise ValueError(
+            f"single_arm.insert: retreat_distance must be >= 0, got {retreat_distance}"
+        )
+
+    _apply_arm_movel_duration(
+        ctx, duration=params.get("arm_movel_duration"), label=label
+    )
+
+    ee_params = dict(params)
+    ee_params["motion_frame_id"] = base_f
+    tcp_pose, _tcp_frame = read_current_ee_pose_in_motion_frame(
+        iface, handler, base_f, ee_params, label=label
+    )
+    eef_pose = feedback_pose_as_eef(ctx, tcp_pose, arm_side, tft)
+    align_pose = eef_pose if eef_pose is not None else tcp_pose
+
+    if exec_f != base_f:
+        if not hasattr(iface, "transform_pose"):
+            raise TypeError(f"{label}: motion_frame_id requires transform_pose (TF)")
+        align_in_exec = iface.transform_pose(align_pose, base_f, exec_f, timeout=tft)
+        if align_in_exec is None:
+            raise RuntimeError(
+                f"{label}: TF {base_f!r} -> {exec_f!r} failed for current EE pose"
+            )
+    else:
+        align_in_exec = align_pose
+
+    def _held_in_exec(pose: Pose) -> Pose:
+        if exec_f == base_f:
+            return pose
+        out = iface.transform_pose(pose, base_f, exec_f, timeout=tft)
+        if out is None:
+            raise RuntimeError(
+                f"{label}: TF {base_f!r} -> {exec_f!r} failed for held object pose"
+            )
+        return out
+
+    held_in_exec = _held_in_exec(held_pose)
+
+    ori_raw = params.get("ee_base_orientation")
+    explicit_ori = None
+    if ori_raw is not None:
+        if not isinstance(ori_raw, (list, tuple)) or len(ori_raw) != 4:
+            raise ValueError(
+                "single_arm.insert: ee_base_orientation must be [x, y, z, w]"
+            )
+        explicit_ori = quat_normalize(
+            (float(ori_raw[0]), float(ori_raw[1]), float(ori_raw[2]), float(ori_raw[3]))
+        )
+
+    align_orientation = bool(params.get("align_orientation", True))
+    held_axis_label = str(params.get("held_axis") or "+z")
+    if align_orientation:
+        aligned = align_ee_to_object_axis(
+            ee_pose=align_in_exec,
+            held_pose=held_in_exec,
+            rim_bottom=xyz(target_pose),
+            desired_object_axis=vec_scale(insert_dir, -1.0),
+            held_axis_label=held_axis_label,
+            base_ee_orientation=explicit_ori,
+        )
+        rim_ee = aligned.rim
+        ori = aligned.orientation
+        tube_axis_w = aligned.object_axis_after
+        print(
+            f"[Insert] aligned held axis {held_axis_label} to -insert_axis "
+            f"(correction {aligned.correction_deg:.1f}deg)"
+        )
+        if aligned.correction_deg > max_tilt_deg:
+            print(
+                f"[Insert] WARN orientation correction {aligned.correction_deg:.1f}deg "
+                f"exceeds max_tilt_deg={max_tilt_deg:.1f}; check the grasp/approach."
+            )
+    else:
+        rim_ee = vec_add(
+            xyz(target_pose), vec_sub(xyz(align_in_exec), xyz(held_in_exec))
+        )
+        ori = (
+            explicit_ori
+            if explicit_ori is not None
+            else pose_quat_xyzw(align_in_exec)
+        )
+        tube_axis_w = object_axis_in_world(held_in_exec, held_axis_label)
+
+    geometry = compute_insert_geometry(
+        rim=rim_ee,
+        insert_dir=insert_dir,
+        insert_depth=float(insert_depth),
+        approach_distance=approach_distance,
+        tube_axis_w=tube_axis_w,
+    )
+    print(
+        f"[Insert] target={target_path} held={held_label} axis={insert_axis} "
+        f"dir=({geometry.insert_dir[0]:.3f},{geometry.insert_dir[1]:.3f},"
+        f"{geometry.insert_dir[2]:.3f}) depth={float(insert_depth):.3f}"
+    )
+    print(
+        f"[Insert] approach=({geometry.approach[0]:.3f},{geometry.approach[1]:.3f},"
+        f"{geometry.approach[2]:.3f}) rim=({geometry.rim[0]:.3f},"
+        f"{geometry.rim[1]:.3f},{geometry.rim[2]:.3f}) deep=("
+        f"{geometry.deep[0]:.3f},{geometry.deep[1]:.3f},{geometry.deep[2]:.3f}) "
+        f"tube_tilt={geometry.tilt_deg:.1f}deg"
+    )
+    if geometry.tilt_deg > max_tilt_deg:
+        print(
+            f"[Insert] WARN tube axis is {geometry.tilt_deg:.1f}deg from the insert "
+            f"axis (max_tilt_deg={max_tilt_deg:.1f}); insertion may jam."
+        )
+
+    meta = ExecutionMeta(
         send_mode=_stamped_mode(ctx),
         frame_id=exec_f,
-        warn_prefix="TaskQ place timeout",
+        warn_prefix="TaskQ insert timeout",
+    )
+
+    def _finalize(stages: list[ArmStage]) -> list[StageTarget]:
+        out = _stages_in_command_ee_frame(
+            ctx,
+            assign_to_arm(stages, arm_side),
+            arm_side=arm_side,
+            ee_target_frame=params.get("ee_target_frame"),
+            ee_command_frame=params.get("ee_command_frame"),
+            tf_lookup_timeout=tft,
+            label=label,
+        )
+        if ctx.use_stamped:
+            for st in out:
+                st.frame_id = exec_f
+        return out
+
+    def _stage(
+        name: str,
+        pos: tuple[float, float, float],
+        grip: float,
+        *,
+        skip_gripper: bool = True,
+        settle: bool = False,
+    ) -> ArmStage:
+        return ArmStage(
+            name,
+            ArmTarget(pose=pose_from_tuple(pos, ori), gripper=grip),
+            skip_gripper_command=skip_gripper,
+            wait_gripper_settle=settle,
+        )
+
+    def _post_stages(
+        rim: tuple[float, float, float],
+        deep: tuple[float, float, float],
+        *,
+        compensate: bool,
+    ) -> list[ArmStage]:
+        stages: list[ArmStage] = []
+        if compensate:
+            stages.append(_stage("TaskQ-Insert-3-FineAlign", rim, 0.0))
+        stages.append(_stage("TaskQ-Insert-4-Insert", deep, 0.0))
+        stages.append(
+            _stage(
+                "TaskQ-Insert-5-Release",
+                deep,
+                gripper_open,
+                skip_gripper=False,
+                settle=True,
+            )
+        )
+        if retreat_distance > 1e-9:
+            retreat = retreat_point(
+                deep=deep,
+                insert_dir=geometry.insert_dir,
+                distance=retreat_distance,
+            )
+            stages.append(
+                _stage(
+                    "TaskQ-Insert-6-Retreat",
+                    retreat,
+                    gripper_open,
+                    skip_gripper=False,
+                )
+            )
+        return stages
+
+    def _replan() -> list[StageTarget]:
+        held_live = resolve_held_object_pose(ctx, params)
+        if held_live is None:
+            raise RuntimeError(f"{label}: lost held object during re-plan")
+        bottom_now = xyz(_held_in_exec(held_live[0]))
+        corr = align_correction(
+            target_bottom_rim=xyz(target_pose),
+            bottom_now=bottom_now,
+            max_corr=max_align_corr,
+        )
+        print(
+            f"[Insert] live compensate {held_live[1]} "
+            f"bottom=({bottom_now[0]:.3f},{bottom_now[1]:.3f},{bottom_now[2]:.3f}) "
+            f"corr=({corr[0]:.4f},{corr[1]:.4f},{corr[2]:.4f})"
+        )
+        return _finalize(
+            _post_stages(
+                vec_add(geometry.rim, corr),
+                vec_add(geometry.deep, corr),
+                compensate=True,
+            )
+        )
+
+    ctx.task_cfg = replace(
+        ctx.task_cfg, common=qt.common, pick=qt.pick, place=qt.place
+    )
+    ctx.gripper_for_return_home = gripper_open
+
+    pre_arm = [
+        _stage("TaskQ-Insert-1-Approach", geometry.approach, 0.0),
+        _stage("TaskQ-Insert-2-AlignHole", geometry.rim, 0.0),
+    ]
+    if live_compensate:
+        return SkillPlan(
+            stages=_finalize(pre_arm),
+            meta=meta,
+            replan=_replan,
+        )
+    return SkillPlan(
+        stages=_finalize(
+            pre_arm
+            + _post_stages(geometry.rim, geometry.deep, compensate=False)
+        ),
+        meta=meta,
     )
 
 
@@ -618,6 +986,15 @@ def skill_move_to_pose(
     if ctx.use_stamped:
         for st in stages:
             st.frame_id = motion_frame_id
+    stages = _stages_in_command_ee_frame(
+        ctx,
+        stages,
+        arm_side=arm_side,
+        ee_target_frame=params.get("ee_target_frame"),
+        ee_command_frame=params.get("ee_command_frame"),
+        tf_lookup_timeout=params.get("tf_lookup_timeout"),
+        label="single_arm.move_to_pose",
+    )
     print(
         f"[MoveToPose] arm={arm} motion_frame_id={motion_frame_id} "
         f"pos=({pose.position.x:.3f},{pose.position.y:.3f},{pose.position.z:.3f}) "
@@ -678,7 +1055,9 @@ def skill_move_relative(
             warn_prefix=f"TaskQ {label} timeout",
         )
 
-    _apply_arm_movel_duration(ctx, duration=params.get("arm_movel_duration"), label=label)
+    _apply_arm_movel_duration(
+        ctx, duration=params.get("arm_movel_duration"), label=label
+    )
 
     p1 = clone_pose(p0)
     if move:
@@ -719,6 +1098,7 @@ def register_single_arm_skills() -> None:
     register_skill("single_arm.pick", skill_pick)
     register_skill("single_arm.move_to_object", skill_move_to_object)
     register_skill("single_arm.place", skill_place)
+    register_skill("single_arm.insert", skill_insert)
     register_skill("single_arm.goto_cache_pose", skill_goto_cache_pose)
     register_skill("single_arm.move_to_pose", skill_move_to_pose)
     register_skill("single_arm.move_relative", skill_move_relative)

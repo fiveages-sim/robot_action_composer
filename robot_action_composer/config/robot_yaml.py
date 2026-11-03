@@ -16,6 +16,8 @@ _MOTION_FIELD_NAMES: frozenset[str] = frozenset(
         "arrival_timeout",
         "arrival_poll",
         "gripper_action_wait",
+        "ee_target_frame",
+        "ee_command_frame",
     }
 )
 _ROS2_PRESETS: frozenset[str] = frozenset({"auto", "single_arm", "ocs2_single_arm"})

@@ -198,6 +198,7 @@ def _compose_local_chain_translation(
         rotate_vector_by_quat,
     )
     from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+        ensure_get_prim_attribute_service,
         try_get_prim_orient_local_xyzw,
         try_get_prim_translate_local,
     )
@@ -208,6 +209,7 @@ def _compose_local_chain_translation(
         raise ValueError("object_prim_path and grasp_prim_path are required")
     if grasp == obj:
         return _IDENTITY_XYZ
+    ensure_get_prim_attribute_service()
     prefix = obj + "/"
     if not grasp.startswith(prefix):
         raise ValueError(
@@ -247,6 +249,7 @@ def _compose_local_chain_orient(
         quat_normalize,
     )
     from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+        ensure_get_prim_attribute_service,
         try_get_prim_orient_local_xyzw,
     )
 
@@ -256,6 +259,7 @@ def _compose_local_chain_orient(
         raise ValueError("object_prim_path and grasp_prim_path are required")
     if grasp == obj:
         return _IDENTITY_XYZW
+    ensure_get_prim_attribute_service()
     prefix = obj + "/"
     if not grasp.startswith(prefix):
         raise ValueError(
@@ -321,7 +325,11 @@ def resolve_object_local_offset_from_grasp_prim(
 ) -> tuple[float, float, float]:
     """Compose local xforms from ``object`` down to ``grasp`` → object-local offset.
 
-    Missing ``xformOp:translate`` / ``xformOp:orient`` on a segment → identity for that op.
+    Reads USD-authored static locals via ``/get_prim_attribute``, then the pick skill
+    stacks them onto the live rigid-body pose from ``/get_entity_state``.
+
+    - **Service unavailable** → raise (probed inside the local-chain composer).
+    - **Attribute not authored** on a segment → identity for that op (origin is OK).
     """
     obj = normalize_prim_path(object_prim_path)
     grasp = normalize_prim_path(grasp_prim_path)
@@ -333,6 +341,17 @@ def resolve_object_local_offset_from_grasp_prim(
     print(
         f"[ObjectBind] grasp offset xyz=({offset[0]:.6f}, {offset[1]:.6f}, {offset[2]:.6f})"
     )
+    norm = (offset[0] ** 2 + offset[1] ** 2 + offset[2] ** 2) ** 0.5
+    if norm < 1e-6:
+        print(
+            f"[ObjectBind] WARN: grasp offset for {obj} → {grasp} is ~zero; "
+            "xformOp attributes may be missing (would grasp the object origin)."
+        )
+    elif norm > 2.0:
+        print(
+            f"[ObjectBind] WARN: grasp offset for {obj} → {grasp} is {norm:.3f} m; "
+            "check the grasp prim path / authored transforms."
+        )
     if cache is not None:
         cache[key] = offset
     return offset
@@ -344,7 +363,11 @@ def resolve_object_local_orient_from_grasp_prim(
     *,
     cache: MutableMapping[tuple[str, str], tuple[float, float, float, float]] | None = None,
 ) -> tuple[float, float, float, float]:
-    """Compose local orients from ``object`` down to ``grasp`` → object←grasp quat xyzw."""
+    """Compose local orients from ``object`` down to ``grasp`` → object←grasp quat xyzw.
+
+    Service unavailable → raise (probed inside the local-chain composer);
+    missing ``xformOp:orient`` → identity quat.
+    """
     obj = normalize_prim_path(object_prim_path)
     grasp = normalize_prim_path(grasp_prim_path)
     key = (obj, grasp)

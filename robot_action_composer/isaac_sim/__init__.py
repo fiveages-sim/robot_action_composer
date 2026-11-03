@@ -197,6 +197,24 @@ def _parse_prim_attr_vec(value: str, *, expected_len: int, path: str, attribute:
     return vec
 
 
+def ensure_get_prim_attribute_service(
+    *,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+) -> None:
+    """Raise if ``/get_prim_attribute`` is not advertised (ROS2ServicePrim missing).
+
+    ``isaacsim.ros2.sim_control`` does **not** provide this service; the robot ROS
+    OmniGraph needs an ``isaacsim.ros2.bridge.ROS2ServicePrim`` node (see W2 / G1D).
+    """
+    node, client = _get_service_client(GetPrimAttribute, "/get_prim_attribute")
+    if not _wait_for_service_wall(client, node, timeout):
+        raise RuntimeError(
+            "/get_prim_attribute unavailable within "
+            f"{timeout:.1f}s — add OmniGraph node isaacsim.ros2.bridge.ROS2ServicePrim "
+            "to the robot ROS payload (not provided by isaacsim.ros2.sim_control)."
+        )
+
+
 def try_get_prim_attribute(
     path: str,
     attribute: str,
@@ -205,28 +223,26 @@ def try_get_prim_attribute(
     retries: int = PRIM_ATTR_PROBE_RETRIES,
     retry_delay: float = SERVICE_RETRY_DELAY,
 ) -> str | None:
-    """Return attribute value string, or ``None`` if missing / service unsuccessful."""
+    """Return attribute value string, or ``None`` if the attribute is not authored.
+
+    Distinguishes failure modes:
+    - **Service down / call error** → raise (caller must not treat as identity).
+    - **Attribute missing** (``success=False`` / empty) → ``None`` (identity is OK).
+    """
     request = GetPrimAttribute.Request()
     request.path = path
     request.attribute = attribute
-    try:
-        result = _call_service_with_retry(
-            lambda: _call_service_once(
-                GetPrimAttribute,
-                "/get_prim_attribute",
-                request,
-                timeout=timeout,
-            ),
-            f"try_get_prim_attribute('{path}', '{attribute}')",
-            retries=retries,
-            retry_delay=retry_delay,
-        )
-    except Exception as exc:
-        print(
-            f"[Isaac] WARN: get_prim_attribute failed for {path!r} "
-            f"{attribute!r}: {exc}"
-        )
-        return None
+    result = _call_service_with_retry(
+        lambda: _call_service_once(
+            GetPrimAttribute,
+            "/get_prim_attribute",
+            request,
+            timeout=timeout,
+        ),
+        f"try_get_prim_attribute('{path}', '{attribute}')",
+        retries=retries,
+        retry_delay=retry_delay,
+    )
     if not getattr(result, "success", False):
         return None
     raw = getattr(result, "value", None)
@@ -270,7 +286,10 @@ def try_get_prim_translate_local(
     retries: int = PRIM_ATTR_PROBE_RETRIES,
     retry_delay: float = SERVICE_RETRY_DELAY,
 ) -> tuple[float, float, float] | None:
-    """Local translate, or ``None`` if attribute missing (treat as identity translate)."""
+    """Local translate, or ``None`` if attribute not authored (treat as identity).
+
+    Service unavailable raises (via ``try_get_prim_attribute``); do not map that to identity.
+    """
     raw = try_get_prim_attribute(
         path,
         "xformOp:translate",
@@ -293,9 +312,10 @@ def try_get_prim_orient_local_xyzw(
     retries: int = PRIM_ATTR_PROBE_RETRIES,
     retry_delay: float = SERVICE_RETRY_DELAY,
 ) -> tuple[float, float, float, float] | None:
-    """Local ``xformOp:orient`` as xyzw, or ``None`` if missing (treat as identity).
+    """Local ``xformOp:orient`` as xyzw, or ``None`` if not authored (treat as identity).
 
     Omniverse authors orient as **wxyz**; return value is ROS-style **xyzw**.
+    Service unavailable raises; missing attribute → ``None``.
     """
     raw = try_get_prim_attribute(
         path,

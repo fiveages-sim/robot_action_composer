@@ -135,6 +135,11 @@ def _skill_defaults_for_block(skill: str, param_key: str, skill_defaults: dict[s
         if param_key != "single_arm.place":
             merged.update(skill_defaults.get(param_key) or {})
         return merged
+    if skill == "single_arm.insert":
+        merged = dict(skill_defaults.get("single_arm.insert") or {})
+        if param_key != "single_arm.insert":
+            merged.update(skill_defaults.get(param_key) or {})
+        return merged
     if skill == "single_arm.move_to_object":
         pick_sd = dict(skill_defaults.get("single_arm.move_to_object") or {})
         merged: dict[str, Any] = {}

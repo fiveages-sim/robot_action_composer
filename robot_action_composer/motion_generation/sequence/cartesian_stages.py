@@ -269,6 +269,8 @@ class ArmStage:
     wait_gripper_settle: bool = False
     skip_arrival_check: bool = False
     skip_gripper_command: bool = False
+    #: 为 True 时不沿用本段预先算好的位姿，改为发送当前反馈位姿（只闭夹爪、不再往前顶）。
+    hold_current_pose: bool = False
 
 
 @dataclass
@@ -286,6 +288,8 @@ class StageTarget:
     #: 为 True 时跳过 ``wait_until_arrive`` 位姿到位检查，仅靠 ``wait_gripper_settle`` 的固定等待。
     #: 用于 Grasp 阶段：夹爪夹到物体后接触力会把 TCP 顶离目标，基于位姿的到位判断会持续超时。
     skip_arrival_check: bool = False
+    #: 为 True 时用当前末端反馈位姿覆盖本段目标，避免闭爪时把靠近目标再发一遍。
+    hold_current_pose: bool = False
 
     def to_action_dict(
         self,
@@ -418,6 +422,7 @@ def build_single_arm_pick_sequence(
     gripper_open: float,
     gripper_closed: float,
     stage_prefix: str = "Pickup",
+    hold_current_pose_on_grasp: bool = True,
 ) -> list[ArmStage]:
     """Build pick stages: Approach (optional) → CloseIn → Grasp → Lift (optional) → Retreat (optional).
 
@@ -500,6 +505,7 @@ def build_single_arm_pick_sequence(
             ArmTarget(pose=close_in_pose, gripper=gripper_closed),
             wait_gripper_settle=True,
             skip_arrival_check=True,
+            hold_current_pose=bool(hold_current_pose_on_grasp),
         )
     )
     if has_lift:
@@ -667,6 +673,7 @@ def assign_to_arm(
                     wait_gripper_settle=spec.wait_gripper_settle,
                     skip_arrival_check=spec.skip_arrival_check,
                     skip_gripper_command=spec.skip_gripper_command,
+                    hold_current_pose=spec.hold_current_pose,
                 ),
             )
         else:
@@ -677,6 +684,7 @@ def assign_to_arm(
                     wait_gripper_settle=spec.wait_gripper_settle,
                     skip_arrival_check=spec.skip_arrival_check,
                     skip_gripper_command=spec.skip_gripper_command,
+                    hold_current_pose=spec.hold_current_pose,
                 ),
             )
     return result
@@ -1353,6 +1361,51 @@ def build_bimanual_place_relative_sequence(
 # Executor helpers
 # ---------------------------------------------------------------------------
 
+def _clone_pose_msg(pose: Any) -> Any:
+    out = type(pose)()
+    out.position.x = float(pose.position.x)
+    out.position.y = float(pose.position.y)
+    out.position.z = float(pose.position.z)
+    out.orientation.x = float(pose.orientation.x)
+    out.orientation.y = float(pose.orientation.y)
+    out.orientation.z = float(pose.orientation.z)
+    out.orientation.w = float(pose.orientation.w)
+    return out
+
+
+def _apply_hold_current_pose(interface: ROS2RobotInterface, stage: StageTarget) -> None:
+    """闭爪段改发当前反馈位姿，避免把还没走到的靠近点再命令一次。"""
+    if not stage.hold_current_pose:
+        return
+    held_frame: str | None = None
+    for side, handler in (
+        ("left", interface.left_arm_handler),
+        ("right", interface.right_arm_handler),
+    ):
+        arm_target = getattr(stage, side)
+        if arm_target is None or handler is None:
+            continue
+        current = handler.get_pose()
+        if current is None:
+            logger.warning("[Stage] %s hold_current_pose: %s pose unavailable", stage.name, side)
+            continue
+        arm_target.pose = _clone_pose_msg(current)
+        frame_id = handler.get_frame_id() if hasattr(handler, "get_frame_id") else None
+        frame_id = str(frame_id).strip() if frame_id else ""
+        if frame_id:
+            if held_frame is not None and held_frame != frame_id:
+                logger.warning(
+                    "[Stage] %s hold_current_pose: left frame %s != right frame %s",
+                    stage.name,
+                    held_frame,
+                    frame_id,
+                )
+            held_frame = frame_id
+    if held_frame:
+        stage.frame_id = held_frame
+    logger.info("[Stage] %s hold_current_pose frame=%s", stage.name, stage.frame_id)
+
+
 def _send_arm_targets(
     interface: ROS2RobotInterface,
     stage: StageTarget,
@@ -1479,6 +1532,9 @@ def execute_stage_sequence(
     arm_orient_threshold = pose_tol_ori_to_orient_deg(pose_tol_ori)
     for stage in sequence:
         logger.info("[Stage] %s", stage.name)
+        # Resolve hold-current targets before notifying hooks so recorded actions
+        # match what is actually published.
+        _apply_hold_current_pose(interface, stage)
         if on_stage_start is not None:
             on_stage_start(stage.name, stage)
 

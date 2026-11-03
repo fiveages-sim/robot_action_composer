@@ -63,6 +63,8 @@ motion 相关字段可写在根级，或集中在 `motion:` 下（与根级合�
 | `arrival_timeout` | `3.0` | 到位超时（秒） |
 | `arrival_poll` | `0.05` | 到位轮询间隔（秒） |
 | `gripper_action_wait` | `0.3` | 夹爪动作后等待（秒） |
+| `ee_target_frame` | `""` | 任务末端位姿默认所属 link，如 `{arm}_eef`。空则直接当运控 TCP 下发 |
+| `ee_command_frame` | `""` | 运控实际跟踪的 link。`ee_target_frame` 非空且此处为空时用 `{arm}_tcp` |
 
 ### `ros2_interface.preset`
 
@@ -103,7 +105,7 @@ ros2_interface:
 | `gripper_control_mode` | ✓ | ✓ |
 | `base_link_entity_path` | ✓ | — |
 | `post_reset_wait`, `fsm_switch_delay` | ✓ | ✓（推理） |
-| `arrival_*`, `gripper_action_wait` | ✓ | — |
+| `arrival_*`, `gripper_action_wait`, `ee_target_frame`, `ee_command_frame` | ✓ | — |
 | `robot_id`, `cameras`, `depth_*` | — | ✓ |
 
 ## 安装与环境

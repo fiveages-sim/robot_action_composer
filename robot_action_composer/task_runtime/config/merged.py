@@ -184,6 +184,8 @@ class MergedQueueConfig:
     drawer: DrawerGeometryConfig | None = None
     # 可选：任务 YAML（如 runtime_defaults / 场景 root 覆盖）覆盖 robot_config 的 Isaac base prim 路径
     base_link_entity_path: str | None = None
+    #: 可选：覆盖 stamped / 物体相对位姿的 TF 帧名（默认取 base prim 叶子名）
+    frame_id: str | None = None
     #: 合并后的物体清单（``.meta`` ∪ 任务 ``objects`` ∪ scene ``objects``）
     objects: Mapping[str, Mapping[str, Any]] | None = None
     #: 技能省略 ``object_key`` 时的默认物体
@@ -192,6 +194,16 @@ class MergedQueueConfig:
 
 def _optional_base_link_entity_path(overrides: Mapping[str, Any]) -> str | None:
     raw = overrides.get("base_link_entity_path")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    return s or None
+
+
+def _optional_frame_id(overrides: Mapping[str, Any]) -> str | None:
+    raw = overrides.get("frame_id")
     if raw is None:
         return None
     if not isinstance(raw, str):
@@ -288,6 +300,10 @@ def build_merged_queue_config(
     base_path = _optional_base_link_entity_path({"base_link_entity_path": base_link_raw}) if base_link_raw is not None else (
         base_runtime.base_link_entity_path if base_runtime is not None else None
     )
+    frame_raw = root_scene.get("frame_id", root_base.get("frame_id"))
+    frame_id = _optional_frame_id({"frame_id": frame_raw}) if frame_raw is not None else (
+        base_runtime.frame_id if base_runtime is not None else None
+    )
     return MergedQueueConfig(
         single_arm=single,
         carry=carry,
@@ -295,6 +311,7 @@ def build_merged_queue_config(
         handover=handover,
         drawer=drawer,
         base_link_entity_path=base_path,
+        frame_id=frame_id,
         objects=objs,
         active_object=act,
     )

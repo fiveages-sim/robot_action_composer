@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from numbers import Real
 from typing import Any, Mapping, Union
 
-from robot_action_composer.motion_generation.sequence.cartesian_stages import SendMode  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
+    SendMode,
+    StageTarget,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +21,22 @@ class ExecutionMeta:
     frame_id: str
     warn_prefix: str = "TaskQueue"
     left_arrival_guard_stage: str | None = None
+
+
+@dataclass
+class SkillPlan:
+    """Skill output that may be split into execute → re-plan → execute.
+
+    ``stages`` run first (e.g. approach + coarse align). If ``replan`` is set,
+    the runner calls it after those stages complete and executes the returned
+    stages with the same ``meta``. This keeps measurement-dependent planning
+    (precise insert) inside the runner instead of letting skills execute
+    motions while planning.
+    """
+
+    stages: list[StageTarget]
+    meta: ExecutionMeta
+    replan: Callable[[], list[StageTarget]] | None = None
 
 
 @dataclass(frozen=True)

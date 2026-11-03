@@ -15,6 +15,7 @@ from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMiss
 )
 
 from robot_action_composer.motion_generation.sequence.cartesian_stages import (  # pyright: ignore[reportMissingImports]
+    ArmSide,
     ArmTarget,
     SendMode,
     StageTarget,
@@ -42,7 +43,10 @@ from robot_action_composer.motion_generation.tasks.bimanual_parallel_pick import
     build_bimanual_parallel_pick_record_sequence,
     parallel_pick_cfg_from_params,
 )
-from robot_action_composer.motion_generation.tasks.handover import build_handover_sync_sequence  # pyright: ignore[reportMissingImports]
+from robot_action_composer.motion_generation.tasks.handover import (  # pyright: ignore[reportMissingImports]
+    HandoverSyncConfig,
+    build_handover_sync_sequence,
+)
 from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
     apply_object_local_offset_to_pose,
 )
@@ -62,6 +66,7 @@ from robot_action_composer.task_runtime.skills.single_arm import (
     _pick_execution_frame_id,
     _pick_tf_timeout,
     _scratch_pose_entry_to_geometry_pose,
+    _stages_in_command_ee_frame,
 )
 from robot_action_composer.task_runtime.types import ExecutionMeta
 
@@ -268,14 +273,49 @@ def _carry_full_stages(
     )
 
 
-def _require_handover_sync(ctx: QueueRuntimeContext):
-    h = ctx.handover_sync
-    if h is None:
+def _vec3_param(raw: Any, name: str) -> tuple[float, float, float]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        raise ValueError(f"dual_arm.handover: {name} must be [x, y, z], got {raw!r}")
+    return (float(raw[0]), float(raw[1]), float(raw[2]))
+
+
+def _quat4_param(raw: Any, name: str) -> tuple[float, float, float, float]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        raise ValueError(f"dual_arm.handover: {name} must be [x, y, z, w], got {raw!r}")
+    return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+
+
+def _handover_sync_from_params(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> HandoverSyncConfig:
+    """队列参数覆盖 ``skill_defaults.dual_arm.handover``。缺字段时沿用已合并配置。"""
+    base = ctx.handover_sync
+
+    def _take(name: str) -> Any:
+        if name in params and params[name] is not None:
+            return params[name]
+        if base is not None:
+            return getattr(base, name)
+        return None
+
+    pos = _take("handover_position")
+    left = _take("left_handover_orientation")
+    right = _take("right_handover_orientation")
+    if pos is None or left is None or right is None:
         raise TypeError(
-            "dual_arm.handover requires handover_sync (merged from skill_defaults.dual_arm.handover; "
-            "need handover_position + orientations). Pick side arm comes from common.arm / single_arm.pick."
+            "dual_arm.handover requires handover_position and both orientations "
+            "(task_queue params or skill_defaults.dual_arm.handover). "
+            "Pick side arm comes from common.arm / single_arm.pick."
         )
-    return h
+    offset = _take("receiver_handover_offset")
+    if offset is None:
+        offset = (0.0, 0.0, 0.0)
+    return HandoverSyncConfig(
+        handover_position=_vec3_param(pos, "handover_position"),
+        left_handover_orientation=_quat4_param(left, "left_handover_orientation"),
+        right_handover_orientation=_quat4_param(right, "right_handover_orientation"),
+        receiver_handover_offset=_vec3_param(offset, "receiver_handover_offset"),
+    )
 
 
 def _require_parallel_pick_cfg(params: Mapping[str, Any]) -> BimanualParallelPickTaskConfig:
@@ -816,19 +856,25 @@ def skill_goto_cache_pose(
 
 
 def skill_handover_sync(
-    ctx: QueueRuntimeContext, _params: Mapping[str, Any]
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[StageTarget], ExecutionMeta]:
     """双臂同步交接（``build_handover_sequence``）；抓取 / 放置由 ``single_arm.pick`` / ``place`` 承担。
 
     交接「给出」侧由 **抓取臂** 决定：与 ``single_arm.pick.arm`` 一致（合并进 ``QueueSingleArmSlice.common.arm``），
     另一侧为接收臂；无需在 ``dual_arm.handover`` 里单独配置 source/receiver。
+
+    位姿按目标末端 link 书写（默认 ``robot.yaml`` 的 ``ee_target_frame``），下发前换成运控跟踪 link。
+    ``motion_frame_id`` 是这些位姿的参考系，直接作为 stamped ``frame_id``。
     """
-    hcfg = _require_handover_sync(ctx)
+    hcfg = _handover_sync_from_params(ctx, params)
     # 与 pick 块合并后的臂别（来自 single_arm.pick.arm）
     arm = ctx.task_cfg.common.arm.strip().lower()
     if arm not in ("left", "right"):
         raise ValueError(f"common.arm must be 'left' or 'right' for handover pick side, got {arm!r}")
     source_is_right = arm == "right"
+    _apply_arm_movel_duration(
+        ctx, duration=params.get("arm_movel_duration"), label="dual_arm.handover"
+    )
     stages = build_handover_sync_sequence(
         sync_cfg=hcfg,
         source_is_right=source_is_right,
@@ -836,9 +882,34 @@ def skill_handover_sync(
         gripper_closed=ctx.gripper_closed,
         stage_prefix="Handover",
     )
+    motion_frame = str(params.get("motion_frame_id") or ctx.frame_id or "").strip() or ctx.frame_id
+    ee_target = params.get("ee_target_frame")
+    ee_command = params.get("ee_command_frame")
+    tf_timeout = params.get("tf_lookup_timeout")
+    if str(params.get("motion_frame_id") or "").strip() == "":
+        print(
+            f"[dual_arm.handover] WARN: motion_frame_id not set; using "
+            f"ctx.frame_id={ctx.frame_id!r}. Absolute handover positions are "
+            "interpreted in this frame — verify they match the calibration frame."
+        )
+    stages = _stages_in_command_ee_frame(
+        ctx,
+        stages,
+        arm_side=ArmSide.LEFT,
+        arm_sides=(ArmSide.LEFT, ArmSide.RIGHT),
+        ee_target_frame=ee_target,
+        ee_command_frame=ee_command,
+        tf_lookup_timeout=tf_timeout,
+        label="dual_arm.handover",
+    )
+    print(
+        f"[dual_arm.handover] source={'right' if source_is_right else 'left'} "
+        f"motion_frame_id={motion_frame} pos={hcfg.handover_position} "
+        f"rcv_off={hcfg.receiver_handover_offset}"
+    )
     return stages, ExecutionMeta(
         send_mode=_dual_mode(ctx),
-        frame_id=ctx.frame_id,
+        frame_id=motion_frame,
         left_arrival_guard_stage="Handover-1-SyncMove" if source_is_right else None,
         warn_prefix="TaskQ dual_arm handover sync timeout",
     )

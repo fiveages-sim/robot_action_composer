@@ -294,6 +294,7 @@ def skill_send_mode_command(
         commands (list, 可选): 多条模式命令，按顺序发布（与 ``command`` 二选一或合并）。
         wait_for_state (bool, 可选): 是否等 current_state 确认，默认 True。
         wait_timeout (float, 可选): 全部命令确认超时（秒），默认 5.0。
+        require_confirmed (bool, 可选): 为 true 时，current_state 未确认则抛错并中止后续队列。默认 false（只警告）。
         settle_time (float, 可选): 确认后（或跳过确认时）额外固定等待；
             接口内置约 0.1s，更大时补睡差额。
     """
@@ -318,6 +319,7 @@ def skill_send_mode_command(
         )
 
     wait_for_state = bool(params.get("wait_for_state", True))
+    require_confirmed = bool(params.get("require_confirmed", False))
     wait_timeout = float(params.get("wait_timeout", 5.0))
     if wait_timeout < 0.0:
         raise ValueError("robot.send_mode_command: wait_timeout must be >= 0")
@@ -344,6 +346,10 @@ def skill_send_mode_command(
 
     ok = True
     if wait_for_state and hasattr(iface, "wait_until_mode_commands_applied"):
+        print(
+            f"[Session] robot.send_mode_command waiting up to {wait_timeout:.1f}s "
+            f"for modes={cmds!r}"
+        )
         ok = bool(
             iface.wait_until_mode_commands_applied(
                 cmds,
@@ -352,12 +358,7 @@ def skill_send_mode_command(
                 sleep_fn=sleep_fn,
             )
         )
-        if not ok:
-            print(
-                f"[Session] WARN: modes {cmds!r} not confirmed on "
-                f"/ocs2_wbc_controller/current_state within {wait_timeout:.1f}s"
-            )
-        else:
+        if ok:
             print(f"[Session] robot.send_mode_command wait_ok=True modes={cmds!r}")
     elif wait_for_state and hasattr(iface, "wait_until_mode_command_applied"):
         # 旧接口兜底：仍按批末一次确认最后一条
@@ -369,11 +370,14 @@ def skill_send_mode_command(
                 sleep_fn=sleep_fn,
             )
         )
-        if not ok:
-            print(
-                f"[Session] WARN: mode {cmds[-1]!r} not confirmed on "
-                f"/ocs2_wbc_controller/current_state within {wait_timeout:.1f}s"
-            )
+    if wait_for_state and not ok:
+        message = (
+            f"robot.send_mode_command: modes {cmds!r} not confirmed on "
+            f"/ocs2_wbc_controller/current_state within {wait_timeout:.1f}s"
+        )
+        if require_confirmed:
+            raise RuntimeError(message)
+        print(f"[Session] WARN: {message}")
 
     if settle_extra > 0.0:
         sleep_fn(settle_extra)

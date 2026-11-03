@@ -47,6 +47,12 @@ class QueueSlicePick:
     motion_frame_id: str | None = None
     tf_lookup_timeout: float | None = None
     arm_movel_duration: float | None = None
+    #: 闭爪段改为发送当前反馈位姿（避免把接近目标再命令一次）。默认开；旧行为可写 false。
+    hold_current_pose_on_grasp: bool = True
+    #: 本段目标位姿属于哪个末端 link。省略则用机器人 ``ee_target_frame``；写空字符串则本段不换算。
+    ee_target_frame: str | None = None
+    #: 本段运控跟踪的 link。省略则用机器人 ``ee_command_frame``，再没有则 ``{arm}_tcp``。
+    ee_command_frame: str | None = None
     # 标定语义：ee_base / 工具系偏移假定机物 X 对齐；object 时按物体姿态（默认仅 yaw）左乘。
     ee_orientation_frame: str = "motion"
     object_orientation_mode: str = "yaw"

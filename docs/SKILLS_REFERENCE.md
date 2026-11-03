@@ -29,9 +29,10 @@
     - `position`：目标位置 `[x, y, z]`（米），必填。
     - `orientation`：目标姿态四元数 `[x, y, z, w]`，必填。
     - `motion_frame_id`：位姿参考帧；不写则沿用任务级 `frame_id`（通常为 `arm_base`）。
+    - `ee_target_frame` / `ee_command_frame` / `tf_lookup_timeout`：与 `single_arm.pick` 相同。本段位姿默认按机器人 `ee_target_frame`（如 `{arm}_eef`，夹指尖）解释，下发前用实时 TF 换成运控跟踪的 `{arm}_tcp`；段内写空字符串可关闭换算。
   - **末端系配置**
     - `gripper`：目标夹爪值，默认保持上一步结束时的状态。
-- **备注**：位姿在 ``motion_frame_id`` 下给出绝对目标，非相对当前末端。
+- **备注**：位姿在 ``motion_frame_id`` 下给出绝对目标，非相对当前末端。若本段给的是 TCP 位姿（例如来自 `robot.cache_ee_pose` 的手工示教值），请显式写 `ee_target_frame: ""`。
 
 ### 1.1b 相对当前末端平移旋转（`single_arm.move_relative`）
 
@@ -73,6 +74,8 @@
     - `ee_base_orientation`：目标末端姿态四元数 `xyzw`（直接作为到位姿态）。
     - `motion_frame_id`：目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
+    - `ee_target_frame`：本段位姿属于哪个末端 link。省略则用机器人 `robot.yaml` 的 `ee_target_frame`（如 `{arm}_eef`）；机器人和本段都空则直接当运控 TCP 下发。写空字符串可关掉机器人默认换算。
+    - `ee_command_frame`：运控实际跟踪的 link。省略则用机器人 `ee_command_frame`，再没有则 `{arm}_tcp`。
   - **执行控制**
     - `arm`：`left|right`（不写则沿用 `common.arm`）。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
@@ -94,6 +97,7 @@
     - `aligned_object_roll`：标称物体 roll（仅 `yaw_roll` 时生效）。数值或 `auto`。详见 §6.2。
     - `motion_frame_id`：抓取目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
+    - `ee_target_frame` / `ee_command_frame`：与 `move_to_object` 相同。目标位姿（含预接近、抬升、后撤）先在夹爪尖上算完，再整段换成腕部 TCP。
   - **末端系配置**
     - `pick_clearance`：闭合抓取阶段偏移（工具系位移，沿末端局部轴向解释）。
     - `prepare_offset`：预接近偏移（工具系向量，语义与 `dual_arm.carry.carry_prepare_offset` 一致）。
@@ -104,6 +108,7 @@
   - **执行控制**
     - `arm`：`left|right`。
     - `arm_movel_duration`：可选；执行前写入 `arm_controller.movel_duration`。
+    - `hold_current_pose_on_grasp`：默认 `true`。闭爪段改为发送当前反馈位姿（避免把接近目标再命令一次导致顶开物体）；写 `false` 恢复“闭爪时重发抓取目标”的旧行为。
 - **备注**：
   - 旧 YAML（仅 `object_prim_path` + `object_position_offset`）行为不变；`object_position_offset` 始终在物体系。
   - `runtime_defaults.use_object_orientation: true` 时，若未写 `ee_orientation_frame`，等价于 `object`（兼容旧字段）。
@@ -111,19 +116,21 @@
 
 ### 1.4 放置（`single_arm.place`）
 
-- **效果**：执行单臂放置序列（在 `task_queue` 中出现即执行）；既支持放置到固定坐标（`place_position`），也支持基于参考物体坐标动态计算放置目标（`object_prim_path` + `object_position_offset`）。
+- **效果**：把末端/持物送到一个**已知位姿**：`Approach → Place → Release → PostReleaseRetreat`。支持固定坐标或物体相对坐标；不做孔口实测对齐。
 - **参数**（来自 `single_arm.place` 切片）：
   - **目标物体配置**
     - `object_prim_path`：放置参考物体 Prim 路径（可解析放置位）。
+    - `object_key` / `grasp_id` / `grasp_prim_path`：可选；与 `single_arm.pick` 相同，偏移由 `/get_prim_attribute` 读 USD 静态局部链。
     - `object_position_offset`：相对参考物体中心的放置偏移（物体局部坐标系；会按物体当前姿态旋转后叠加到放置目标）。
   - **运动系配置**
     - `place_position`：显式放置位置（运动系坐标；当未设置 `object_prim_path` 时，直接按该坐标放置）。
     - `ee_base_orientation`：放置姿态四元数 `xyzw`（**未设置时默认保持当前末端姿态**，与 `dual_arm.place` 一致）。
     - `motion_frame_id`：放置目标输出坐标系（可选；不写则沿用任务 `frame_id`）。
     - `tf_lookup_timeout`：当 `motion_frame_id` 与任务坐标系不一致时的 TF 查询超时（秒）。
+    - `ee_target_frame` / `ee_command_frame`：与 `single_arm.pick` 相同；夹指系目标下发前换成运控 TCP。
   - **末端系配置**
     - `ee_place_axis`：放置轴向（末端坐标系；使用 `+x/-x/+y/-y/+z/-z`，不设置时继承 `single_arm.pick.ee_pick_axis`）。
-    - `place_insert_clearance`：放置闭合段偏移（工具系标量，沿 `ee_place_axis`）。
+    - `place_insert_clearance`：放置插入量（工具系标量，沿 `ee_place_axis`）。
     - `prepare_offset`：放置预接近偏移（工具系三维向量 `[x,y,z]`；按 `ee_base_orientation` 旋转后叠加到放置目标）。
     - `ee_retreat_offset`：松爪后回撤偏移（工具系向量；按 `ee_base_orientation` 旋转后执行）。
   - **执行控制**
@@ -133,6 +140,36 @@
   - 放置位置必须可解析；
   - 未设置 `ee_base_orientation` 时，读取当前末端姿态（`motion_frame_id` 下）作为放置姿态；
   - 未设置 `ee_place_axis` 时，默认继承 `single_arm.pick.ee_pick_axis`（默认 `+z`）。
+  - 持物对准孔/槽后插入请用 `single_arm.insert`，不要在本技能里拼 AlignHole。
+
+### 1.4b 精确插入（`single_arm.insert`）
+
+- **效果**：持物放置的完整流程，分两段执行并由 runner 在中间重规划：
+  `Approach → AlignHole → [实测补偿] → FineAlign → Insert → Release → Retreat`。
+- **参数**（`skill_defaults.single_arm.insert` 或块内 `params`）：
+  - **目标（孔口）配置**
+    - `object_key` / `grasp_id` / `object_prim_path` / `object_position_offset`：与 `single_arm.place` 相同；`place_position` 即**孔口/对齐点**。
+    - `insert_axis`：**目标物体局部系**的插入方向，`+x/-x/+y/-y/+z/-z`，默认 `-z`。轴由目标物体姿态旋转到执行系，不再写死世界竖直。
+    - `insert_depth`：孔口 → 落底距离（米，`0 < d <= 0.3`），沿 `insert_axis`。
+    - `approach_distance`：孔口前悬停距离（沿插入反方向，米），默认 `0.05`。
+    - `align_orientation`：默认 `true`；用最小旋转把手中物体轴对齐到插入轴（保留绕轴 yaw），并重算 EE 位置使物体底部落在孔口。
+    - `held_axis`：手中物体的对齐轴，默认 `+z`；对齐到 `-insert_axis`（即物体 +Z 朝孔外）。
+  - **持物配置**
+    - `held_object_key` / `held_grasp_id`：手中物体实时位姿 + USD 局部 grasp（如 `bottom`）。
+    - `held_object_prim_path`：兼容旧配置。
+    - `live_align_compensate`：默认 `true`；AlignHole 后重测管底并补偿后续下探。held 位姿始终读实时服务，不走 replay。
+    - `max_align_corr`：补偿上限（米），默认 `0.03`；超出直接报错，避免盲插。
+    - `max_tilt_deg`：允许的姿态修正角，默认 `15`；`align_orientation=true` 时修正超过该值仅告警，关闭对齐时则告警物体轴与插入轴的夹角。
+  - **姿态 / 回撤**
+    - `ee_base_orientation`：可选；缺省用当前夹指反馈姿态。
+    - `retreat_distance`：松爪后沿 `insert_axis` **反向**退出的距离，默认等于 `insert_depth`（即退到孔口）。
+    - `gripper_open`：松爪值，默认 `common.gripper_open` / `ctx.gripper_open`。
+  - **坐标系 / 执行**
+    - `motion_frame_id`、`tf_lookup_timeout`、`ee_target_frame`、`ee_command_frame`：与 `single_arm.pick` 相同。
+    - `arm`、`arm_movel_duration`。
+- **备注**：
+  - `place_position` 是**孔口**，不是最终落底；落底由 `insert_axis × insert_depth` 计算。
+  - 与 `place_insert_clearance` 完全分离：后者只属于 `single_arm.place` 的工具轴插入。
 
 ### 1.5 回程缓存末端（`single_arm.goto_cache_pose`）
 
@@ -598,7 +635,8 @@ https://github.com/user-attachments/assets/db2da0f2-961a-4607-866d-6c431db5126f
     - `command` / `mode`（`str` 或 `list`）：单条或列表。如 `ARMS_COUPLED`、`BODY_TRACKING`、`BODY_FREE`、`BODY_LOCK`、`BODY_HEAD_COUPLED`、`BASE_LOCK`、`BASE_UNLOCK`。
     - `commands`（`list`，可选）：多条模式命令，按顺序发布（适合「追踪 + 双臂耦合」）。
     - `wait_for_state`（`bool`，默认 `true`）：发完全部命令后，一次性轮询 `/ocs2_wbc_controller/current_state`，要求所有期望字段同时满足。
-    - `wait_timeout`（`float`，默认 `5.0`）：整批确认超时（秒）；超时打 WARN 后继续。
+    - `wait_timeout`（`float`，默认 `5.0`）：整批确认超时（秒）。
+    - `require_confirmed`（`bool`，默认 `false`）：为 `true` 时，未在 `wait_timeout` 内确认则抛错并中止后续队列；默认只打 WARN。
     - `settle_time`（`float`，可选）：确认后额外固定等待；接口内置约 `0.1s`，更大时补睡差额。
 - **备注**：
   - 只发 `/mode_command`，不切换 FSM；后续笛卡尔 skill 会按需自动切 OCS2。

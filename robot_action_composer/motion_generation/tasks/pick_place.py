@@ -70,6 +70,32 @@ def _place_binding_params(place: QueueSlicePlace) -> dict[str, Any]:
     return out
 
 
+def _entity_pose_in_base(
+    prim_path: str,
+    *,
+    base_world_pos: Any,
+    base_world_quat: Any,
+    ctx: QueueRuntimeContext | None,
+):
+    if ctx is not None and ctx.object_resolution is not None:
+        return resolve_object_pose_for_task(
+            ctx,
+            object_prim_path=prim_path,
+            include_orientation=True,
+            arm_side="none",
+            object_role="place_target",
+            entity_state_timeout=SERVICE_CALL_TIMEOUT,
+            retries=SERVICE_CALL_RETRIES,
+            retry_delay=SERVICE_RETRY_DELAY,
+        )
+    return get_object_pose_from_service(
+        base_world_pos,
+        base_world_quat,
+        prim_path,
+        include_orientation=True,
+    )
+
+
 def resolve_place_skill_from_entity(
     place: QueueSlicePlace,
     *,
@@ -79,52 +105,51 @@ def resolve_place_skill_from_entity(
 ) -> QueueSlicePlace:
     """Resolve place target from ``object_prim_path`` / ``object_key`` (+ optional grasp).
 
-    Fills ``place_position`` from the Isaac entity service (plus offset in **object
-    local frame**). Place orientation: when unset, ``single_arm.place`` uses current
-    EE orientation (see ``skill_place``); not inherited from pick.
+    Same geometry as pick: live **rigid parent** pose from ``/get_entity_state``, plus
+    USD-local grasp offset from ``/get_prim_attribute`` (and optional
+    ``object_position_offset``). Does **not** call ``/get_entity_state`` on child
+    hole/grasp Xforms (stale after parent motion).
+
+    Place orientation: when unset, ``single_arm.place`` uses current EE orientation
+    (see ``skill_place``); not inherited from pick.
 
     ``active_object`` is **not** used (pick target must not leak into place).
     """
     objects = getattr(ctx, "objects", None) if ctx is not None else None
     binding = _place_binding_params(place)
-    if binding.get("object_key") or binding.get("object_prim_path") or binding.get("grasp_id") or binding.get(
-        "grasp_prim_path"
+    if not (
+        binding.get("object_key")
+        or binding.get("object_prim_path")
+        or binding.get("grasp_id")
+        or binding.get("grasp_prim_path")
     ):
-        path, offset = resolve_pick_object_binding(
-            binding,
-            objects=objects,
-            active_object=None,
-            cache=getattr(ctx, "grasp_offset_cache", None) if ctx is not None else None,
-        )
-        place = replace(place, object_prim_path=path, object_position_offset=offset)
+        return place
 
+    path, offset = resolve_pick_object_binding(
+        binding,
+        objects=objects,
+        active_object=None,
+        cache=getattr(ctx, "grasp_offset_cache", None) if ctx is not None else None,
+    )
+    place = replace(place, object_prim_path=path, object_position_offset=offset)
     if not place.object_prim_path:
         return place
-    if ctx is not None and ctx.object_resolution is not None:
-        place_pose = resolve_object_pose_for_task(
-            ctx,
-            object_prim_path=place.object_prim_path,
-            include_orientation=True,
-            arm_side="none",
-            object_role="place_target",
-            entity_state_timeout=SERVICE_CALL_TIMEOUT,
-            retries=SERVICE_CALL_RETRIES,
-            retry_delay=SERVICE_RETRY_DELAY,
-        )
-    else:
-        place_pose = get_object_pose_from_service(
-            base_world_pos,
-            base_world_quat,
-            place.object_prim_path,
-            include_orientation=True,
-        )
+
+    place_pose = _entity_pose_in_base(
+        place.object_prim_path,
+        base_world_pos=base_world_pos,
+        base_world_quat=base_world_quat,
+        ctx=ctx,
+    )
     place_pose = apply_object_local_offset_to_pose(place_pose, place.object_position_offset)
     resolved_place_position = (
-        place_pose.position.x,
-        place_pose.position.y,
-        place_pose.position.z,
+        float(place_pose.position.x),
+        float(place_pose.position.y),
+        float(place_pose.position.z),
     )
-    return replace(
-        place,
-        place_position=resolved_place_position,
+    print(
+        f"[Place] target {place.object_prim_path} offset={place.object_position_offset} -> "
+        f"({resolved_place_position[0]:.3f},{resolved_place_position[1]:.3f},"
+        f"{resolved_place_position[2]:.3f})"
     )
+    return replace(place, place_position=resolved_place_position)

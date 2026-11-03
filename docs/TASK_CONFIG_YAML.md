@@ -172,10 +172,13 @@ Newton kit 下勿对子 frame 调 `/get_entity_state` 当世界位姿；自动 o
 `runtime_defaults`（以及 `scene_presets.<scene>` 根层中计入 runtime 的键）仅允许：
 
 - `base_link_entity_path`
+- `frame_id`
 - `max_stage_duration`
 - `pose_tol_pos`
 - `pose_tol_ori`
 - （以及实现中已支持的 `gripper_open` / `gripper_closed`）
+
+`frame_id` 覆盖 stamped 目标 / 物体位姿使用的 TF 帧（默认取 base prim 叶子名）。写 `world` 时物体位姿保持世界坐标、不再扣减冻结基座（全身控制挪底盘时不会漂）；此时 `base_link` 与 `base_footprint` 的 +0.1114 m 差异不再参与计算。
 
 `skill_params` / `objects` / `active_object` 可写在 scene 根层，但**不**当作 `runtime_defaults` 校验。
 
@@ -187,7 +190,7 @@ Newton kit 下勿对子 frame 调 `/get_entity_state` 当世界位姿；自动 o
 
 ### 合并优先级（低 -> 高）
 
-1. `runtime_defaults`（仅 4 个基础键）
+1. `runtime_defaults`（仅上列基础键）
 2. `skill_defaults`
 3. `scene_presets.<scene>.skill_params`
 4. 当前块 `params`

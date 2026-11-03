@@ -35,6 +35,10 @@ class MotionRobotConfig:
     arrival_timeout: float = 3.0
     arrival_poll: float = 0.05
     gripper_action_wait: float = 0.3
+    #: 任务末端位姿默认属于哪个 link（如 ``{arm}_eef``）。空则直接当运控 TCP 下发。
+    ee_target_frame: str = ""
+    #: 运控实际跟踪的 link。``ee_target_frame`` 非空时生效，空则用 ``{arm}_tcp``。
+    ee_command_frame: str = ""
 
 
 @dataclass(frozen=True)

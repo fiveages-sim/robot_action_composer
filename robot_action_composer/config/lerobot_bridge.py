@@ -77,6 +77,8 @@ def motion_profile_from_legacy(robot_cfg: Any) -> MotionRobotConfig:
         arrival_timeout=float(getattr(robot_cfg, "arrival_timeout", 3.0)),
         arrival_poll=float(getattr(robot_cfg, "arrival_poll", 0.05)),
         gripper_action_wait=float(getattr(robot_cfg, "gripper_action_wait", 0.3)),
+        ee_target_frame=str(getattr(robot_cfg, "ee_target_frame", "") or ""),
+        ee_command_frame=str(getattr(robot_cfg, "ee_command_frame", "") or ""),
     )
 
 

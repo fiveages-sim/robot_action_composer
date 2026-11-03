@@ -13,6 +13,10 @@ _STRIPPED_ROOT_KEYS: frozenset[str] = frozenset({"skill_params", "objects", "act
 RUNTIME_DEFAULTS_ALLOWED_KEYS: frozenset[str] = frozenset(
     {
         "base_link_entity_path",
+        # Stamped / object-pose frame. ``world`` ⇒ no frozen-base subtraction (WBC-safe).
+        # Otherwise often the TF frame matching the Isaac base prim pose (e.g. G1D
+        # footprint, not TF base_link which sits +0.1114 m higher).
+        "frame_id",
         "max_stage_duration",
         "pose_tol_pos",
         "pose_tol_ori",

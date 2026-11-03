@@ -34,7 +34,13 @@ from robot_action_composer.task_runtime.context import (
 from robot_action_composer.task_runtime.merge.utils import reset_settle_entity_path_from_queue
 from robot_action_composer.task_runtime.registry import get_skill
 from robot_action_composer.task_runtime.config.merged import MergedQueueConfig
-from robot_action_composer.task_runtime.types import BlockSpec, ParallelSpec, QueueBlock, block_spec_from_mapping
+from robot_action_composer.task_runtime.types import (
+    BlockSpec,
+    ParallelSpec,
+    QueueBlock,
+    SkillPlan,
+    block_spec_from_mapping,
+)
 
 
 def _skip_repeat_reason(ctx: Any) -> str | None:
@@ -120,40 +126,57 @@ def _execute_block(
         )
         ctx.sim_time.sleep(spec.start_delay_s)
     skill_fn = get_skill(spec.skill)
-    stages, meta = skill_fn(ctx, spec.params)
-    if not stages:
-        print(f"[{runner_prefix}] {idx_label} {label} -> (no stages / inline-only)")
-        return
-    print(f"[{runner_prefix}] {idx_label} {label} -> {len(stages)} stage(s)")
-    exec_kw: dict[str, Any] = dict(
-        interface=ctx.interface,
-        sequence=stages,
-        send_mode=meta.send_mode,
-        frame_id=meta.frame_id,
-        arrival_timeout=ctx.robot_cfg.arrival_timeout,
-        arrival_poll=ctx.robot_cfg.arrival_poll,
-        time_now_fn=ctx.sim_time.now_seconds,
-        sleep_fn=ctx.sim_time.sleep,
-        gripper_action_wait=ctx.robot_cfg.gripper_action_wait,
-        left_arrival_guard_stage=meta.left_arrival_guard_stage,
-        warn_prefix=meta.warn_prefix,
-    )
-    task_slice = getattr(ctx, "task_cfg", None)
-    common = getattr(task_slice, "common", None) if task_slice is not None else None
-    if common is not None:
-        # runtime_defaults.max_stage_duration 覆盖机器人默认 arrival_timeout
-        # （否则 arm_movel_duration=4 时仍会在默认 3s 就判超时）
-        msd = getattr(common, "max_stage_duration", None)
-        if msd is not None:
-            try:
-                exec_kw["arrival_timeout"] = float(msd)
-            except (TypeError, ValueError):
-                pass
-        exec_kw["pose_tol_pos"] = common.pose_tol_pos
-        exec_kw["pose_tol_ori"] = common.pose_tol_ori
-    if execute_stage_kwargs:
-        exec_kw.update(dict(execute_stage_kwargs))
-    execute_stage_sequence(**exec_kw)
+    result = skill_fn(ctx, spec.params)
+    if isinstance(result, SkillPlan):
+        plan = result
+    else:
+        stages, meta = result
+        plan = SkillPlan(stages=stages, meta=meta)
+
+    def _run_stages(stages: list[Any], meta: Any, *, phase: str = "") -> None:
+        if not stages:
+            print(
+                f"[{runner_prefix}] {idx_label} {label} -> "
+                f"(no stages / inline-only){phase}"
+            )
+            return
+        print(
+            f"[{runner_prefix}] {idx_label} {label} -> {len(stages)} stage(s){phase}"
+        )
+        exec_kw: dict[str, Any] = dict(
+            interface=ctx.interface,
+            sequence=stages,
+            send_mode=meta.send_mode,
+            frame_id=meta.frame_id,
+            arrival_timeout=ctx.robot_cfg.arrival_timeout,
+            arrival_poll=ctx.robot_cfg.arrival_poll,
+            time_now_fn=ctx.sim_time.now_seconds,
+            sleep_fn=ctx.sim_time.sleep,
+            gripper_action_wait=ctx.robot_cfg.gripper_action_wait,
+            left_arrival_guard_stage=meta.left_arrival_guard_stage,
+            warn_prefix=meta.warn_prefix,
+        )
+        task_slice = getattr(ctx, "task_cfg", None)
+        common = getattr(task_slice, "common", None) if task_slice is not None else None
+        if common is not None:
+            # runtime_defaults.max_stage_duration 覆盖机器人默认 arrival_timeout
+            # （否则 arm_movel_duration=4 时仍会在默认 3s 就判超时）
+            msd = getattr(common, "max_stage_duration", None)
+            if msd is not None:
+                try:
+                    exec_kw["arrival_timeout"] = float(msd)
+                except (TypeError, ValueError):
+                    pass
+            exec_kw["pose_tol_pos"] = common.pose_tol_pos
+            exec_kw["pose_tol_ori"] = common.pose_tol_ori
+        if execute_stage_kwargs:
+            exec_kw.update(dict(execute_stage_kwargs))
+        execute_stage_sequence(**exec_kw)
+
+    _run_stages(plan.stages, plan.meta)
+    if plan.replan is not None:
+        print(f"[{runner_prefix}] {idx_label} {label} -> re-planning after coarse stages")
+        _run_stages(plan.replan(), plan.meta, phase=" (replanned)")
 
 
 def _execute_parallel(
@@ -337,12 +360,22 @@ def build_queue_runtime_context(
         float(common.gripper_closed) if common.gripper_closed is not None else base_closed
     )
     base_path = effective_base_link_entity_path(robot_cfg=robot_cfg, runtime=runtime)
-    frame_id = base_path.rsplit("/", 1)[-1] if use_stamped else "arm_base"
-    if use_isaac_base_pose:
-        base_world_pos, base_world_quat = get_entity_pose_world_service(base_path)
+    # Default stamped frame = Isaac base prim leaf name. Override via runtime_defaults.frame_id
+    # when that leaf is not the TF frame that shares the prim's world pose (G1D: USD
+    # /World/G1D/base_link ≡ TF base_footprint; TF base_link is +0.1114 m).
+    # ``world``: object poses stay in Isaac/world; no frozen-base subtraction (WBC-safe).
+    override_fid = str(getattr(runtime, "frame_id", None) or "").strip()
+    if use_stamped:
+        frame_id = override_fid or base_path.rsplit("/", 1)[-1]
     else:
+        frame_id = "arm_base"
+    frame_is_world = frame_id.lower() == "world"
+    if frame_is_world or not use_isaac_base_pose:
+        # Identity "base" ⇒ get_object_pose_from_service returns world coordinates.
         base_world_pos = (0.0, 0.0, 0.0)
         base_world_quat = (0.0, 0.0, 0.0, 1.0)
+    else:
+        base_world_pos, base_world_quat = get_entity_pose_world_service(base_path)
 
     initial_arm = queue_task.common.arm.strip().lower()
     if initial_arm not in {"left", "right"}:
