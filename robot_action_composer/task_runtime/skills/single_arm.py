@@ -75,6 +75,7 @@ from robot_action_composer.task_runtime.placement import (
     retreat_point,
     stages_in_command_ee_frame as _stages_in_command_ee_frame,
     vec_add,
+    vec_norm,
     vec_scale,
     vec_sub,
     xyz,
@@ -867,12 +868,14 @@ def skill_insert(
         *,
         skip_gripper: bool = True,
         settle: bool = False,
+        skip_arrival: bool = False,
     ) -> ArmStage:
         return ArmStage(
             name,
             ArmTarget(pose=pose_from_tuple(pos, ori), gripper=grip),
             skip_gripper_command=skip_gripper,
             wait_gripper_settle=settle,
+            skip_arrival_check=skip_arrival,
         )
 
     def _post_stages(
@@ -933,20 +936,139 @@ def skill_insert(
             )
         )
 
+    def _replan_hover() -> list[StageTarget]:
+        """悬空补偿：管子还在孔口上方时把 XY 偏差一次性修正掉，然后直线下探。
+
+        与 ``_replan`` 的区别：这里不先下降到 rim，所以测量管底时管子离架面
+        还有 ``approach_distance`` 的间隙，纠偏不会和接触力/摩擦打架。
+        补偿后的 ``rim`` 仍作为进入孔口的中间点，但只保留 XY 修正、Z 直接给
+        deep —— 避免「先横移再下压」把管子侧向拖过孔沿。
+        """
+        held_live = resolve_held_object_pose(ctx, params)
+        if held_live is None:
+            raise RuntimeError(f"{label}: lost held object during re-plan")
+        bottom_now = xyz(_held_in_exec(held_live[0]))
+        # 悬停时管底相对孔口的高度（正 = 仍在孔口上方）。仅日志/告警用：
+        # 若 <= 0 说明没悬起来，纠偏会贴着孔沿做。
+        hover_gap = float(bottom_now[2]) - float(xyz(target_pose)[2])
+        # 只纠 XY。管子悬在孔口上方时，Z 差不是定位误差而是「还没下去」；
+        # 计入 corr 会被 max_align_corr 按 3D 范数拒绝。
+        rim_xy = xyz(target_pose)
+        dx = float(rim_xy[0]) - float(bottom_now[0])
+        dy = float(rim_xy[1]) - float(bottom_now[1])
+        corr_xy_norm = (dx * dx + dy * dy) ** 0.5
+        limit = float(max_align_corr)
+        if limit > 0.0 and corr_xy_norm > limit:
+            raise RuntimeError(
+                "single_arm.insert: hover alignment correction "
+                f"{corr_xy_norm:.4f} m exceeds max_align_corr={limit:.4f} m "
+                f"(bottom_now=({bottom_now[0]:.4f},{bottom_now[1]:.4f}), "
+                f"rim_xy=({rim_xy[0]:.4f},{rim_xy[1]:.4f})); refusing to insert blind."
+            )
+        corr = (dx, dy, 0.0)
+        print(
+            f"[Insert] hover compensate {held_live[1]} "
+            f"bottom=({bottom_now[0]:.3f},{bottom_now[1]:.3f},{bottom_now[2]:.3f}) "
+            f"corr_xy=({dx:.4f},{dy:.4f}) |corr_xy|={corr_xy_norm:.4f}m "
+            f"hover_gap={hover_gap:+.4f}m"
+        )
+        if hover_gap <= 0.005:
+            print(
+                f"[Insert] WARN 管底未悬在孔口上方 (hover_gap={hover_gap:+.4f}m)；"
+                "approach_distance 可能小于夹持点到管底的距离，纠偏将贴着孔沿进行。"
+            )
+        deep_adj = vec_add(geometry.deep, corr)
+        # 空中先在同一悬停高度横移到孔心正上方，再垂直下探：
+        #   AlignAbove 的 Z 用原本的 approach 高度（不是 rim），保证横移时仍悬空；
+        #   AlignAbove 与 Insert 的 XY 相同 → 下探是纯垂直。
+        #
+        # 到位检查只在 AlignAbove 上做（唯一真正决定成败的一步：XY 必须对准孔心，
+        # 你实测孔心到孔沿只有 2mm 余量）。之后的 Insert / Release / Retreat 一律
+        # 跳过到达判定 —— 它们只是沿已对准的竖直轴往下走，再等 3mm 容差收敛会白等
+        # 十几秒，而且管子进孔后接触力本来就会顶偏，等不到位还会刷超时告警。
+        align_adj = vec_add(geometry.approach, corr)
+        stages = [
+            # AlignAbove 也跳过「等到 1.5mm」的判定。
+            # 实测运控在这一步的稳态误差约 10mm（日志 pos_dist=0.0102，等满 8s 超时），
+            # 收紧阈值只会变成固定 8 秒空等，并不能真的把管子挪得更准 ——
+            # 真正的精度来自上面的 corr（把偏差算进目标），不是靠等。
+            _stage(
+                "TaskQ-Insert-2-AlignAbove",
+                align_adj,
+                0.0,
+                skip_arrival=True,
+                settle=True,
+            ),
+            # 下探：沿已对准的竖直轴往下，同样只给固定时间。
+            _stage(
+                "TaskQ-Insert-3-Insert",
+                deep_adj,
+                0.0,
+                skip_arrival=True,
+                settle=True,
+            ),
+            _stage(
+                "TaskQ-Insert-4-Release",
+                deep_adj,
+                gripper_open,
+                skip_gripper=False,
+                settle=True,
+                skip_arrival=True,
+            ),
+        ]
+        if retreat_distance > 1e-9:
+            retreat = retreat_point(
+                deep=deep_adj,
+                insert_dir=geometry.insert_dir,
+                distance=retreat_distance,
+            )
+            stages.append(
+                _stage(
+                    "TaskQ-Insert-5-Retreat",
+                    retreat,
+                    gripper_open,
+                    skip_gripper=False,
+                    skip_arrival=True,
+                )
+            )
+        # Insert 之后按固定时间补偿：skip_arrival 不再等 MPC 收敛，这里给足
+        # 下探与松爪的时间，避免松爪发生在管子还没到底的时候。
+        return _finalize(stages)
+
     ctx.task_cfg = replace(
         ctx.task_cfg, common=qt.common, pick=qt.pick, place=qt.place
     )
     ctx.gripper_for_return_home = gripper_open
 
-    pre_arm = [
-        _stage("TaskQ-Insert-1-Approach", geometry.approach, 0.0),
-        _stage("TaskQ-Insert-2-AlignHole", geometry.rim, 0.0),
-    ]
+    # ``hover_compensate``：把精确对齐提前到「仍悬空」时完成。
+    #
+    # 默认（False）沿用两段式：先 Approach→AlignHole 下到孔口（管底已压在架面上），
+    # 再测管底、算 corr、FineAlign 后下探。撞孔边时管子已经顶着架子，靠接触力
+    # 反复纠偏，很慢也不稳。
+    #
+    # True 时改成三段式：
+    #   1) 只飞到 approach（悬停在孔口上方 approach_distance，管底离架面还有距离）
+    #   2) 在悬空状态测管底 → 算 XY 偏差 → 直接给带补偿的 deep 目标
+    #   3) 一次直线下去，中途不再停顿
+    # 这样纠偏发生在空中，管底始终没有接触架面。
+    hover_compensate = bool(params.get("hover_compensate", False))
+
+    if not hover_compensate:
+        pre_arm = [
+            _stage("TaskQ-Insert-1-Approach", geometry.approach, 0.0),
+            _stage("TaskQ-Insert-2-AlignHole", geometry.rim, 0.0),
+        ]
+    else:
+        # Hover 同样跳过「等到位」判定：运控稳态误差约 10mm，
+        # 等 1.5mm 只会固定卡满 arrival_timeout（日志实测 8.02s）。
+        # 悬停只是把管子送到空中位置，精度由随后的空中补偿负责。
+        pre_arm = [_stage("TaskQ-Insert-1-Hover", geometry.approach, 0.0, skip_arrival=True, settle=True)]
+
     if live_compensate:
         return SkillPlan(
             stages=_finalize(pre_arm),
             meta=meta,
-            replan=_replan,
+            replan=(_replan_hover if hover_compensate else _replan),
         )
     return SkillPlan(
         stages=_finalize(
