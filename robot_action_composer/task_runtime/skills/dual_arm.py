@@ -586,6 +586,18 @@ def skill_place(
     )
 
 
+def _optional_mid_axis(raw: Any, *, mid: float, delta: float, axis: str) -> float:
+    """``null`` → ``mid + delta``；数值 → 绝对目标。"""
+    if raw is None:
+        return float(mid) + float(delta)
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"dual_arm.bimanual_align align_position {axis} must be float or null, got {raw!r}"
+        ) from exc
+
+
 def skill_bimanual_align(
     ctx: QueueRuntimeContext, params: Mapping[str, Any],
 ) -> tuple[list[StageTarget], ExecutionMeta]:
@@ -595,10 +607,15 @@ def skill_bimanual_align(
     或用 ``reference_object_prim_path`` / ``reference_object_key`` + ``object_position_offset``
     从场景 prim 动态解析。
 
+    ``align_position`` 元素可为 ``null``：该轴用「当前中点 + ``position_delta``」。
+    例如底盘对称回正并抬退：``align_position: [null, 0.0, null]`` +
+    ``position_delta: [-0.10, 0.0, 0.20]`` → 中点 Y→0，同时 −X 10cm、+Z 20cm。
+
     姿态：可选 ``orientation_delta_rpy``（``[roll, pitch, yaw]`` 弧度），左乘当前左、右末端四元数。
 
     params:
-        align_position: ``[x, y, z]``（米），双臂中心目标位置（``motion_frame_id`` 下）。
+        align_position: ``[x, y, z]``（米），双臂中心目标；元素 ``null`` = 当前中点 + delta。
+        position_delta: 可选 ``[dx, dy, dz]``，与 ``align_position`` 的 ``null`` 轴叠加。
         reference_object_prim_path: 可选。若提供，则以该 prim 在 ``motion_frame_id`` 下的位置作为目标。
         reference_object_key / object_key: 可选。从 ``objects`` 解析参考 prim。
         object_position_offset: 可选。与参考物体联用，按参考物体自身坐标系偏移。
@@ -620,6 +637,11 @@ def skill_bimanual_align(
         iface, l0_raw, r0_raw, pose_frame, params, label=label,
     )
 
+    mid_x = (l0.position.x + r0.position.x) * 0.5
+    mid_y = (l0.position.y + r0.position.y) * 0.5
+    mid_z = (l0.position.z + r0.position.z) * 0.5
+    ddx, ddy, ddz = param_vec3(params, "position_delta", (0.0, 0.0, 0.0))
+
     ref_target = _reference_target_xyz_from_params(
         ctx,
         params,
@@ -628,17 +650,22 @@ def skill_bimanual_align(
         object_role="bimanual_align_reference",
     )
     if ref_target is not None:
-        target_mid_x, target_mid_y, target_mid_z = ref_target
+        target_mid_x = float(ref_target[0]) + ddx
+        target_mid_y = float(ref_target[1]) + ddy
+        target_mid_z = float(ref_target[2]) + ddz
     else:
         ap = params.get("align_position")
-        if not isinstance(ap, (list, tuple)) or len(ap) != 3:
+        if ap is None and (ddx != 0.0 or ddy != 0.0 or ddz != 0.0):
+            target_mid_x, target_mid_y, target_mid_z = mid_x + ddx, mid_y + ddy, mid_z + ddz
+        elif not isinstance(ap, (list, tuple)) or len(ap) != 3:
             raise ValueError(
                 "align_position is required and must be a length-3 list [x, y, z] "
-                "unless reference_object_prim_path / reference_object_key is provided",
+                "(null 元素 = 当前中点+position_delta)，"
+                "unless reference_object_* or position_delta alone is provided",
             )
-        target_mid_x = float(ap[0])
-        target_mid_y = float(ap[1])
-        target_mid_z = float(ap[2])
+        target_mid_x = _optional_mid_axis(ap[0], mid=mid_x, delta=ddx, axis="x")
+        target_mid_y = _optional_mid_axis(ap[1], mid=mid_y, delta=ddy, axis="y")
+        target_mid_z = _optional_mid_axis(ap[2], mid=mid_z, delta=ddz, axis="z")
 
     try:
         min_abs = float(params.get("min_abs_delta_y", 1e-4))
@@ -653,12 +680,14 @@ def skill_bimanual_align(
     except (TypeError, ValueError):
         min_abs_z = min_abs
 
-    mid_x = (l0.position.x + r0.position.x) * 0.5
-    mid_y = (l0.position.y + r0.position.y) * 0.5
-    mid_z = (l0.position.z + r0.position.z) * 0.5
     delta_x = target_mid_x - mid_x
     delta_y = target_mid_y - mid_y
     delta_z = target_mid_z - mid_z
+    print(
+        f"[{label}] mid=({mid_x:.3f},{mid_y:.3f},{mid_z:.3f}) → "
+        f"({target_mid_x:.3f},{target_mid_y:.3f},{target_mid_z:.3f}) "
+        f"delta=({delta_x:.3f},{delta_y:.3f},{delta_z:.3f}) frame={motion_frame}"
+    )
 
     dr, dp, dyaw = param_vec3(params, "orientation_delta_rpy", (0.0, 0.0, 0.0))
     try:

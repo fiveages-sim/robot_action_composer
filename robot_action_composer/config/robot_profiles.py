@@ -24,6 +24,20 @@ def default_motion_ros2_interface(
 
 
 @dataclass(frozen=True)
+class EeTipPrimPair:
+    """USD prim pair for tip→parent conversion (``/get_prim_attribute``).
+
+    After USD remap, poses are in ``parent``; optional ``parent_frame`` names the
+    matching TF link (default ``{arm}_tcp``) so a second hop can reach OCS2's
+    ``ee_command_frame`` (often ``{arm}_eef`` on W2).
+    """
+
+    parent_prim: str = ""
+    tip_prim: str = ""
+    parent_frame: str = ""
+
+
+@dataclass(frozen=True)
 class MotionRobotConfig:
     """Fields required by task queue / motion generation (no LeRobot dependency)."""
 
@@ -39,6 +53,8 @@ class MotionRobotConfig:
     ee_target_frame: str = ""
     #: 运控实际跟踪的 link。``ee_target_frame`` 非空时生效，空则用 ``{arm}_tcp``。
     ee_command_frame: str = ""
+    #: USD tip→parent 配置：``{"left"|"right": EeTipPrimPair}``。与 ``ee_target_frame`` 互斥（tip 优先）。
+    ee_tip: dict[str, EeTipPrimPair] | None = None
 
 
 @dataclass(frozen=True)

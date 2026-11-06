@@ -65,6 +65,34 @@ motion 相关字段可写在根级，或集中在 `motion:` 下（与根级合�
 | `gripper_action_wait` | `0.3` | 夹爪动作后等待（秒） |
 | `ee_target_frame` | `""` | 任务末端位姿默认所属 link，如 `{arm}_eef`。空则直接当运控 TCP 下发 |
 | `ee_command_frame` | `""` | 运控实际跟踪的 link。`ee_target_frame` 非空且此处为空时用 `{arm}_tcp` |
+| `ee_tip` | — | USD tip→command 静态链（与 `ee_target_frame` TF 互斥）。见下文 |
+
+### `ee_tip`（USD tip→parent，可再 TF→OCS2）
+
+场景夹爪朝向与 ROS description 默认腕系不一致时（例如把 `link7/tcp` 拧过再挂 EE），用 USD `/get_prim_attribute` 读 parent→tip，把 tip 系目标换成 parent。若运控跟踪的不是 parent（W2 OCS2 多为 `{arm}_eef`），再设 `ee_command_frame`，用 live TF 做第二跳：`parent_frame`→command。
+
+| 字段 | 说明 |
+|------|------|
+| `ee_tip.{left\|right}.parent_prim` | tip→command 的 USD parent（可为 description 腕系 `tcp_origin`，或挂 EE 的 `link7/tcp`） |
+| `ee_tip.{left\|right}.tip_prim` | 抓取语义 tip（如 `.../pad_tcp`） |
+| `ee_tip.{left\|right}.parent_frame` | parent 对应的 TF 名；空则 `{arm}_tcp` |
+| `ee_command_frame` | OCS2 跟踪 link；有 `ee_tip` 时做 parent→command（如 `{arm}_eef`） |
+
+```yaml
+ee_command_frame: "{arm}_eef"
+ee_tip:
+  right:
+    parent_prim: /World/Robot/Right_Arm/link7/tcp_origin
+    tip_prim: /World/Robot/Right_Arm/link7/tcp/RG75/.../pad_tcp
+    parent_frame: "{arm}_tcp"
+```
+
+有 `ee_tip` 时不再走 `ee_target_frame`（任务位姿按 tip 解释）。`single_arm.pick` 链路：
+
+1. handle（或 object）世界朝向相对机器人世界朝向 → 机器人系下朝向  
+2. 套到 tip（未写 `ee_base_orientation` 时 tip // handle）  
+3. USD `tip→parent(tcp_origin)`  
+4. live TF `parent_frame→ee_command_frame`（如 `{arm}_tcp→{arm}_eef`）后下发
 
 ### `ros2_interface.preset`
 
@@ -97,6 +125,38 @@ ros2_interface:
 
 发现结果中的 `robot_dir_relpath`（相对 `robots/`）用于 CLI 按厂商文件夹分组展示；扁平布局（无 `/`）时菜单与原先一致。
 
+## 场景项目（`fa-project-usd`）的 `robot.yaml`
+
+FaSim 的 USD 项目目录也可以直接当 `motion-generation` 工作区。识别规则：目录含 **`env/`**，
+任务 YAML 放 **`<项目>/task_configs/**`**，机器人配置由 **`<项目>/robot.yaml`** 以增量覆盖的方式引用共享 profile：
+
+```yaml
+# <项目>/robot.yaml
+extends: fiveages_w2                              # 共享 profile 的 robot key
+robots_root: ${LEROBOT_ROOT}/examples/IsaacSim/robots
+
+default_env_scene: env/Anigon/default_v2.usda     # 任务没写 env_scene 时的兜底
+base_link_entity_path: /World/robot/FiveAges_W2/Linkhou_S2/base_footprint/base_link
+post_reset_wait: 3.0
+
+ros2_stack:
+  motion:
+    required: false                               # 运控由 USD 内 ROS=fiveages 拉起
+  navigation:
+    required: auto
+    profile: map_only
+    args:
+      map: german_poc
+```
+
+规则：
+
+- `extends` 先按 `robots_root` 下各 `robot.yaml` 的 `key` 匹配；含 `/` 或以 `.` 开头时按相对路径解析。
+- 覆盖只合并 motion 字段与 `ros2_interface` / `ros2_stack`；**不允许改 `key`**，否则报错。
+- `robots_root` 支持 `${VAR}` / `${VAR:-default}` / `~`；优先级：CLI `--robots-root` > 项目 `robot.yaml` > 环境变量（`ROBOT_ACTION_COMPOSER_ROBOTS_ROOT`、`LEROBOT_ISAACSIM_ROBOTS`）。
+- `${LEROBOT_ROOT}` 未导出时会自动用当前 lerobot 检出目录（editable 安装的上级目录），所以正常克隆下来不用先 export。
+- 项目里的 `robots/` 如果只有 USD 图层，不会被当作旧版 `robots/<Robot>/` 布局；旧式布局要求真的存在带 `robot.yaml` + `task_configs/` 的 profile 目录。
+
 ## 字段划分（motion vs lerobot）
 
 | 字段 | motion (`robot.yaml`) | lerobot (`lerobot_config.py`) |
@@ -105,7 +165,7 @@ ros2_interface:
 | `gripper_control_mode` | ✓ | ✓ |
 | `base_link_entity_path` | ✓ | — |
 | `post_reset_wait`, `fsm_switch_delay` | ✓ | ✓（推理） |
-| `arrival_*`, `gripper_action_wait`, `ee_target_frame`, `ee_command_frame` | ✓ | — |
+| `arrival_*`, `gripper_action_wait`, `ee_target_frame`, `ee_command_frame`, `ee_tip` | ✓ | — |
 | `robot_id`, `cameras`, `depth_*` | — | ✓ |
 
 ## 安装与环境
@@ -116,8 +176,9 @@ ros2_interface:
 
 ## 发现机制
 
-- `load_motion_entries()` 扫描 `robots/<Robot>/` 与 `robots/<Vendor>/<Robot>/`（一层分组），优先加载 `robot.yaml`；兼容 `motion_config.py`、`robot_config.py`（带 deprecation 警告）。
-- `load_lerobot_profile()` 加载 `lerobot_config.py`（录制 / 推理入口调用）。
+- 旧式工作区：`load_motion_entries()` 扫描 `robots/<Robot>/` 与 `robots/<Vendor>/<Robot>/`（一层分组），优先加载 `robot.yaml`；兼容 `motion_config.py`、`robot_config.py`（带 deprecation 警告）。
+- USD 项目工作区：`load_workspace_layout()` 先用项目 `robot.yaml` 解析 `extends` / `robots_root`，再扫描 `<项目>/task_configs/**`；每条 entry 带绝对 `robot_dir`、`scene_project`、`default_env_scene`。
+- `load_lerobot_profile()` 加载 `lerobot_config.py`（录制 / 推理入口调用），位置始终是共享 profile 目录（不在 USD 项目里）。
 
 ## 过渡期
 

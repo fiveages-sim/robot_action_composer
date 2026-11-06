@@ -377,11 +377,18 @@ https://github.com/user-attachments/assets/3464ad42-e5b1-4035-9aa3-f78b69cb3029
 - **效果**：保持双臂相对几何不变，整体把中点对齐到目标位置；可附加姿态增量。
 - **参数**：
   - **运动系目标配置**
-    - `align_position`（`[float,float,float]`）：`motion_frame_id` 坐标系下的中点目标位置（必填）。
+    - `align_position`（`[float|null, …]`）：`motion_frame_id` 下中点目标。元素为 `null` 时用「当前中点 + `position_delta`」。
+    - `position_delta`（`[float,float,float]`，可选）：与 `align_position` 的 `null` 轴叠加；也可单独使用（三轴相对当前中点）。
     - `orientation_delta_rpy`（`[float,float,float]`）：在该运动系下定义的附加姿态增量（弧度）。
     - `motion_frame_id`（`str`）：对齐计算坐标系。
   - **执行控制**
     - `arm_movel_duration`（`float`）：覆盖笛卡尔段 movel 时长。
+  - **示例**（底盘对称回正 + 退后抬升一次到位）：
+    ```yaml
+    align_position: [null, 0.0, null]
+    position_delta: [-0.10, 0.0, 0.20]
+    motion_frame_id: base_footprint
+    ```
 
 ### 2.5 双臂交接物体
 

@@ -12,10 +12,41 @@
 ```
 robot.yaml → ros2_stack
     ↓ 深合并（args 按键合并）
-<leaf>/.meta/ros2_stack.yaml
+<项目>/robot.yaml → ros2_stack          # 仅 USD 项目工作区
+    ↓
+<leaf>/.meta/ros2_stack.yaml            # leaf = 该任务 YAML 所在目录
 ```
 
 不要在任务编排 YAML 里写 `ros2_stack`。
+
+USD 项目工作区里，`<leaf>` 取自任务发现结果（`task_group_dirs`），所以 `task_configs/` 在项目根、
+或再分子目录都能找到自己的 `.meta/ros2_stack.yaml`。
+
+### 运控在 USD 内（`motion.required: false`）
+
+场景用 `ROS=fiveages`（`ROS2ControlLaunch`）在 Play 时拉起 ControllerManager 时，把
+`motion.required` 设为 `false`，`ros2-stack` 只负责导航；`motion-generation --ensure-ros2-stack`
+也不会再去拉外部 OCS2。
+
+导航同样可以进 USD：FaSim 的 `NavigationLaunch` 节点（`Graph/ROS_Navigation`）在 Play 时
+spawn Nav2，地图来自 USD asset（通常存在项目 `maps/<name>/` 下）。这时把 `navigation.required`
+也设为 `false`，`ros2-stack` 完全退出；`--force-nav` 仍可显式拉起作为回退。
+
+场景 `robot.yaml` 的 `navigation.args.map` 可以写**相对项目根**的路径（如
+`maps/german_poc/map.yaml`），场景工作区下会被展开成绝对路径；裸名字（`german_poc`）仍按
+ROS 包的 `config/maps` 搜索，保持旧行为。
+
+```yaml
+# <项目>/robot.yaml
+ros2_stack:
+  motion:
+    required: false
+  navigation:
+    required: false              # Nav2 由 USD 内的 NavigationLaunch 拉起
+    profile: map_only
+    args:
+      map: maps/german_poc/map.yaml
+```
 
 ## 运控 preset
 

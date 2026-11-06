@@ -76,6 +76,16 @@ scene_presets:
 - 返回 `TaskConfigDiscovery`：
   - `tasks`：全局 `task_key -> 配置`
   - `task_groups`：按**叶子目录**相对路径分组（posix，如 `siemens/nested`）
+  - `task_group_dirs`：叶子 group -> 该叶子绝对目录（USD 项目工作区用它定位 `.meta/`）
+
+**两种工作区**：
+
+| 工作区 | 识别 | 任务目录 | 机器人配置 |
+|--------|------|----------|------------|
+| 旧式 | `robots/<Robot>/` 里有 `robot.yaml` + `task_configs/` | `robots/<Robot>/task_configs/**` | 同目录 `robot.yaml` |
+| USD 项目 | 目录含 `env/` | `<项目>/task_configs/**` | 项目 `robot.yaml` 的 `extends` / `robots_root` |
+
+USD 项目工作区里直接在项目目录运行：`cd "<项目>" && motion-generation --robot fiveages_w2 --task-key ...`。
 
 **与 ROS2 栈启动配置的边界**：运控 / 导航启动写在叶子目录 **`.meta/ros2_stack.yaml`**（或 `robot.yaml` 的 `ros2_stack:`），**不是**任务编排文件。隐藏 `.meta/` 不会进入任务发现，也不触发叶子目录规则冲突。详见 [`ROS2_STACK.md`](ROS2_STACK.md)。
 
@@ -103,11 +113,27 @@ scene_presets:
 
 - `task_key` / `label` / `default_scene`
 - `use_stamped`
+- `env_scene`（USD 项目工作区专用，见下）
 - `runtime_defaults`
 - `skill_defaults`
 - `task_queue`
 - `scene_presets`
 - `objects` / `active_object`（可选；物体清单与默认目标，见下）
+
+### `env_scene`（USD 项目工作区）
+
+任务 YAML 放 `fa-project-usd/<系列>/<项目>/task_configs/` 时，用 `env_scene` 声明该任务要打开的
+可运行场景（相对项目根）：
+
+```yaml
+task_key: poc_port4_bimanual_carry
+default_scene: box01
+env_scene: env/Anigon/default_v2.usda
+```
+
+- `motion-generation` / 录制入口在选定任务后会打印该路径，并校验文件存在；写错时列出 `env/**/*.usd(a)` 候选。
+- 任务没写时回退到项目 `robot.yaml` 的 `default_env_scene`；两者都没有则提示手动打开。
+- 只要求在 USD 项目工作区；旧式 `examples/IsaacSim` 布局下该字段被忽略。
 
 ### 物体清单（`objects` / `active_object`）
 

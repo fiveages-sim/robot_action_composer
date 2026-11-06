@@ -37,7 +37,11 @@ from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingIm
     SERVICE_RETRY_DELAY,
     get_object_pose_from_service,
 )
-from robot_action_composer.task_runtime.object_binding import resolve_pick_object_binding
+from robot_action_composer.task_runtime.object_binding import (
+    resolve_grasp_prim_path,
+    resolve_object_local_orient_from_grasp_prim,
+    resolve_pick_object_binding,
+)
 from robot_action_composer.task_runtime.object_resolution_replay import resolve_object_pose_for_task
 
 from robot_action_composer.motion_generation.tasks.pick_place import (  # pyright: ignore[reportMissingImports]
@@ -75,6 +79,7 @@ from robot_action_composer.task_runtime.placement import (
     vec_sub,
     xyz,
 )
+from robot_action_composer.task_runtime.placement.frames import resolve_ee_tip_pair
 from robot_action_composer.task_runtime.registry import register_skill
 from robot_action_composer.task_runtime.config.single_arm import (
     QueueSingleArmSlice,
@@ -190,6 +195,36 @@ def _clone_pose(pose: Pose) -> Pose:
     return out
 
 
+def _transform_pose_to_exec_frame(
+    ctx: QueueRuntimeContext,
+    pose: Pose,
+    *,
+    motion_frame_id: Any,
+    tf_lookup_timeout: Any,
+    label: str,
+    prim_label: str,
+) -> tuple[Pose, str]:
+    """``pose`` is in ``ctx.frame_id`` (robot base); optionally TF into motion frame."""
+    exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
+    if exec_f == ctx.frame_id:
+        return pose, exec_f
+    iface = ctx.interface
+    if not hasattr(iface, "transform_pose"):
+        raise TypeError(f"{label}: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)")
+    transformed = iface.transform_pose(
+        pose,
+        str(ctx.frame_id),
+        exec_f,
+        timeout=_pick_tf_timeout(tf_lookup_timeout),
+    )
+    if transformed is None:
+        raise RuntimeError(
+            f"{label}: TF {ctx.frame_id!r} -> {exec_f!r} failed for {prim_label!r}; "
+            "check motion_frame_id and TF."
+        )
+    return transformed, exec_f
+
+
 def _resolve_object_target_pose_from_pick_like_params(
     *,
     ctx: QueueRuntimeContext,
@@ -207,7 +242,6 @@ def _resolve_object_target_pose_from_pick_like_params(
     ``compose_aligned_ee_orientation`` must come from the rigid-body prim pose
     (after TF), not from the grasp-offset position.
     """
-    exec_f = _pick_execution_frame_id(ctx, motion_frame_id)
     arm_side_resolved = (arm_side or ctx.task_cfg.common.arm).strip().lower()
     if object_role is None:
         object_role = "pick_target" if label == "single_arm.pick" else "move_to_object_target"
@@ -229,25 +263,79 @@ def _resolve_object_target_pose_from_pick_like_params(
             object_prim_path,
             include_orientation=True,
         )
-    if exec_f != ctx.frame_id:
-        iface = ctx.interface
-        if not hasattr(iface, "transform_pose"):
-            raise TypeError(f"{label}: motion_frame_id requires ROS2RobotInterface.transform_pose (TF)")
-        transformed = iface.transform_pose(
-            obj_pose,
-            str(ctx.frame_id),
-            exec_f,
-            timeout=_pick_tf_timeout(tf_lookup_timeout),
-        )
-        if transformed is None:
-            raise RuntimeError(
-                f"{label}: TF {ctx.frame_id!r} -> {exec_f!r} failed for "
-                f"object_prim_path={object_prim_path!r}; check motion_frame_id and TF."
-            )
-        obj_pose = transformed
+    obj_pose, exec_f = _transform_pose_to_exec_frame(
+        ctx,
+        obj_pose,
+        motion_frame_id=motion_frame_id,
+        tf_lookup_timeout=tf_lookup_timeout,
+        label=label,
+        prim_label=object_prim_path,
+    )
     orient_pose = _clone_pose(obj_pose)
     grasp_pose = apply_object_local_offset_to_pose(_clone_pose(obj_pose), object_position_offset)
     return grasp_pose, orient_pose, exec_f
+
+
+def _resolve_ee_tip_handle_target(
+    *,
+    ctx: QueueRuntimeContext,
+    binding_params: Mapping[str, Any],
+    object_prim_path: str,
+    object_position_offset: tuple[float, float, float],
+    motion_frame_id: Any,
+    tf_lookup_timeout: Any,
+    ee_base_orientation: tuple[float, float, float, float],
+    label: str,
+) -> tuple[Pose, tuple[float, float, float, float], str, str]:
+    """ee_tip pick：沿用物体清单相对 frame，不另开通路。
+
+    1. ``/get_entity_state`` 读刚体根（抽出后的箱子实时位姿）
+    2. ``grasp_id`` → USD 局部链（``/get_prim_attribute``）自动得到 handle 相对偏移/朝向
+    3. tip orient = R_object ⊗ R_grasp_local ⊗ ee_base（未写 ee_base → tip // handle）
+
+    勿对 handle 子 Xform 直接 entity-state（拉开后常不更新）。
+    """
+    grasp_prim = resolve_grasp_prim_path(
+        binding_params,
+        objects=ctx.objects,
+        object_prim_path=object_prim_path,
+    )
+    src_label = grasp_prim or object_prim_path
+    tip_pose = get_object_pose_from_service(
+        ctx.base_world_pos,
+        ctx.base_world_quat,
+        object_prim_path,
+        include_orientation=True,
+    )
+    obj_q = pose_quat_xyzw(tip_pose)
+    if object_position_offset != (0.0, 0.0, 0.0):
+        tip_pose = apply_object_local_offset_to_pose(tip_pose, object_position_offset)
+    tip_pose, exec_f = _transform_pose_to_exec_frame(
+        ctx,
+        tip_pose,
+        motion_frame_id=motion_frame_id,
+        tf_lookup_timeout=tf_lookup_timeout,
+        label=label,
+        prim_label=src_label,
+    )
+    # offset 不改朝向；再叠 grasps 的 USD 局部 orient（同 drawer orient_from=handle）
+    handle_q = pose_quat_xyzw(tip_pose)
+    if grasp_prim:
+        q_local = resolve_object_local_orient_from_grasp_prim(object_prim_path, grasp_prim)
+        handle_q = quat_normalize(quat_multiply(handle_q, q_local))
+    tip_q = quat_normalize(quat_multiply(handle_q, quat_normalize(ee_base_orientation)))
+    set_pose_quat_xyzw(tip_pose, tip_q)
+    print(
+        f"[{label}] ee_tip src={src_label} rigid={object_prim_path} "
+        f"offset=({object_position_offset[0]:.4f},{object_position_offset[1]:.4f},"
+        f"{object_position_offset[2]:.4f}) frame={exec_f} "
+        f"obj_xyzw=({obj_q[0]:.4f},{obj_q[1]:.4f},{obj_q[2]:.4f},{obj_q[3]:.4f}) "
+        f"handle_xyzw=({handle_q[0]:.4f},{handle_q[1]:.4f},{handle_q[2]:.4f},{handle_q[3]:.4f}) "
+        f"tip_xyzw=({tip_q[0]:.4f},{tip_q[1]:.4f},{tip_q[2]:.4f},{tip_q[3]:.4f}) "
+        f"pos=({float(tip_pose.position.x):.4f},{float(tip_pose.position.y):.4f},"
+        f"{float(tip_pose.position.z):.4f})"
+    )
+    return tip_pose, tip_q, exec_f, src_label
 
 
 def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[list[StageTarget], ExecutionMeta]:
@@ -256,8 +344,11 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     qt = overlay_queue_single_arm_pick_from_params(ctx.task_cfg, params)
     arm_side, _source_is_right, _ee_prefix = _arm_side_and_ee_prefix(qt)
     pk = qt.pick
+    binding = _binding_params_for_pick(params, pk)
+    if not str(binding.get("object_key") or "").strip() and ctx.active_object:
+        binding["object_key"] = str(ctx.active_object).strip()
     path, object_position_offset = resolve_pick_object_binding(
-        _binding_params_for_pick(params, pk),
+        binding,
         objects=ctx.objects,
         active_object=ctx.active_object,
         cache=ctx.grasp_offset_cache,
@@ -275,33 +366,54 @@ def skill_pick(ctx: QueueRuntimeContext, params: Mapping[str, Any]) -> tuple[lis
     ori_mode = str(pk.object_orientation_mode or "yaw")
     if not path:
         raise ValueError("object_prim_path is required for skill single_arm.pick")
+    use_ee_tip = resolve_ee_tip_pair(ctx, arm_side.value) is not None
+    # ee_tip：抓取位姿按 tip 解释；未选手写 ee_base 时用 identity，使 tip // handle。
+    if use_ee_tip and "ee_base_orientation" not in params:
+        ee_base_orientation = (0.0, 0.0, 0.0, 1.0)
     _apply_arm_movel_duration(ctx, duration=arm_movel_duration, label="single_arm.pick")
     gripper_open = float(ctx.gripper_open)
     gripper_closed = (
         float(pk.gripper_closed) if pk.gripper_closed is not None else float(ctx.gripper_closed)
     )
-    target, object_orient, exec_f = _resolve_object_target_pose_from_pick_like_params(
-        ctx=ctx,
-        object_prim_path=path,
-        object_position_offset=object_position_offset,
-        motion_frame_id=motion_frame_id,
-        tf_lookup_timeout=tf_lookup_timeout,
-        label="single_arm.pick",
-    )
-    print(
-        f"[single_arm.pick] {path} offset={object_position_offset} "
-        f"grasp=({float(target.position.x):.4f},{float(target.position.y):.4f},"
-        f"{float(target.position.z):.4f}) frame={exec_f}"
-    )
-    ee_orientation = compose_aligned_ee_orientation(
-        ee_base_orientation,
-        object_orient,
-        ee_orientation_frame=ee_frame,
-        object_orientation_mode=ori_mode,
-        aligned_object_yaw=pk.aligned_object_yaw,
-        aligned_object_roll=pk.aligned_object_roll,
-        object_prim_path=path,
-    )
+    if use_ee_tip:
+        target, ee_orientation, exec_f, tip_src = _resolve_ee_tip_handle_target(
+            ctx=ctx,
+            binding_params=binding,
+            object_prim_path=path,
+            object_position_offset=object_position_offset,
+            motion_frame_id=motion_frame_id,
+            tf_lookup_timeout=tf_lookup_timeout,
+            ee_base_orientation=ee_base_orientation,
+            label="single_arm.pick",
+        )
+        print(
+            f"[single_arm.pick] ee_tip src={tip_src} "
+            f"grasp=({float(target.position.x):.4f},{float(target.position.y):.4f},"
+            f"{float(target.position.z):.4f}) frame={exec_f}"
+        )
+    else:
+        target, object_orient, exec_f = _resolve_object_target_pose_from_pick_like_params(
+            ctx=ctx,
+            object_prim_path=path,
+            object_position_offset=object_position_offset,
+            motion_frame_id=motion_frame_id,
+            tf_lookup_timeout=tf_lookup_timeout,
+            label="single_arm.pick",
+        )
+        print(
+            f"[single_arm.pick] {path} offset={object_position_offset} "
+            f"grasp=({float(target.position.x):.4f},{float(target.position.y):.4f},"
+            f"{float(target.position.z):.4f}) frame={exec_f}"
+        )
+        ee_orientation = compose_aligned_ee_orientation(
+            ee_base_orientation,
+            object_orient,
+            ee_orientation_frame=ee_frame,
+            object_orientation_mode=ori_mode,
+            aligned_object_yaw=pk.aligned_object_yaw,
+            aligned_object_roll=pk.aligned_object_roll,
+            object_prim_path=path,
+        )
     retreat_offset = (
         rotate_vector_by_quat(pk.ee_lift_offset, ee_orientation)
         if pk.ee_lift_offset is not None

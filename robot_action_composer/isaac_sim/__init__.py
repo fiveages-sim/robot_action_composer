@@ -334,6 +334,53 @@ def try_get_prim_orient_local_xyzw(
     return x, y, z, w
 
 
+def _quat_xyzw_from_rotate_xyz_deg(
+    rx_deg: float, ry_deg: float, rz_deg: float
+) -> tuple[float, float, float, float]:
+    """USD ``xformOp:rotateXYZ`` (degrees, apply X then Y then Z) → ROS xyzw."""
+    import math
+
+    hx = math.radians(float(rx_deg)) * 0.5
+    hy = math.radians(float(ry_deg)) * 0.5
+    hz = math.radians(float(rz_deg)) * 0.5
+    qx = (math.sin(hx), 0.0, 0.0, math.cos(hx))
+    qy = (0.0, math.sin(hy), 0.0, math.cos(hy))
+    qz = (0.0, 0.0, math.sin(hz), math.cos(hz))
+    # Apply Rx then Ry then Rz → q = qz ⊗ qy ⊗ qx
+    return quat_normalize(quat_multiply(qz, quat_multiply(qy, qx)))
+
+
+def try_get_prim_local_rotation_xyzw(
+    path: str,
+    timeout: float = PRIM_ATTR_PROBE_TIMEOUT,
+    retries: int = PRIM_ATTR_PROBE_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> tuple[float, float, float, float] | None:
+    """Local rotation as xyzw from ``orient`` or ``rotateXYZ`` (common on pad mounts).
+
+    Missing both → ``None`` (caller may treat as identity). Prefer ``orient`` when set.
+    """
+    q = try_get_prim_orient_local_xyzw(
+        path, timeout=timeout, retries=retries, retry_delay=retry_delay
+    )
+    if q is not None:
+        return q
+    raw = try_get_prim_attribute(
+        path,
+        "xformOp:rotateXYZ",
+        timeout=timeout,
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    if raw is None:
+        return None
+    try:
+        vec = _parse_prim_attr_vec(raw, expected_len=3, path=path, attribute="xformOp:rotateXYZ")
+    except RuntimeError:
+        return None
+    return _quat_xyzw_from_rotate_xyz_deg(float(vec[0]), float(vec[1]), float(vec[2]))
+
+
 def set_prim_translate_local(
     path: str,
     xyz: tuple[float, float, float],

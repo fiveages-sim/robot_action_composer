@@ -131,6 +131,31 @@ def meta_ros2_stack_path(task_configs_dir: Path, group_id: str) -> Path:
     return leaf / ".meta" / "ros2_stack.yaml"
 
 
+def load_scene_robot_ros2_stack(robot_yaml: Path) -> dict[str, Any]:
+    """Load the ``ros2_stack:`` section of a scene project ``robot.yaml``.
+
+    Scene projects (FaSim USD folders) keep motion/navigation overrides next to the
+    task YAML; this section has the same shape as the shared profile's.
+    """
+    path = Path(robot_yaml)
+    if not path.is_file():
+        return {}
+    data = _load_yaml_mapping(path)
+    section = data.get("ros2_stack")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise TypeError(f"{path}: ros2_stack must be a mapping")
+    _reject_task_keys(section, context=f"{path} ros2_stack")
+    allowed = {"defaults", "motion", "navigation"}
+    unknown = sorted(k for k in section if k not in allowed)
+    if unknown:
+        raise ValueError(
+            f"{path}: unknown ros2_stack keys {unknown}; allowed {sorted(allowed)}"
+        )
+    return dict(section)
+
+
 def find_task_group_id(task_groups: Mapping[str, Sequence[str]], task_key: str) -> str:
     for gid, keys in task_groups.items():
         if task_key in keys:
@@ -138,9 +163,8 @@ def find_task_group_id(task_groups: Mapping[str, Sequence[str]], task_key: str) 
     return ""
 
 
-def warn_misplaced_ros2_stack(task_configs_dir: Path, group_id: str) -> str | None:
+def warn_misplaced_ros2_stack_at(leaf: Path) -> str | None:
     """Return a warning if ros2_stack.yaml was placed at the leaf root instead of .meta/."""
-    leaf = task_configs_dir if not group_id else task_configs_dir / Path(group_id)
     for name in ("ros2_stack.yaml", "ros2_stack.yml"):
         misplaced = leaf / name
         if misplaced.is_file():
@@ -149,6 +173,12 @@ def warn_misplaced_ros2_stack(task_configs_dir: Path, group_id: str) -> str | No
                 f"{leaf / '.meta' / 'ros2_stack.yaml'}"
             )
     return None
+
+
+def warn_misplaced_ros2_stack(task_configs_dir: Path, group_id: str) -> str | None:
+    """Return a warning if ros2_stack.yaml was placed at the leaf root instead of .meta/."""
+    leaf = task_configs_dir if not group_id else task_configs_dir / Path(group_id)
+    return warn_misplaced_ros2_stack_at(leaf)
 
 
 def _as_bool(raw: Any, *, field_name: str) -> bool:
@@ -333,26 +363,72 @@ def resolve_ros2_stack(
     )
 
 
+def _expand_scene_nav_paths(merged: dict[str, Any], project_root: Path) -> None:
+    """Expand project-relative ``navigation.args.map`` / ``params_file``.
+
+    A USD project keeps its own map next to the scene (``maps/<name>/map.yaml``), so
+    a scene ``robot.yaml`` may write a project-relative path. Bare package-relative
+    names (``german_poc``) and absolute paths are kept as-is.
+    """
+    nav = merged.get("navigation")
+    if not isinstance(nav, dict):
+        return
+    args = nav.get("args")
+    if not isinstance(args, dict):
+        return
+
+    from robot_action_composer.discovery.workspace_layout import expand_path
+
+    for key in ("map", "params_file"):
+        raw = args.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        text = raw.strip().replace("${PROJECT_ROOT}", str(project_root))
+        if "${" in text or text.startswith("$"):
+            args[key] = str(expand_path(text, base=project_root))
+            continue
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        if candidate.exists():
+            args[key] = str(candidate.resolve())
+
+
 def load_merged_ros2_stack(
     *,
     robot_dir: Path,
     group_id: str = "",
     robot_key: str | None = None,
+    leaf_dir: Path | None = None,
+    scene_robot_yaml: Path | None = None,
 ) -> tuple[dict[str, Any], ResolvedRos2Stack | None, list[str]]:
-    """Load robot.yaml ros2_stack + optional leaf .meta overlay; return raw merge + resolved.
+    """Load robot.yaml ros2_stack + optional scene / leaf overlays.
 
-    Returns ``(merged_raw, resolved_or_none, warnings)``. ``resolved`` is None when no stack config.
+    Merge order (low → high): shared ``robot_dir/robot.yaml`` → scene project
+    ``robot.yaml`` (``scene_robot_yaml``) → ``<leaf>/.meta/ros2_stack.yaml``.
+    ``leaf_dir`` overrides the legacy ``robot_dir/task_configs/<group_id>`` guess so
+    task YAML living outside the robot profile (FaSim USD projects) resolves its own
+    ``.meta``. Returns ``(merged_raw, resolved_or_none, warnings)``.
     """
     warnings: list[str] = []
     robot_yaml = robot_dir / "robot.yaml"
     base = load_robot_ros2_stack_section(robot_yaml)
+    if scene_robot_yaml is not None:
+        scene_section = load_scene_robot_ros2_stack(Path(scene_robot_yaml))
+        if scene_section:
+            base = deep_merge_dicts(base, scene_section)
+
     task_configs = robot_dir / "task_configs"
-    meta_path = meta_ros2_stack_path(task_configs, group_id)
+    if leaf_dir is not None:
+        leaf = Path(leaf_dir)
+    else:
+        leaf = task_configs if not group_id else task_configs / Path(group_id)
+    meta_path = leaf / ".meta" / "ros2_stack.yaml"
     overlay: dict[str, Any] = {}
     if meta_path.is_file():
         overlay = load_ros2_stack_yaml(meta_path)
     else:
-        tip = warn_misplaced_ros2_stack(task_configs, group_id)
+        tip = warn_misplaced_ros2_stack_at(leaf)
         if tip:
             warnings.append(tip)
 
@@ -360,6 +436,8 @@ def load_merged_ros2_stack(
         return {}, None, warnings
 
     merged = deep_merge_dicts(base, overlay)
+    if scene_robot_yaml is not None:
+        _expand_scene_nav_paths(merged, Path(scene_robot_yaml).resolve().parent)
     resolved = resolve_ros2_stack(merged, robot_key=robot_key)
     if not resolved.has_any():
         return merged, None, warnings
@@ -554,6 +632,7 @@ __all__ = [
     "load_merged_ros2_stack",
     "load_robot_ros2_stack_section",
     "load_ros2_stack_yaml",
+    "load_scene_robot_ros2_stack",
     "meta_ros2_stack_path",
     "resolve_ros2_stack",
     "task_queue_needs_navigation",

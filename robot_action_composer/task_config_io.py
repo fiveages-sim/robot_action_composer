@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 _FORBIDDEN_ROOT_KEYS: frozenset[str] = frozenset({"pick", "place", "handover", "carry", "drawer"})
 # skill_params / objects / active_object live on task or scene root but are not runtime_defaults
@@ -146,8 +146,48 @@ class TaskConfigDiscovery:
     task_groups: dict[str, list[str]]
     """Leaf group id (``\"\"`` = files directly under ``task_configs/``) -> task_key list."""
 
+    task_group_dirs: dict[str, str] = field(default_factory=dict)
+    """Leaf group id -> absolute directory holding that leaf's task YAML.
 
-def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskConfigDiscovery:
+    Used to resolve ``.meta/ros2_stack.yaml`` / ``.meta/objects`` for config roots
+    that are not ``<robot_dir>/task_configs`` (e.g. a FaSim USD project folder).
+    """
+
+    def merged(self, other: "TaskConfigDiscovery") -> "TaskConfigDiscovery":
+        """Union two discoveries; duplicate ``task_key`` is an error naming both files."""
+        duplicates = sorted(set(self.tasks) & set(other.tasks))
+        if duplicates:
+            details = ", ".join(
+                f"{key!r} ({self.tasks[key].get('_config_path')} vs "
+                f"{other.tasks[key].get('_config_path')})"
+                for key in duplicates
+            )
+            raise ValueError(f"duplicate task_key across task config roots: {details}")
+
+        groups = {gid: list(keys) for gid, keys in self.task_groups.items()}
+        for gid, keys in other.task_groups.items():
+            groups[gid] = sorted({*groups.get(gid, ()), *keys})
+        group_dirs = {**self.task_group_dirs, **other.task_group_dirs}
+        return TaskConfigDiscovery(
+            tasks={**self.tasks, **other.tasks},
+            task_groups={gid: groups[gid] for gid in sorted(groups, key=lambda g: (g != "", g))},
+            task_group_dirs=group_dirs,
+        )
+
+def _prefix_group_id(prefix: str, group_id: str) -> str:
+    """Namespace a leaf group id under ``prefix`` (posix join, empty stays empty)."""
+    prefix = prefix.strip("/")
+    if not prefix:
+        return group_id
+    return f"{prefix}/{group_id}" if group_id else prefix
+
+
+def discover_task_configs(
+    task_cfg_dir: Path,
+    *,
+    robot_dir_name: str,
+    group_prefix: str = "",
+) -> TaskConfigDiscovery:
     """Load all task YAML under ``task_cfg_dir`` and assign each to its parent-dir group.
 
     Recursively loads ``*.yaml`` / ``*.yml``. Group id is the parent directory relative
@@ -169,6 +209,7 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskCon
     tasks: dict[str, dict[str, Any]] = {}
     task_key_paths: dict[str, Path] = {}
     group_keys: dict[str, list[str]] = defaultdict(list)
+    group_dirs: dict[str, str] = {}
     for parent in sorted(stems_by_parent.keys(), key=lambda d: str(d.relative_to(task_cfg_dir))):
         for stem in sorted(stems_by_parent[parent]):
             yaml_path = parent / f"{stem}.yaml"
@@ -206,17 +247,74 @@ def discover_task_configs(task_cfg_dir: Path, *, robot_dir_name: str) -> TaskCon
             entry["_config_path"] = str(path)
             entry["_config_dir"] = str(path.parent)
             tasks[task_key] = entry
-            group_keys[_task_group_id(path, task_cfg_dir)].append(task_key)
+            group_id = _prefix_group_id(group_prefix, _task_group_id(path, task_cfg_dir))
+            group_keys[group_id].append(task_key)
+            group_dirs[group_id] = str(path.parent)
 
     task_groups = {gid: sorted(keys) for gid, keys in sorted(group_keys.items(), key=lambda x: (x[0] != "", x[0]))}
     _validate_leaf_only_task_groups(task_groups, robot_dir_name=robot_dir_name)
-    return TaskConfigDiscovery(tasks=tasks, task_groups=task_groups)
+    return TaskConfigDiscovery(
+        tasks=tasks,
+        task_groups=task_groups,
+        task_group_dirs=group_dirs,
+    )
+
+
+ENV_SCENE_SUFFIXES: tuple[str, ...] = (".usd", ".usda", ".usdc")
+
+
+def iter_env_scenes(project_root: Path) -> Iterator[Path]:
+    """Yield runnable USD scenes under ``<project>/env`` (FaSim project layout)."""
+    env_root = Path(project_root) / "env"
+    if not env_root.is_dir():
+        return
+    for suffix in ENV_SCENE_SUFFIXES:
+        yield from sorted(p for p in env_root.rglob(f"*{suffix}") if p.is_file())
+
+
+def resolve_env_scene(
+    task_cfg: Mapping[str, Any],
+    *,
+    project_root: Path | None,
+    default_env_scene: str | None = None,
+) -> Path | None:
+    """Validate ``env_scene`` (relative to the USD project root) and return it.
+
+    Returns ``None`` when the task has no ``env_scene`` or when the workspace is not a
+    USD project (legacy ``<workspace>/robots`` layout), where the field is optional.
+    ``default_env_scene`` (project ``robot.yaml``) is used when the task omits it.
+    """
+    raw = task_cfg.get("env_scene")
+    if raw in (None, "") and default_env_scene:
+        raw = default_env_scene
+    if raw in (None, ""):
+        return None
+    scene_rel = str(raw).strip()
+    scene_path = Path(scene_rel)
+    if scene_path.is_absolute():
+        raise ValueError(
+            f"task env_scene must be relative to the USD project root, got absolute path: {scene_rel!r}"
+        )
+    if project_root is None:
+        return None
+    target = (Path(project_root) / scene_path).resolve()
+    if target.is_file():
+        return target
+    candidates = [p.relative_to(Path(project_root)).as_posix() for p in iter_env_scenes(project_root)]
+    hint = ", ".join(candidates) if candidates else f"(no .usd/.usda under {Path(project_root) / 'env'})"
+    raise FileNotFoundError(
+        f"task env_scene {scene_rel!r} not found under {project_root} (resolved: {target}). "
+        f"Available scenes: {hint}"
+    )
 
 
 __all__ = [
+    "ENV_SCENE_SUFFIXES",
     "RUNTIME_DEFAULTS_ALLOWED_KEYS",
     "TaskConfigDiscovery",
     "discover_task_configs",
+    "iter_env_scenes",
+    "resolve_env_scene",
     "validate_runtime_defaults_keys",
     "queue_root_overrides",
     "load_task_dict_from_yaml",

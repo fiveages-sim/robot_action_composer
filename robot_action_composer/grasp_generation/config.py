@@ -209,13 +209,43 @@ def _robot_label_from_dir(robot_dir: Path) -> str:
     return robot_dir.name
 
 
+def _robots_root_for(workspace: Path) -> Path:
+    """Robot profile root for a legacy workspace or a FaSim USD project folder."""
+    from robot_action_composer.discovery.workspace_layout import load_workspace_layout
+
+    try:
+        return load_workspace_layout(Path(workspace)).robots_root
+    except Exception:
+        return Path(workspace) / "robots"
+
+
+def _scene_robot_key(workspace: Path) -> str | None:
+    """``extends`` target when ``workspace`` is a USD project folder."""
+    from robot_action_composer.discovery.workspace_layout import load_workspace_layout
+
+    try:
+        layout = load_workspace_layout(Path(workspace))
+    except Exception:
+        return None
+    if layout.scene_project is None or layout.project_robot_yaml is None:
+        return None
+    from robot_action_composer.config.robot_yaml import motion_profile_from_robot_yaml
+
+    _, robot_key, _ = motion_profile_from_robot_yaml(
+        layout.project_robot_yaml, robots_root=layout.robots_root
+    )
+    return robot_key
+
+
 def discover_grasp_robots(workspace: Path) -> dict[str, dict[str, Any]]:
-    """Robots that ship ``grasp_generation.yaml`` under ``workspace/robots/``.
+    """Robots that ship ``grasp_generation.yaml`` under the resolved robot profile root.
 
     Independent of ``task_configs/`` / motion-generation discovery so a robot
-    can expose grasp assist without a full skill queue.
+    can expose grasp assist without a full skill queue. In a USD project folder the
+    listing is restricted to the project's ``extends`` robot.
     """
-    robots_root = Path(workspace) / "robots"
+    robots_root = _robots_root_for(workspace)
+    restrict_key = _scene_robot_key(workspace)
     out: dict[str, dict[str, Any]] = {}
     if not robots_root.is_dir():
         return out
@@ -224,6 +254,8 @@ def discover_grasp_robots(workspace: Path) -> dict[str, dict[str, Any]]:
         if not yml.is_file():
             continue
         key = _robot_key_from_dir(robot_dir)
+        if restrict_key and key != restrict_key:
+            continue
         out[key] = {
             "key": key,
             "label": _robot_label_from_dir(robot_dir),
@@ -243,12 +275,13 @@ def find_grasp_config_path(
     if entry is not None:
         return Path(entry["config_path"])
     # Fallback: name / path heuristics (same as load)
+    robots_root = _robots_root_for(workspace)
     candidates = [
-        workspace / "robots" / robot_key / "grasp_generation.yaml",
+        robots_root / robot_key / "grasp_generation.yaml",
     ]
-    for p in (workspace / "robots").glob(f"*/{robot_key}/grasp_generation.yaml"):
+    for p in robots_root.glob(f"*/{robot_key}/grasp_generation.yaml"):
         candidates.append(p)
-    for robot_dir in _iter_robot_dirs(workspace / "robots"):
+    for robot_dir in _iter_robot_dirs(robots_root):
         yml = robot_dir / "grasp_generation.yaml"
         if not yml.is_file():
             continue

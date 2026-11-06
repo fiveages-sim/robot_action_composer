@@ -158,7 +158,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         type=str,
         default=None,
-        help="Workspace root containing robots/ (default: cwd)",
+        help="Workspace root: legacy dir containing robots/, or a fa-project-usd project dir (env/)",
+    )
+    parser.add_argument(
+        "--robots-root",
+        type=str,
+        default=None,
+        help="Shared robot profile root (default: <workspace>/robots or the scene robot.yaml robots_root)",
     )
     parser.add_argument(
         "--lang",
@@ -368,6 +374,21 @@ def _with_nav_map(resolved: ResolvedRos2Stack, nav_map: str | None) -> ResolvedR
     )
 
 
+def _load_registry(
+    workspace_dir: Path,
+    args: argparse.Namespace,
+) -> dict[str, dict[str, Any]]:
+    """Load robot entries; ``env/`` project workspaces resolve profiles via --robots-root."""
+    robots_root = getattr(args, "robots_root", None)
+    registry = load_motion_entries(workspace_dir, robots_root=robots_root)
+    if not registry:
+        raise SystemExit(
+            t("ros2_stack.no_robots", path=robots_root or workspace_dir)
+            + " (needs robots/, or a USD project with env/ + robot.yaml + task_configs/)"
+        )
+    return registry
+
+
 def _resolve_stack(
     *,
     workspace_dir: Path,
@@ -381,10 +402,18 @@ def _resolve_stack(
 ) -> tuple[str, dict[str, Any], Path, str, ResolvedRos2Stack]:
     robot_entry = registry[robot_key]
     robot_dir = resolve_robot_profile_dir(workspace_dir, robot_entry)
+    leaf_dirs = robot_entry.get("task_group_dirs") or {}
+    leaf_raw = leaf_dirs.get(group_id)
     merged, resolved, warnings = load_merged_ros2_stack(
         robot_dir=robot_dir,
         group_id=group_id,
         robot_key=robot_key,
+        leaf_dir=Path(leaf_raw) if leaf_raw else None,
+        scene_robot_yaml=(
+            Path(robot_entry["project_robot_yaml"])
+            if robot_entry.get("project_robot_yaml")
+            else None
+        ),
     )
     for w in warnings:
         print(t("ros2_stack.warning", msg=w))
@@ -504,9 +533,7 @@ def _snapshot_stack_last(
 
 
 def cmd_status(workspace_dir: Path, args: argparse.Namespace) -> int:
-    registry = load_motion_entries(workspace_dir)
-    if not registry:
-        raise SystemExit(t("ros2_stack.no_robots", path=workspace_dir / "robots"))
+    registry = _load_registry(workspace_dir, args)
     last = _load_stack_last(workspace_dir)
     default_robot, default_group = _last_defaults(last, registry=registry)
     robot_key, _entry, _dir, group_id, resolved = _resolve_for_cli(
@@ -539,9 +566,7 @@ def cmd_status(workspace_dir: Path, args: argparse.Namespace) -> int:
 
 
 def cmd_launch(workspace_dir: Path, args: argparse.Namespace) -> int:
-    registry = load_motion_entries(workspace_dir)
-    if not registry:
-        raise SystemExit(t("ros2_stack.no_robots", path=workspace_dir / "robots"))
+    registry = _load_registry(workspace_dir, args)
 
     last = _load_stack_last(workspace_dir)
     interactive = sys.stdin.isatty()
@@ -714,9 +739,7 @@ def _stop_robot_components(
 
 
 def cmd_stop(workspace_dir: Path, args: argparse.Namespace) -> int:
-    registry = load_motion_entries(workspace_dir)
-    if not registry:
-        raise SystemExit(t("ros2_stack.no_robots", path=workspace_dir / "robots"))
+    registry = _load_registry(workspace_dir, args)
     robots = _robots_to_stop(workspace_dir, registry=registry, robot_arg=args.robot)
     if not robots:
         print(t("ros2_stack.stop_nothing"))
@@ -736,9 +759,7 @@ def cmd_stop(workspace_dir: Path, args: argparse.Namespace) -> int:
 
 
 def cmd_logs(workspace_dir: Path, args: argparse.Namespace) -> int:
-    registry = load_motion_entries(workspace_dir)
-    if not registry:
-        raise SystemExit(t("ros2_stack.no_robots", path=workspace_dir / "robots"))
+    registry = _load_registry(workspace_dir, args)
     robot_key = _resolve_current_robot(
         workspace_dir, registry=registry, robot_arg=args.robot
     )
@@ -833,15 +854,22 @@ def main(argv: list[str] | None = None) -> None:
         resolve_language(cli_lang=args.lang, cached_lang=_load_cached_lang(workspace_dir))
     )
     print(t("ros2_stack.title"))
-    if args.command == "status":
-        raise SystemExit(cmd_status(workspace_dir, args))
-    if args.command == "launch":
-        raise SystemExit(cmd_launch(workspace_dir, args))
-    if args.command == "stop":
-        raise SystemExit(cmd_stop(workspace_dir, args))
-    if args.command == "logs":
-        raise SystemExit(cmd_logs(workspace_dir, args))
-    raise SystemExit(f"Unknown command {args.command!r}")
+    handlers = {
+        "status": cmd_status,
+        "launch": cmd_launch,
+        "stop": cmd_stop,
+        "logs": cmd_logs,
+    }
+    handler = handlers.get(args.command)
+    if handler is None:
+        raise SystemExit(f"Unknown command {args.command!r}")
+
+    from robot_action_composer.discovery.workspace_layout import WorkspaceLayoutError
+
+    try:
+        raise SystemExit(handler(workspace_dir, args))
+    except WorkspaceLayoutError as exc:
+        raise SystemExit(f"[workspace] {exc}") from None
 
 
 if __name__ == "__main__":

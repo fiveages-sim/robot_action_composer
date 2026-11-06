@@ -963,6 +963,7 @@ def run_motion_generation(
     motion_preset: str | None = None,
     nav_profile: str | None = None,
     new_terminal: bool = False,
+    robots_root: Path | str | None = None,
 ) -> None:
     set_language(resolve_language(cli_lang=lang, cached_lang=_load_cached_lang(workspace_dir)))
     from robot_action_composer.task_runtime.config.merged import (  # pyright: ignore[reportMissingImports]
@@ -975,11 +976,13 @@ def run_motion_generation(
     from robot_action_composer.ros_interface_utils import build_ros2_interface_from_robot_cfg  # pyright: ignore[reportMissingImports]
     from robot_action_composer.isaac_sim import SimTimeHelper  # pyright: ignore[reportMissingImports]
 
-    registry = load_motion_entries(workspace_dir)
-    robots_root = workspace_dir / "robots"
+    registry = load_motion_entries(workspace_dir, robots_root=robots_root)
     if not registry:
         raise RuntimeError(
-            f"No motion-generation capable robot configs found under {robots_root}"
+            f"No motion-generation capable robot configs found from workspace {workspace_dir}.\n"
+            "Run from examples/IsaacSim (contains robots/), or from a fa-project-usd project "
+            "folder (contains env/ + robot.yaml + task_configs/). "
+            "Pass --robots-root to point at the shared robot profiles."
         )
 
     cli_robot_key = robot_key
@@ -1176,6 +1179,12 @@ def run_motion_generation(
         )
 
     allowed = _merged_queue_allowed_keys()
+    _preflight_env_scene(
+        robot_entry=robot_entry,
+        task_entry=task_entry,
+        entry_kind=entry_kind,
+        chain_segments=chain_segments,
+    )
     import robot_action_composer.task_runtime.skills  # noqa: F401 - register built-in skills
 
     from robot_action_composer.hardware_detection import detect_motion_environment_from_ros
@@ -1211,6 +1220,8 @@ def run_motion_generation(
                     task_groups=robot_entry.get("task_groups") or {},
                     task_key=ensure_task_key,
                     task_cfg=ensure_task_cfg,
+                    task_group_dirs=robot_entry.get("task_group_dirs") or {},
+                    scene_robot_yaml=robot_entry.get("project_robot_yaml"),
                     interactive=interactive_ensure,
                     ensure=True,
                     motion_preset=motion_preset,
@@ -1487,13 +1498,64 @@ def resolve_workspace_dir(path: Path | None) -> Path:
     return path.expanduser().resolve()
 
 
+def _preflight_env_scene(
+    *,
+    robot_entry: dict[str, Any],
+    task_entry: dict[str, Any] | None,
+    entry_kind: str,
+    chain_segments: list[Any],
+) -> None:
+    """Print (and validate) which USD scene the selected task expects.
+
+    Only USD project workspaces declare ``env_scene``; legacy ``examples/IsaacSim``
+    workspaces keep the manual workflow and print nothing.
+    """
+    from robot_action_composer.task_config_io import resolve_env_scene
+
+    scene_project = robot_entry.get("scene_project")
+    if not scene_project:
+        return
+    project_root = Path(str(scene_project))
+
+    cfg = task_entry
+    if entry_kind in ("last_chain", "interactive_chain") and chain_segments:
+        first = chain_segments[0]
+        first_key = str(first.get("task_key") if isinstance(first, dict) else "")
+        cfg = (robot_entry.get("tasks") or {}).get(first_key)
+    if cfg is None:
+        return
+
+    try:
+        resolved = resolve_env_scene(
+            cfg,
+            project_root=project_root,
+            default_env_scene=robot_entry.get("default_env_scene"),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(f"[scene] {exc}") from None
+    if resolved is None:
+        print(f"[scene] task has no env_scene; open a USD under {project_root / 'env'} manually")
+        return
+    try:
+        display = resolved.relative_to(project_root)
+    except ValueError:
+        display = resolved
+    print(f"[scene] open in Isaac Sim and press Play: {display}")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Motion generation launcher")
     parser.add_argument(
         "--workspace",
         type=str,
         default=None,
-        help="Workspace root containing robots/ (default: current working directory)",
+        help="Workspace root: legacy dir containing robots/, or a fa-project-usd project dir (env/)",
+    )
+    parser.add_argument(
+        "--robots-root",
+        type=str,
+        default=None,
+        help="Shared robot profile root (default: <workspace>/robots or the scene robot.yaml robots_root)",
     )
     parser.add_argument("--robot", type=str, default=None, help="Robot key (e.g. dobot_cr5)")
     parser.add_argument("--task-key", type=str, default=None, help="Task key (e.g. pick_place)")
@@ -1557,6 +1619,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    from robot_action_composer.discovery.workspace_layout import WorkspaceLayoutError
     from robot_action_composer.grasp_generation.preflight import warn_motion_environment
 
     warn_motion_environment()
@@ -1565,19 +1628,23 @@ def main() -> None:
     json_path = (
         Path(args.object_resolution_json).expanduser() if args.object_resolution_json else None
     )
-    run_motion_generation(
-        workspace_dir=workspace_dir,
-        robot_key=args.robot,
-        task_key=args.task_key,
-        scene=args.scene,
-        object_resolution_json=json_path,
-        no_reset=args.no_reset,
-        lang=args.lang,
-        ensure_ros2_stack=args.ensure_ros2_stack,
-        motion_preset=args.motion_preset,
-        nav_profile=args.nav_profile,
-        new_terminal=args.new_terminal,
-    )
+    try:
+        run_motion_generation(
+            workspace_dir=workspace_dir,
+            robot_key=args.robot,
+            task_key=args.task_key,
+            scene=args.scene,
+            object_resolution_json=json_path,
+            no_reset=args.no_reset,
+            lang=args.lang,
+            ensure_ros2_stack=args.ensure_ros2_stack,
+            motion_preset=args.motion_preset,
+            nav_profile=args.nav_profile,
+            new_terminal=args.new_terminal,
+            robots_root=args.robots_root,
+        )
+    except WorkspaceLayoutError as exc:
+        raise SystemExit(f"[workspace] {exc}") from None
 
 
 if __name__ == "__main__":

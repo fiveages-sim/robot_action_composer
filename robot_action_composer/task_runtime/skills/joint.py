@@ -217,6 +217,38 @@ def _resolve_group_targets(
     return resolved, check_idx
 
 
+_MOVEJ_INTERPOLATION_TYPES = frozenset({"linear", "tanh", "doubles", "none", "servo"})
+
+
+def _read_node_parameter(interface: Any, node: str, name: str) -> Any:
+    try:
+        listed = interface.list_node_parameters(node)
+    except Exception:
+        return None
+    for item in listed or []:
+        if item.get("name") == name:
+            return item.get("value")
+    return None
+
+
+def _body_movej_parameter_nodes(interface: Any) -> list[str]:
+    """控制器节点：谁在插值身体关节，就把 ``movej_duration`` 写给谁。
+
+    全身 WBC 把腰和双臂放在 ``ocs2_wbc_controller`` 里一起规划。此时
+    ``body_controller`` 仍可能解析成独立的 ``/body_joint_controller``（参数能写上，
+    但关节指令不走它）。
+    """
+    wbc_owns_body = bool(getattr(interface, "is_wbc", False)) and bool(
+        getattr(interface, "_wbc_has_body_joint_topic", False)
+    )
+    if wbc_owns_body:
+        node = str(getattr(interface, "arm_controller", "") or "").strip()
+        if node:
+            return [node]
+    node = str(getattr(interface, "body_controller", "") or "").strip()
+    return [node] if node else []
+
+
 def skill_movej_to_config(
     ctx: QueueRuntimeContext, params: Mapping[str, Any]
 ) -> tuple[list[Any], ExecutionMeta]:
@@ -234,9 +266,11 @@ def skill_movej_to_config(
             相对当前角的增量（rad）；``null`` 表示该关节增量 0。可与绝对目标同时使用（先绝对再加增量）。
         body_joint_deltas / left_arm_joint_deltas / right_arm_joint_deltas / head_joint_deltas:
             稀疏增量 ``{关节索引: delta}``（0-based），便于「只转腰偏航 +π」。
-        arrival_timeout / joint_tolerance / skip_fsm_change / body_movej_duration:
+        arrival_timeout / joint_tolerance / skip_fsm_change / body_movej_duration /
+        body_movej_interpolation_type:
             ``skip_fsm_change`` 传给 ``send_coordinated_joint_positions(auto_switch_fsm=False)``，
-            跳过 interface 侧自动 FSM；其余同前。
+            跳过 interface 侧自动 FSM。``body_movej_interpolation_type`` 写入
+            ``movej_interpolation_type``（linear/tanh/doubles/none/servo），本段结束后恢复原值。
     """
     body_abs = _parse_optional_float_list(params.get("body_positions"), label="body_positions")
     left_abs = _parse_optional_float_list(params.get("left_arm_positions"), label="left_arm_positions")
@@ -273,6 +307,7 @@ def skill_movej_to_config(
     joint_tolerance = float(params.get("joint_tolerance", 0.05))
     skip_fsm_change = bool(params.get("skip_fsm_change", False))
     body_movej_duration = params.get("body_movej_duration", None)
+    body_movej_interpolation_type = params.get("body_movej_interpolation_type", None)
 
     interface = ctx.interface
     sim_time = getattr(ctx, "sim_time", None)
@@ -339,68 +374,103 @@ def skill_movej_to_config(
         sparse_deltas=head_sparse,
     )
 
+    movej_parameters: dict[str, Any] = {}
     if body_movej_duration is not None:
-        body_ctrl = str(getattr(interface, "body_controller", "")).strip()
-        if not body_ctrl:
+        movej_parameters["movej_duration"] = float(body_movej_duration)
+    if body_movej_interpolation_type is not None:
+        interpolation = str(body_movej_interpolation_type).strip().lower()
+        if interpolation not in _MOVEJ_INTERPOLATION_TYPES:
             raise ValueError(
-                "joint.movej_to_config: cannot infer body controller node; "
-                "ensure interface.body_controller is available (body_joint_controller_topic on ROS2RobotInterfaceConfig)"
+                "joint.movej_to_config: body_movej_interpolation_type must be one of "
+                f"{sorted(_MOVEJ_INTERPOLATION_TYPES)}, got {body_movej_interpolation_type!r}"
             )
-        duration_val = float(body_movej_duration)
-        ok = interface.set_node_parameters(
-            full_node_name=body_ctrl,
-            parameters={"movej_duration": duration_val},
-        )
-        if ok:
-            print(f"[MoveJ] Set {body_ctrl}.movej_duration = {duration_val}")
-        else:
-            print(f"[MoveJ] WARN: failed to set {body_ctrl}.movej_duration = {duration_val}")
+        movej_parameters["movej_interpolation_type"] = interpolation
 
-    moved = False
-    if body_positions or left_positions or right_positions or head_positions:
-        try:
-            interface.send_coordinated_joint_positions(
-                body_positions=body_positions or None,
-                left_arm_positions=left_positions or None,
-                right_arm_positions=right_positions or None,
-                head_positions=head_positions or None,
-                auto_switch_fsm=not skip_fsm_change,
+    restore_interpolation: list[tuple[str, str]] = []
+    if movej_parameters:
+        duration_nodes = _body_movej_parameter_nodes(interface)
+        if not duration_nodes:
+            raise ValueError(
+                "joint.movej_to_config: cannot infer the controller that runs body MoveJ; "
+                "ensure interface.body_controller or the WBC arm controller is available"
             )
-            moved = True
-            print(
-                f"[MoveJ] coordinated  body={body_positions is not None} "
-                f"L={left_positions is not None} R={right_positions is not None} "
-                f"head={head_positions is not None}"
+        for body_ctrl in duration_nodes:
+            if "movej_interpolation_type" in movej_parameters:
+                previous = _read_node_parameter(
+                    interface, body_ctrl, "movej_interpolation_type"
+                )
+                if isinstance(previous, str) and previous.strip().lower() != interpolation:
+                    restore_interpolation.append((body_ctrl, previous))
+            ok = interface.set_node_parameters(
+                full_node_name=body_ctrl,
+                parameters=movej_parameters,
             )
-            if body_positions is not None:
-                print(f"[MoveJ] body target={body_positions} check_idx={sorted(body_check)}")
-        except Exception as exc:
-            print(f"[MoveJ] WARN: send_coordinated_joint_positions failed: {exc}")
+            if ok:
+                print(f"[MoveJ] Set {body_ctrl} {movej_parameters}")
+            else:
+                print(f"[MoveJ] WARN: failed to set {body_ctrl} {movej_parameters}")
+                restore_interpolation = [
+                    item for item in restore_interpolation if item[0] != body_ctrl
+                ]
 
-    if moved and (left_positions or right_positions or body_positions):
-        result = interface.wait_until_joint_arrive(
-            left_target_positions=left_positions or None,
-            right_target_positions=right_positions or None,
-            body_target_positions=body_positions or None,
-            left_check_indices=sorted(left_check) if left_check else None,
-            right_check_indices=sorted(right_check) if right_check else None,
-            body_check_indices=sorted(body_check) if body_check else None,
-            timeout=arrival_timeout,
-            poll_period=0.05,
-            joint_tolerance=joint_tolerance,
-            angular_wrap=True,
-            time_now_fn=time_now_fn,
-            sleep_fn=sleep_fn,
-        )
-        if result.get("arrived"):
-            print("[MoveJ] Arrived at target config.")
-        else:
-            l_err = result.get("left_error_max_abs")
-            r_err = result.get("right_error_max_abs")
-            b_err = result.get("body_error_max_abs")
-            print(f"[MoveJ] WARN: timeout. L_err={l_err}  R_err={r_err}  Body_err={b_err}")
-            if result.get("body_joint_errors"):
-                print(f"[MoveJ] body per-joint err (idx:rad): {result['body_joint_errors']}")
+    try:
+        moved = False
+        if body_positions or left_positions or right_positions or head_positions:
+            try:
+                interface.send_coordinated_joint_positions(
+                    body_positions=body_positions or None,
+                    left_arm_positions=left_positions or None,
+                    right_arm_positions=right_positions or None,
+                    head_positions=head_positions or None,
+                    auto_switch_fsm=not skip_fsm_change,
+                )
+                moved = True
+                print(
+                    f"[MoveJ] coordinated  body={body_positions is not None} "
+                    f"L={left_positions is not None} R={right_positions is not None} "
+                    f"head={head_positions is not None}"
+                )
+                if body_positions is not None:
+                    print(f"[MoveJ] body target={body_positions} check_idx={sorted(body_check)}")
+            except Exception as exc:
+                print(f"[MoveJ] WARN: send_coordinated_joint_positions failed: {exc}")
+
+        if moved and (left_positions or right_positions or body_positions):
+            result = interface.wait_until_joint_arrive(
+                left_target_positions=left_positions or None,
+                right_target_positions=right_positions or None,
+                body_target_positions=body_positions or None,
+                left_check_indices=sorted(left_check) if left_check else None,
+                right_check_indices=sorted(right_check) if right_check else None,
+                body_check_indices=sorted(body_check) if body_check else None,
+                timeout=arrival_timeout,
+                poll_period=0.05,
+                joint_tolerance=joint_tolerance,
+                angular_wrap=True,
+                time_now_fn=time_now_fn,
+                sleep_fn=sleep_fn,
+            )
+            if result.get("arrived"):
+                print("[MoveJ] Arrived at target config.")
+            else:
+                l_err = result.get("left_error_max_abs")
+                r_err = result.get("right_error_max_abs")
+                b_err = result.get("body_error_max_abs")
+                print(f"[MoveJ] WARN: timeout. L_err={l_err}  R_err={r_err}  Body_err={b_err}")
+                if result.get("body_joint_errors"):
+                    print(f"[MoveJ] body per-joint err (idx:rad): {result['body_joint_errors']}")
+    finally:
+        for body_ctrl, previous in restore_interpolation:
+            ok = interface.set_node_parameters(
+                full_node_name=body_ctrl,
+                parameters={"movej_interpolation_type": previous},
+            )
+            if ok:
+                print(f"[MoveJ] Restored {body_ctrl}.movej_interpolation_type = {previous}")
+            else:
+                print(
+                    f"[MoveJ] WARN: failed to restore {body_ctrl}.movej_interpolation_type = {previous}"
+                )
 
     return [], _joint_meta(ctx)
 

@@ -73,21 +73,32 @@ def _iter_robot_profile_dirs(robots_root: Path) -> list[Path]:
 
 
 def resolve_robot_profile_dir(workspace_dir: Path, entry: Mapping[str, Any]) -> Path:
-    """Absolute path to a robot profile directory under ``workspace_dir/robots``."""
-    robots_root = workspace_dir / "robots"
+    """Absolute path to a robot profile directory.
+
+    Prefers the already-resolved ``robot_dir`` (USD project workspaces keep their
+    profiles outside ``<workspace>/robots``), otherwise joins the legacy layout.
+    """
+    resolved = entry.get("robot_dir")
+    if resolved:
+        return Path(str(resolved))
+    robots_root = Path(str(entry.get("robots_root") or (Path(workspace_dir) / "robots")))
     relpath = str(entry.get("robot_dir_relpath") or entry.get("robot_dir_name") or "").strip()
     if not relpath:
         raise ValueError("robot entry missing robot_dir_relpath / robot_dir_name")
     return robots_root / relpath
 
 
-def _load_motion_profile_from_dir(robot_dir: Path) -> tuple[MotionRobotConfig, str, str]:
+def _load_motion_profile_from_dir(
+    robot_dir: Path,
+    *,
+    robots_root: Path | None = None,
+) -> tuple[MotionRobotConfig, str, str]:
     yaml_file = robot_dir / "robot.yaml"
     motion_file = robot_dir / "motion_config.py"
     legacy_file = robot_dir / "robot_config.py"
 
     if yaml_file.is_file():
-        return motion_profile_from_robot_yaml(yaml_file)
+        return motion_profile_from_robot_yaml(yaml_file, robots_root=robots_root)
 
     if motion_file.is_file():
         warnings.warn(
@@ -151,10 +162,30 @@ def load_lerobot_profile(robot_dir: Path, *, workspace_dir: Path | None = None) 
     return None
 
 
-def load_motion_entries(workspace_dir: Path) -> dict[str, dict[str, Any]]:
+def load_motion_entries(
+    workspace_dir: Path,
+    *,
+    robots_root: Path | str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Discover robot entries plus their task configs.
+
+    ``<workspace>/robots`` keeps the legacy behaviour. A FaSim USD project folder
+    (``<project>/env``) instead resolves its shared profile via ``robot.yaml``
+    (``extends`` / ``robots_root``) and reads tasks from ``<project>/task_configs``.
+    """
+    from robot_action_composer.discovery.workspace_layout import load_workspace_layout
+
+    layout = load_workspace_layout(workspace_dir, robots_root=robots_root)
+    if layout.legacy:
+        return _load_legacy_motion_entries(layout.robots_root)
+    if layout.scene_project is None:
+        return {}
+    return _load_scene_project_motion_entries(layout)
+
+
+def _load_legacy_motion_entries(robots_root: Path) -> dict[str, dict[str, Any]]:
     from robot_action_composer.task_config_io import discover_task_configs
 
-    robots_root = workspace_dir / "robots"
     entries: dict[str, dict[str, Any]] = {}
     if not robots_root.is_dir():
         return entries
@@ -163,7 +194,9 @@ def load_motion_entries(workspace_dir: Path) -> dict[str, dict[str, Any]]:
         robot_dir_relpath = robot_dir.relative_to(robots_root).as_posix()
         task_cfg_dir = robot_dir / "task_configs"
 
-        motion_cfg, robot_key, robot_label = _load_motion_profile_from_dir(robot_dir)
+        motion_cfg, robot_key, robot_label = _load_motion_profile_from_dir(
+            robot_dir, robots_root=robots_root
+        )
         discovery = discover_task_configs(task_cfg_dir, robot_dir_name=robot_dir_relpath)
         if not discovery.tasks:
             continue
@@ -178,19 +211,84 @@ def load_motion_entries(workspace_dir: Path) -> dict[str, dict[str, Any]]:
             "label": robot_label,
             "robot_dir_name": robot_dir.name,
             "robot_dir_relpath": robot_dir_relpath,
+            "robot_dir": str(robot_dir),
+            "robots_root": str(robots_root),
+            "scene_project": None,
+            "project_robot_yaml": None,
             "motion_cfg": motion_cfg,
             "robot_cfg": motion_cfg,
             "lerobot_cfg": None,
             "tasks": discovery.tasks,
             "task_groups": discovery.task_groups,
+            "task_group_dirs": discovery.task_group_dirs,
         }
     return entries
 
 
-def load_robot_entries(workspace_dir: Path) -> dict[str, dict[str, Any]]:
+def _load_scene_project_motion_entries(layout: Any) -> dict[str, dict[str, Any]]:
+    """Load a FaSim USD project: shared robot profile + project task YAML."""
+    from robot_action_composer.config.robot_yaml import (
+        motion_profile_from_robot_yaml,
+        resolve_profile_dir_for_key,
+    )
+    from robot_action_composer.discovery.workspace_layout import read_project_robot_yaml
+    from robot_action_composer.task_config_io import TaskConfigDiscovery, discover_task_configs
+
+    project = Path(layout.scene_project)
+    yaml_path = layout.project_robot_yaml
+    if yaml_path is None:
+        raise ValueError(
+            f"{project} is a USD project (has env/) but no robot.yaml.\n"
+            "Add one with `extends: <robot_key>` and `robots_root: ...` "
+            "(see robot_action_composer/docs/ROBOT_CONFIG.md)."
+        )
+    project_data = read_project_robot_yaml(project)
+
+    motion_cfg, robot_key, robot_label = motion_profile_from_robot_yaml(
+        Path(yaml_path), robots_root=layout.robots_root
+    )
+    base_dir = resolve_profile_dir_for_key(layout.robots_root, robot_key)
+
+    if layout.task_configs_root is not None:
+        discovery = discover_task_configs(
+            layout.task_configs_root,
+            robot_dir_name=project.name,
+        )
+    else:
+        discovery = TaskConfigDiscovery(tasks={}, task_groups={}, task_group_dirs={})
+    if not discovery.tasks:
+        raise ValueError(
+            f"USD project {project} has no task YAML; expected {layout.task_configs_root or project / 'task_configs'}"
+        )
+
+    return {
+        robot_key: {
+            "label": robot_label,
+            "robot_dir_name": base_dir.name,
+            "robot_dir_relpath": base_dir.relative_to(layout.robots_root).as_posix(),
+            "robot_dir": str(base_dir),
+            "robots_root": str(layout.robots_root),
+            "scene_project": str(project),
+            "project_robot_yaml": str(yaml_path),
+            "default_env_scene": project_data.get("default_env_scene"),
+            "motion_cfg": motion_cfg,
+            "robot_cfg": motion_cfg,
+            "lerobot_cfg": None,
+            "tasks": discovery.tasks,
+            "task_groups": discovery.task_groups,
+            "task_group_dirs": discovery.task_group_dirs,
+        }
+    }
+
+
+def load_robot_entries(
+    workspace_dir: Path,
+    *,
+    robots_root: Path | str | None = None,
+) -> dict[str, dict[str, Any]]:
     from robot_action_composer.dataset_recording.runner import DEFAULT_RECORD_CFG, run_recording
 
-    motion_entries = load_motion_entries(workspace_dir)
+    motion_entries = load_motion_entries(workspace_dir, robots_root=robots_root)
     runner = run_recording
     base_record_cfg = DEFAULT_RECORD_CFG
     entries: dict[str, dict[str, Any]] = {}
@@ -240,7 +338,13 @@ def load_robot_entries(workspace_dir: Path) -> dict[str, dict[str, Any]]:
             "robot_cfg": motion_cfg,
             "robot_dir_name": motion_entry.get("robot_dir_name", ""),
             "robot_dir_relpath": motion_entry.get("robot_dir_relpath", ""),
+            "robot_dir": motion_entry.get("robot_dir", ""),
+            "robots_root": motion_entry.get("robots_root", ""),
+            "scene_project": motion_entry.get("scene_project"),
+            "project_robot_yaml": motion_entry.get("project_robot_yaml"),
+            "default_env_scene": motion_entry.get("default_env_scene"),
             "record": record_entry,
             "task_groups": motion_entry.get("task_groups", {}),
+            "task_group_dirs": motion_entry.get("task_group_dirs", {}),
         }
     return entries

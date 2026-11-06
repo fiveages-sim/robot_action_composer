@@ -35,9 +35,15 @@ def _resolve_workspace(params: Mapping[str, Any]) -> Path:
     cwd = Path.cwd().resolve()
     if (cwd / "robots").is_dir():
         return cwd
+    # FaSim USD project workspace (``env/`` + robot.yaml); its robot.yaml points at
+    # the shared profiles, so grasp_generation.yaml is still reachable.
+    if (cwd / "env").is_dir() and (cwd / "robot.yaml").is_file():
+        return cwd
     for parent in cwd.parents:
         robots = parent / "robots"
         if robots.is_dir() and any(robots.glob("**/grasp_generation.yaml")):
+            return parent
+        if (parent / "env").is_dir() and (parent / "robot.yaml").is_file():
             return parent
     return cwd
 

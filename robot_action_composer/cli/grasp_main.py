@@ -200,6 +200,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _robot_relpath(robot_dir: Path, workspace: Path) -> str:
+    """Display path for the robot picker; tolerates profiles outside the workspace."""
+    robot_dir = Path(robot_dir)
+    for root in (Path(workspace) / "robots", Path(workspace)):
+        try:
+            return str(robot_dir.relative_to(root))
+        except ValueError:
+            continue
+    return robot_dir.name
+
+
 def _resolve_robot_key(
     *,
     workspace: Path,
@@ -225,15 +236,13 @@ def _resolve_robot_key(
         return default if default in robots or not robots else next(iter(robots))
     if not robots:
         raise SystemExit(
-            "[grasp-generation] No robots/*/grasp_generation.yaml under "
-            f"{workspace / 'robots'}. Add a config (see FiveAges_W2 template)."
+            "[grasp-generation] No */grasp_generation.yaml under the resolved robot profiles. "
+            "Add a config (see FiveAges_W2 template) or pass --workspace/--robots-root."
         )
     registry = {
         k: {
             "label": v["label"],
-            "robot_dir_relpath": str(
-                Path(v["robot_dir"]).relative_to(workspace / "robots")
-            ),
+            "robot_dir_relpath": _robot_relpath(v["robot_dir"], workspace),
         }
         for k, v in robots.items()
     }

@@ -10,6 +10,10 @@ _IDENTITY_XYZ = (0.0, 0.0, 0.0)
 _IDENTITY_XYZW = (0.0, 0.0, 0.0, 1.0)
 
 GraspOffsetCache = MutableMapping[tuple[str, str], tuple[float, float, float]]
+#: Cache for parent→tip relative pose: (xyz, xyzw).
+PrimRelativePoseCache = MutableMapping[
+    tuple[str, str], tuple[tuple[float, float, float], tuple[float, float, float, float]]
+]
 
 
 def normalize_prim_path(path: str) -> str:
@@ -384,6 +388,201 @@ def resolve_object_local_orient_from_grasp_prim(
     return orient
 
 
+def _invert_pose_xyzw(
+    xyz: tuple[float, float, float],
+    xyzw: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+        quat_conjugate,
+        quat_normalize,
+        rotate_vector_by_quat,
+    )
+
+    q = quat_normalize(xyzw)
+    q_inv = quat_conjugate(q)
+    t_inv = rotate_vector_by_quat((-xyz[0], -xyz[1], -xyz[2]), q_inv)
+    return t_inv, q_inv
+
+
+def _multiply_pose_xyzw(
+    a_xyz: tuple[float, float, float],
+    a_xyzw: tuple[float, float, float, float],
+    b_xyz: tuple[float, float, float],
+    b_xyzw: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """``T_a * T_b`` (apply b then a), quaternions xyzw."""
+    from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+        quat_multiply,
+        quat_normalize,
+        rotate_vector_by_quat,
+    )
+
+    a_q = quat_normalize(a_xyzw)
+    b_q = quat_normalize(b_xyzw)
+    rotated = rotate_vector_by_quat(b_xyz, a_q)
+    out_t = (a_xyz[0] + rotated[0], a_xyz[1] + rotated[1], a_xyz[2] + rotated[2])
+    out_q = quat_normalize(quat_multiply(a_q, b_q))
+    return out_t, out_q
+
+
+def _common_prim_ancestor(path_a: str, path_b: str) -> str:
+    sa = [s for s in path_a.strip("/").split("/") if s]
+    sb = [s for s in path_b.strip("/").split("/") if s]
+    i = 0
+    while i < len(sa) and i < len(sb) and sa[i] == sb[i]:
+        i += 1
+    if i == 0:
+        raise ValueError(f"no common ancestor between {path_a!r} and {path_b!r}")
+    return "/" + "/".join(sa[:i])
+
+
+def _compose_descendant_pose(
+    ancestor_prim_path: str,
+    descendant_prim_path: str,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Compose local xforms from ``ancestor`` down to ``descendant``."""
+    from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+        quat_multiply,
+        quat_normalize,
+        rotate_vector_by_quat,
+    )
+    from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+        try_get_prim_local_rotation_xyzw,
+        try_get_prim_translate_local,
+    )
+
+    ancestor = normalize_prim_path(ancestor_prim_path)
+    descendant = normalize_prim_path(descendant_prim_path)
+    if descendant == ancestor:
+        return _IDENTITY_XYZ, _IDENTITY_XYZW
+    prefix = ancestor + "/"
+    if not descendant.startswith(prefix):
+        raise ValueError(
+            f"descendant {descendant!r} must be under ancestor {ancestor!r}"
+        )
+    segments = [s for s in descendant[len(prefix) :].split("/") if s]
+    acc_t = _IDENTITY_XYZ
+    acc_q = _IDENTITY_XYZW
+    current = ancestor
+    for seg in segments:
+        current = f"{current}/{seg}"
+        local_t = try_get_prim_translate_local(current)
+        if local_t is None:
+            local_t = _IDENTITY_XYZ
+        # orient 或 rotateXYZ（pad_left 等挂载常用 rotateXYZ，漏读会少 90°）
+        local_q = try_get_prim_local_rotation_xyzw(current)
+        if local_q is None:
+            local_q = _IDENTITY_XYZW
+        else:
+            local_q = quat_normalize(local_q)
+        rotated = rotate_vector_by_quat(local_t, acc_q)
+        acc_t = (acc_t[0] + rotated[0], acc_t[1] + rotated[1], acc_t[2] + rotated[2])
+        acc_q = quat_normalize(quat_multiply(acc_q, local_q))
+    return (
+        (float(acc_t[0]), float(acc_t[1]), float(acc_t[2])),
+        (float(acc_q[0]), float(acc_q[1]), float(acc_q[2]), float(acc_q[3])),
+    )
+
+
+def _compose_local_chain_pose(
+    parent_prim_path: str,
+    tip_prim_path: str,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Compose tip pose in parent frame via USD local xforms.
+
+    Supports tip as a descendant of parent, or a cousin under a shared ancestor
+    (e.g. ``link7/tcp_origin`` ↔ ``link7/tcp/.../pad_tcp``).
+    """
+    from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+        ensure_get_prim_attribute_service,
+    )
+
+    parent = normalize_prim_path(parent_prim_path)
+    tip = normalize_prim_path(tip_prim_path)
+    if not parent or not tip:
+        raise ValueError("parent_prim_path and tip_prim_path are required")
+    if tip == parent:
+        return _IDENTITY_XYZ, _IDENTITY_XYZW
+    ensure_get_prim_attribute_service()
+    if tip.startswith(parent + "/"):
+        return _compose_descendant_pose(parent, tip)
+    ancestor = _common_prim_ancestor(parent, tip)
+    anc_parent_t, anc_parent_q = _compose_descendant_pose(ancestor, parent)
+    anc_tip_t, anc_tip_q = _compose_descendant_pose(ancestor, tip)
+    parent_anc_t, parent_anc_q = _invert_pose_xyzw(anc_parent_t, anc_parent_q)
+    return _multiply_pose_xyzw(parent_anc_t, parent_anc_q, anc_tip_t, anc_tip_q)
+
+
+def _relative_pose_from_entity_world(
+    parent_prim_path: str,
+    tip_prim_path: str,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """``tip`` in ``parent`` from live ``/get_entity_state`` world poses (includes rotateXYZ + joints)."""
+    from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMissingImports]
+        quat_conjugate,
+        quat_multiply,
+        quat_normalize,
+        rotate_vector_by_quat_inverse,
+    )
+    from robot_action_composer.isaac_sim import (  # pyright: ignore[reportMissingImports]
+        get_entity_pose_world_service,
+    )
+
+    parent_t, parent_q = get_entity_pose_world_service(parent_prim_path)
+    tip_t, tip_q = get_entity_pose_world_service(tip_prim_path)
+    parent_q = quat_normalize(parent_q)
+    tip_q = quat_normalize(tip_q)
+    rel_world = (
+        tip_t[0] - parent_t[0],
+        tip_t[1] - parent_t[1],
+        tip_t[2] - parent_t[2],
+    )
+    xyz = rotate_vector_by_quat_inverse(rel_world, parent_q)
+    xyzw = quat_normalize(quat_multiply(quat_conjugate(parent_q), tip_q))
+    return (
+        (float(xyz[0]), float(xyz[1]), float(xyz[2])),
+        (float(xyzw[0]), float(xyzw[1]), float(xyzw[2]), float(xyzw[3])),
+    )
+
+
+def resolve_prim_relative_pose(
+    parent_prim_path: str,
+    tip_prim_path: str,
+    *,
+    cache: PrimRelativePoseCache | None = None,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Resolve tip pose in parent frame for ``ee_tip`` conversion.
+
+    Prefer live ``/get_entity_state`` (full xform + articulation). Fall back to
+    ``/get_prim_attribute`` local chain (now includes ``rotateXYZ``).
+    """
+    parent = normalize_prim_path(parent_prim_path)
+    tip = normalize_prim_path(tip_prim_path)
+    key = (parent, tip)
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        print(f"[ObjectBind] resolving ee_tip via /get_entity_state: {parent} → {tip}")
+        xyz, xyzw = _relative_pose_from_entity_world(parent, tip)
+        print(
+            f"[ObjectBind] ee_tip (entity) xyz=({xyz[0]:.6f}, {xyz[1]:.6f}, {xyz[2]:.6f}) "
+            f"xyzw=({xyzw[0]:.6f}, {xyzw[1]:.6f}, {xyzw[2]:.6f}, {xyzw[3]:.6f})"
+        )
+    except Exception as exc:
+        print(
+            f"[ObjectBind] ee_tip entity-state failed ({exc}); "
+            "falling back to /get_prim_attribute local chain"
+        )
+        xyz, xyzw = _compose_local_chain_pose(parent, tip)
+        print(
+            f"[ObjectBind] ee_tip (local) xyz=({xyz[0]:.6f}, {xyz[1]:.6f}, {xyz[2]:.6f}) "
+            f"xyzw=({xyzw[0]:.6f}, {xyzw[1]:.6f}, {xyzw[2]:.6f}, {xyzw[3]:.6f})"
+        )
+    if cache is not None:
+        cache[key] = (xyz, xyzw)
+    return xyz, xyzw
+
+
 def _join_object_grasp(object_prim_path: str, relative: str) -> str:
     obj = normalize_prim_path(object_prim_path)
     rel = str(relative or "").strip().strip("/")
@@ -594,6 +793,7 @@ def build_objects_for_task_entry(
 
 __all__ = [
     "GraspOffsetCache",
+    "PrimRelativePoseCache",
     "build_objects_for_task_entry",
     "deep_merge_dicts",
     "load_leaf_meta_objects",
@@ -605,4 +805,5 @@ __all__ = [
     "resolve_object_local_orient_from_grasp_prim",
     "resolve_object_prim_path",
     "resolve_pick_object_binding",
+    "resolve_prim_relative_pose",
 ]

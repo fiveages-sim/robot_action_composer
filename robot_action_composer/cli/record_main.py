@@ -73,7 +73,7 @@ def _pointcloud_supported(lerobot_cfg: Any) -> bool:
     return bool(has_depth_topic and has_depth_info)
 
 
-def run_record_datasets(*, isaac_dir: Path) -> None:
+def run_record_datasets(*, isaac_dir: Path, robots_root: Path | str | None = None) -> None:
     from robot_action_composer.cli.interactive import select_robot_from_registry
     from robot_action_composer.dataset_recording.launcher import (
         collect_runtime_options,
@@ -86,7 +86,7 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
         merge_task_queue_skill_params,
     )
 
-    discovered = load_robot_entries(isaac_dir)
+    discovered = load_robot_entries(isaac_dir, robots_root=robots_root)
     registry: dict[str, dict[str, Any]] = {}
     for key, entry in discovered.items():
         record = entry["record"]
@@ -121,7 +121,10 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
             "task_groups": entry.get("task_groups", {}),
         }
     if not registry:
-        raise RuntimeError("No record-capable robot configs found under examples/IsaacSim/robots")
+        raise RuntimeError(
+            f"No record-capable robot configs found from workspace {isaac_dir} "
+            "(needs robots/, or a USD project with env/ + robot.yaml + task_configs/)"
+        )
 
     print("IsaacSim Record Datasets")
     print("=" * 70)
@@ -145,6 +148,17 @@ def run_record_datasets(*, isaac_dir: Path) -> None:
         default_task_key=default_task,
     )
     task_entry = robot_entry["tasks"][task_key]
+    scene_project = robot_entry.get("scene_project")
+    if scene_project:
+        from robot_action_composer.task_config_io import resolve_env_scene
+
+        env_scene = resolve_env_scene(
+            task_entry["task_cfg"],
+            project_root=Path(str(scene_project)),
+            default_env_scene=robot_entry.get("default_env_scene"),
+        )
+        if env_scene is not None:
+            print(f"[scene] open in Isaac Sim and press Play: {env_scene}")
     task_runtime = _build_task_runtime(task_entry["task_cfg"])
     scene_presets: dict[str, dict[str, object]] = task_entry["task_cfg"].get("scene_presets", {})
     default_scene = task_entry["task_cfg"].get("default_scene")

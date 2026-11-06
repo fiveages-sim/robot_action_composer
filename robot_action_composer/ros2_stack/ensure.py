@@ -34,6 +34,8 @@ def resolve_stack_for_task(
     task_groups: Mapping[str, Sequence[str]],
     task_key: str | None,
     group_id: str | None = None,
+    task_group_dirs: Mapping[str, str] | None = None,
+    scene_robot_yaml: Path | None = None,
     set_overrides: Sequence[str] = (),
     motion_preset: str | None = None,
     nav_profile: str | None = None,
@@ -41,10 +43,17 @@ def resolve_stack_for_task(
     gid = group_id if group_id is not None else (
         find_task_group_id(task_groups, task_key) if task_key else ""
     )
+    leaf_dir = None
+    if task_group_dirs:
+        raw_leaf = task_group_dirs.get(gid)
+        if raw_leaf:
+            leaf_dir = Path(raw_leaf)
     merged, resolved, warnings = load_merged_ros2_stack(
         robot_dir=robot_dir,
         group_id=gid,
         robot_key=robot_key,
+        leaf_dir=leaf_dir,
+        scene_robot_yaml=scene_robot_yaml,
     )
     if resolved is None:
         return None, warnings
@@ -143,6 +152,8 @@ def ensure_ros2_stack_for_motion(
     task_groups: Mapping[str, Sequence[str]],
     task_key: str,
     task_cfg: Mapping[str, Any],
+    task_group_dirs: Mapping[str, str] | None = None,
+    scene_robot_yaml: Path | str | None = None,
     interactive: bool = True,
     ensure: bool | None = None,
     motion_preset: str | None = None,
@@ -159,6 +170,8 @@ def ensure_ros2_stack_for_motion(
         robot_key=robot_key,
         task_groups=task_groups,
         task_key=task_key,
+        task_group_dirs=task_group_dirs,
+        scene_robot_yaml=Path(scene_robot_yaml) if scene_robot_yaml else None,
         motion_preset=motion_preset,
         nav_profile=nav_profile,
     )

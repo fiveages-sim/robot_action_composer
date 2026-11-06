@@ -101,7 +101,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workspace",
         type=str,
         default=None,
-        help="Workspace root containing robots/ (default: current working directory)",
+        help="Workspace root: legacy dir containing robots/, or a fa-project-usd project dir (env/)",
+    )
+    parser.add_argument(
+        "--robots-root",
+        type=str,
+        default=None,
+        help="Shared robot profile root (default: <workspace>/robots or the scene robot.yaml robots_root)",
     )
     parser.add_argument(
         "--robot",
@@ -123,7 +129,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _build_interface(*, workspace_dir: Any, robot_key: str | None) -> tuple[Any, str | None]:
+def _build_interface(
+    *, workspace_dir: Any, robot_key: str | None, robots_root: str | None = None
+) -> tuple[Any, str | None]:
     from ros2_robot_interface import ROS2RobotInterface, ROS2RobotInterfaceConfig  # pyright: ignore[reportMissingImports]
 
     from robot_action_composer.cli.motion_main import resolve_workspace_dir  # pyright: ignore[reportMissingImports]
@@ -134,7 +142,7 @@ def _build_interface(*, workspace_dir: Any, robot_key: str | None) -> tuple[Any,
         return ROS2RobotInterface(ROS2RobotInterfaceConfig()), None
 
     workspace = resolve_workspace_dir(workspace_dir)
-    registry = load_motion_entries(workspace)
+    registry = load_motion_entries(workspace, robots_root=robots_root)
     if robot_key not in registry:
         known = ", ".join(sorted(registry)) or "(none)"
         raise ValueError(f"Unknown robot key {robot_key!r}; known: {known}")
@@ -155,6 +163,7 @@ def _run(argv: list[str] | None = None) -> int:
         interface, robot_key = _build_interface(
             workspace_dir=Path(args.workspace) if args.workspace else None,
             robot_key=args.robot,
+            robots_root=args.robots_root,
         )
         interface.connect()
         wait_s = max(0.0, float(args.wait))

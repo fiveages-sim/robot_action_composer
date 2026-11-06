@@ -8,7 +8,7 @@ from robot_action_composer.cli.motion_main import resolve_workspace_dir
 from robot_action_composer.ros2_stack.presets import NAV_PROFILES, list_motion_preset_keys
 
 COMMANDS = ("status", "launch", "stop", "logs", "completion")
-GLOBAL_FLAGS = ("--workspace", "--lang", "-h", "--help")
+GLOBAL_FLAGS = ("--workspace", "--robots-root", "--lang", "-h", "--help")
 COMMON_FLAGS = (
     "--robot",
     "--group",
@@ -57,14 +57,30 @@ def _robot_key_from_yaml(path: Path) -> str | None:
     return str(key) if isinstance(key, str) and key else None
 
 
+def _layout_for(workspace_dir: Path):
+    """Resolve robots root / task-config root without importing ROS."""
+    try:
+        from robot_action_composer.discovery.workspace_layout import load_workspace_layout
+
+        return load_workspace_layout(workspace_dir)
+    except Exception:
+        return None
+
+
 def complete_robots(*, workspace: str | None = None) -> list[str]:
     """Lightweight robot-key listing for tab completion (no rclpy required)."""
     workspace_dir = resolve_workspace_dir(Path(workspace) if workspace else None)
+    layout = _layout_for(workspace_dir)
+    robots_root = layout.robots_root if layout is not None else workspace_dir / "robots"
     keys: list[str] = []
-    for robot_dir in _iter_robot_dirs(workspace_dir / "robots"):
+    for robot_dir in _iter_robot_dirs(robots_root):
         key = _robot_key_from_yaml(robot_dir / "robot.yaml")
         if key:
             keys.append(key)
+    if layout is not None and layout.project_robot_yaml is not None:
+        project_key = _robot_key_from_yaml(layout.project_robot_yaml)
+        if project_key:
+            keys = [project_key]
     return sorted(set(keys))
 
 
@@ -73,12 +89,21 @@ def complete_groups(*, workspace: str | None = None, robot: str | None = None) -
     if not robot:
         return []
     workspace_dir = resolve_workspace_dir(Path(workspace) if workspace else None)
-    robot_dir: Path | None = None
-    for d in _iter_robot_dirs(workspace_dir / "robots"):
-        if _robot_key_from_yaml(d / "robot.yaml") == robot:
-            robot_dir = d
-            break
-    if robot_dir is None:
+    layout = _layout_for(workspace_dir)
+    robots_root = layout.robots_root if layout is not None else workspace_dir / "robots"
+
+    task_cfg_dir: Path | None = None
+    robot_dir_name = robot
+    if layout is not None and layout.task_configs_root is not None:
+        task_cfg_dir = layout.task_configs_root
+        robot_dir_name = str(layout.scene_project.name if layout.scene_project else robot)
+    else:
+        for d in _iter_robot_dirs(robots_root):
+            if _robot_key_from_yaml(d / "robot.yaml") == robot:
+                task_cfg_dir = d / "task_configs"
+                robot_dir_name = d.name
+                break
+    if task_cfg_dir is None:
         return []
     try:
         from robot_action_composer.task_config_io import discover_task_configs
@@ -86,8 +111,8 @@ def complete_groups(*, workspace: str | None = None, robot: str | None = None) -
         return []
     try:
         discovery = discover_task_configs(
-            robot_dir / "task_configs",
-            robot_dir_name=robot_dir.name,
+            task_cfg_dir,
+            robot_dir_name=robot_dir_name,
         )
     except Exception:
         return []
