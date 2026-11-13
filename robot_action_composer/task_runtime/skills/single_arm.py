@@ -167,12 +167,22 @@ def _scratch_pose_entry_to_geometry_pose(entry: Mapping[str, Any]) -> Pose:
 
 
 def _binding_params_for_pick(params: Mapping[str, Any], pk: Any) -> dict[str, Any]:
-    """Build resolve_pick_object_binding input; preserve explicit offset key presence from ``params``."""
+    """Build resolve_pick_object_binding input; preserve explicit offset key presence from ``params``.
+
+    When the skill names an ``object_key``, do **not** inherit ``object_prim_path`` from
+    the pick slice. ``skill_defaults.single_arm.pick`` often pins the tube prim for
+    reset/inference; inheriting it into ``single_arm.insert`` with
+    ``object_key: test_tube_rack`` made insert resolve ``…/test_tube/hole_N`` (missing)
+    instead of the place-rack hole.
+    """
     out: dict[str, Any] = {}
     for key in ("object_prim_path", "object_position_offset", "object_key", "grasp_id", "grasp_prim_path"):
         if key in params:
             out[key] = params[key]
-    for key in ("object_prim_path", "object_key", "grasp_id", "grasp_prim_path"):
+    inherit_keys = ("object_prim_path", "object_key", "grasp_id", "grasp_prim_path")
+    if "object_key" in out and "object_prim_path" not in params:
+        inherit_keys = ("object_key", "grasp_id", "grasp_prim_path")
+    for key in inherit_keys:
         if key in out:
             continue
         val = getattr(pk, key, None)

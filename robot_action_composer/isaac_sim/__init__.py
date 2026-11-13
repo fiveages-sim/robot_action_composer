@@ -6,7 +6,7 @@ from __future__ import annotations
 import random
 import threading
 import time
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 import numpy as np
 import rclpy
@@ -16,12 +16,14 @@ from ros2_robot_interface.utils.quat_pose import (  # pyright: ignore[reportMiss
     quat_conjugate,
     quat_multiply,
     quat_normalize,
+    rotate_vector_by_quat,
     rotate_vector_by_quat_inverse,
 )
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from simulation_interfaces.srv import GetEntityState, SetSimulationState
+from simulation_interfaces.msg import Result as SimResult
+from simulation_interfaces.srv import GetEntityState, SetEntityState, SetSimulationState
 
 SERVICE_CALL_TIMEOUT = 8.0
 SERVICE_CALL_RETRIES = 3
@@ -163,6 +165,19 @@ class SimTimeHelper:
             self._node = None
 
 
+def _ensure_sim_result_ok(result_msg: Any, *, what: str) -> None:
+    """Raise unless ``simulation_interfaces/Result.result == RESULT_OK``.
+
+    Isaac often fills ``error_message`` with a success sentence (e.g. SetEntityState
+    \"Successfully set state...\"). Treat the numeric ``result`` code as authoritative.
+    """
+    code = int(getattr(result_msg, "result", SimResult.RESULT_OPERATION_FAILED))
+    if code == int(SimResult.RESULT_OK):
+        return
+    detail = str(getattr(result_msg, "error_message", "") or "").strip()
+    raise RuntimeError(f"{what} unsuccessful (code={code})" + (f": {detail}" if detail else ""))
+
+
 def set_simulation_state(
     state: int,
     timeout: float = SERVICE_CALL_TIMEOUT,
@@ -182,10 +197,7 @@ def set_simulation_state(
         retries=retries,
         retry_delay=retry_delay,
     )
-    if result.result.error_message:
-        raise RuntimeError(
-            f"set_simulation_state({state}) unsuccessful: {result.result.error_message}"
-        )
+    _ensure_sim_result_ok(result.result, what=f"set_simulation_state({state})")
 
 
 def _parse_prim_attr_vec(value: str, *, expected_len: int, path: str, attribute: str) -> np.ndarray:
@@ -439,10 +451,57 @@ def set_prim_orientation_local(
         )
     
 
+def set_entity_pose_world_service(
+    entity: str,
+    position: tuple[float, float, float],
+    orientation_xyzw: tuple[float, float, float, float],
+    *,
+    timeout: float = SERVICE_CALL_TIMEOUT,
+    retries: int = SERVICE_CALL_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> None:
+    """Teleport an Isaac entity in world frame and zero linear/angular velocity."""
+    request = SetEntityState.Request()
+    request.entity = entity
+    px, py, pz = position
+    qx, qy, qz, qw = orientation_xyzw
+    request.state.pose.position.x = float(px)
+    request.state.pose.position.y = float(py)
+    request.state.pose.position.z = float(pz)
+    request.state.pose.orientation.x = float(qx)
+    request.state.pose.orientation.y = float(qy)
+    request.state.pose.orientation.z = float(qz)
+    request.state.pose.orientation.w = float(qw)
+    # Explicit zero twist so a mid-sim teleport does not keep ejection velocity.
+    request.state.twist.linear.x = 0.0
+    request.state.twist.linear.y = 0.0
+    request.state.twist.linear.z = 0.0
+    request.state.twist.angular.x = 0.0
+    request.state.twist.angular.y = 0.0
+    request.state.twist.angular.z = 0.0
+    result = _call_service_with_retry(
+        lambda: _call_service_once(
+            SetEntityState,
+            "/set_entity_state",
+            request,
+            timeout=timeout,
+        ),
+        f"set_entity_pose_world_service('{entity}')",
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    _ensure_sim_result_ok(result.result, what=f"set_entity_state('{entity}')")
+
+
 def randomize_object_xyz_after_reset(
     object_prim_path: str,
     enabled: bool = True,
     xyz_offset: tuple[float, float, float] | float = 0.04,
+    *,
+    also_move_prim_paths: tuple[str, ...] | list[str] = (),
+    seat_translate_offsets: dict[str, tuple[float, float, float]] | None = None,
+    pause_during_move: bool = False,
+    settle_after_s: float = 0.8,
     timeout: float = SERVICE_CALL_TIMEOUT,
     retries: int = SERVICE_CALL_RETRIES,
     retry_delay: float = SERVICE_RETRY_DELAY,
@@ -453,6 +512,21 @@ def randomize_object_xyz_after_reset(
     current local translation, where ``w`` is the corresponding component of
     ``xyz_offset`` (or the scalar for x/y and 0 for z when ``xyz_offset`` is a float).
     This is **not** a Gaussian / normal distribution.
+
+    Loose child objects (e.g. a dynamic test tube sitting in a rack) are **not**
+    USD children of the rack. Moving only the rack while PhysX is running leaves
+    the tube behind or launches it out of the hole. Pass companions via:
+
+    - ``also_move_prim_paths``: add the **same parent-frame translate delta** (correct
+      when ``xformOpOrder`` puts translate before orient, as in the Sinopec scene).
+    - ``seat_translate_offsets``: ``{prim: (dx,dy,dz)}`` parent-frame offset from the
+      **new** primary translate. Use this to re-seat a tube that already popped out
+      during STOP→PLAY contact resolution (measured delta would keep it on the table).
+
+    Teleports use ``/set_entity_state`` while the timeline stays **Playing**. Do not
+    PAUSE for these writes: G1D ``ROS2ServicePrim`` is wired to ``OnPlaybackTick``,
+    so ``/set_prim_attribute`` disappears while paused and the task queue dies.
+    ``pause_during_move`` is kept for experiments but defaults to false.
     """
     if not enabled:
         return
@@ -472,17 +546,145 @@ def randomize_object_xyz_after_reset(
     new_x = cur_x + random.uniform(-off_x, off_x)
     new_y = cur_y + random.uniform(-off_y, off_y)
     new_z = cur_z + random.uniform(-off_z, off_z)
-    set_prim_translate_local(
-        object_prim_path,
-        (new_x, new_y, new_z),
-        timeout=timeout,
-        retries=retries,
-        retry_delay=retry_delay,
+    dx, dy, dz = new_x - cur_x, new_y - cur_y, new_z - cur_z
+
+    seat_map = {
+        str(p).strip(): (float(o[0]), float(o[1]), float(o[2]))
+        for p, o in (seat_translate_offsets or {}).items()
+        if str(p).strip()
+    }
+    companions = []
+    for raw in also_move_prim_paths:
+        path = str(raw or "").strip()
+        if path and path != object_prim_path and path not in companions:
+            companions.append(path)
+    for path in seat_map:
+        if path != object_prim_path and path not in companions:
+            companions.append(path)
+
+    # Parent-frame → world for seat offsets: both Sinopec racks/tube are siblings under
+    # /World/room/scene with xformOpOrder [translate, orient, scale], so origin translate
+    # lives in the parent frame. World delta = R_parent @ parent_delta.
+    parent_path = str(object_prim_path).rsplit("/", 1)[0]
+    parent_q = try_get_prim_local_rotation_xyzw(
+        parent_path, timeout=min(timeout, PRIM_ATTR_PROBE_TIMEOUT), retries=1, retry_delay=retry_delay
     )
+    if parent_q is None:
+        parent_q = (0.0, 0.0, 0.0, 1.0)
+
+    def _parent_delta_to_world(delta_xyz: tuple[float, float, float]) -> tuple[float, float, float]:
+        return rotate_vector_by_quat(delta_xyz, parent_q)
+
+    def _try_set_prim_translate(path: str, xyz: tuple[float, float, float]) -> None:
+        try:
+            set_prim_translate_local(
+                path, xyz, timeout=timeout, retries=retries, retry_delay=retry_delay
+            )
+        except Exception as exc:
+            # Entity teleport below is authoritative for PhysX; USD write is best-effort.
+            print(f"[WARN] set_prim_translate_local soft-fail '{path}': {exc}")
+
+    if pause_during_move:
+        print(
+            "[WARN] pause_during_move=True stops OnPlaybackTick; "
+            "/set_prim_attribute will be unavailable on G1D — prefer false"
+        )
+        set_simulation_state(2, timeout=timeout, retries=retries, retry_delay=retry_delay)
+
+    companion_world_targets: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
+    try:
+        (rack_wx, rack_wy, rack_wz), rack_wq = get_entity_pose_world_service(
+            object_prim_path, timeout=timeout, retries=retries, retry_delay=retry_delay
+        )
+        # Primary world origin shifts by R_parent @ (new_local - old_local).
+        wdx, wdy, wdz = _parent_delta_to_world((dx, dy, dz))
+        new_rack_w = (rack_wx + wdx, rack_wy + wdy, rack_wz + wdz)
+
+        # PhysX first (works while Playing via simulation_interfaces), then USD mirror.
+        set_entity_pose_world_service(
+            object_prim_path,
+            new_rack_w,
+            rack_wq,
+            timeout=timeout,
+            retries=retries,
+            retry_delay=retry_delay,
+        )
+        _try_set_prim_translate(object_prim_path, (new_x, new_y, new_z))
+
+        for path in companions:
+            if path in seat_map:
+                ox, oy, oz = seat_map[path]
+                target_local = (new_x + ox, new_y + oy, new_z + oz)
+                sowx, sowy, sowz = _parent_delta_to_world((ox, oy, oz))
+                target_world = (new_rack_w[0] + sowx, new_rack_w[1] + sowy, new_rack_w[2] + sowz)
+                try:
+                    _pos, cq = get_entity_pose_world_service(
+                        path, timeout=timeout, retries=1, retry_delay=retry_delay
+                    )
+                except Exception:
+                    cq = (0.0, 0.0, 0.0, 1.0)
+            else:
+                try:
+                    cx, cy, cz = get_prim_translate_local(
+                        path, timeout=timeout, retries=retries, retry_delay=retry_delay
+                    )
+                    target_local = (cx + dx, cy + dy, cz + dz)
+                except Exception:
+                    target_local = (new_x + dx, new_y + dy, new_z + dz)
+                (cwx, cwy, cwz), cq = get_entity_pose_world_service(
+                    path, timeout=timeout, retries=retries, retry_delay=retry_delay
+                )
+                target_world = (cwx + wdx, cwy + wdy, cwz + wdz)
+            companion_world_targets[path] = (target_world, cq)
+            set_entity_pose_world_service(
+                path,
+                target_world,
+                cq,
+                timeout=timeout,
+                retries=retries,
+                retry_delay=retry_delay,
+            )
+            _try_set_prim_translate(path, target_local)
+    finally:
+        if pause_during_move:
+            set_simulation_state(1, timeout=timeout, retries=retries, retry_delay=retry_delay)
+
     print(
         f"[OK] Randomized object local xyz: "
         f"({cur_x:.3f}, {cur_y:.3f}, {cur_z:.3f}) -> ({new_x:.3f}, {new_y:.3f}, {new_z:.3f})"
     )
+    if companions:
+        print(
+            f"[OK] Kept {len(companions)} companion prim(s) with rack motion: "
+            + ", ".join(companions)
+        )
+
+    if companions and settle_after_s > 0.0:
+        time.sleep(max(0.05, float(settle_after_s) * 0.25))
+        for path, (target_world, cq) in companion_world_targets.items():
+            try:
+                # Re-assert in case contact resolved during the first steps after teleport.
+                set_entity_pose_world_service(
+                    path,
+                    target_world,
+                    cq,
+                    timeout=timeout,
+                    retries=retries,
+                    retry_delay=retry_delay,
+                )
+            except Exception as exc:
+                print(f"[WARN] Post-move companion re-seat soft-fail '{path}': {exc}")
+        wait_entity_position_stable(
+            companions[0],
+            max_wait=max(0.5, float(settle_after_s)),
+            sample_interval=0.05,
+            stable_samples=3,
+            position_epsilon=0.003,
+            timeout=timeout,
+            retries=retries,
+            retry_delay=retry_delay,
+            sleep_fn=time.sleep,
+        )
 
 
 def wait_entity_pose_readable(
@@ -717,10 +919,7 @@ def get_entity_pose_world_service(
         retries=retries,
         retry_delay=retry_delay,
     )
-    if result.result.error_message:
-        raise RuntimeError(
-            f"get_entity_state unsuccessful for '{entity}': {result.result.error_message}"
-        )
+    _ensure_sim_result_ok(result.result, what=f"get_entity_state('{entity}')")
     pose = result.state.pose
     return (
         (float(pose.position.x), float(pose.position.y), float(pose.position.z)),

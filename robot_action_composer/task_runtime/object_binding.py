@@ -699,7 +699,17 @@ def resolve_pick_object_binding(
     prim_from_entry = ""
     if entry is not None:
         prim_from_entry = normalize_prim_path(str(entry.get("object_prim_path") or ""))
-    object_prim_path = prim_from_params or prim_from_entry
+    # Prefer registry prim when object_key is set. An inherited/stale object_prim_path
+    # (e.g. tube from skill_defaults.single_arm.pick) must not override object_key=rack.
+    if object_key and prim_from_entry:
+        if prim_from_params and prim_from_params != prim_from_entry:
+            print(
+                f"[ObjectBind] object_key={object_key!r} uses registry prim "
+                f"{prim_from_entry} (ignoring conflicting object_prim_path={prim_from_params})"
+            )
+        object_prim_path = prim_from_entry
+    else:
+        object_prim_path = prim_from_params or prim_from_entry
 
     extra_offset: tuple[float, float, float] | None = None
     if "object_position_offset" in params:

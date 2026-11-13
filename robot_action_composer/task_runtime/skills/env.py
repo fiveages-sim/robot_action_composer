@@ -47,10 +47,20 @@ def skill_randomize_object_local_xyz(
             也可回退 ``active_object``。
         xyz_offset: 各轴半幅（米），默认 ``[0.04, 0.04, 0.0]``。
         enabled: 默认 ``true``；``false`` 时跳过（便于 YAML 开关）。
+        also_object_keys / also_object_prim_paths: 随主物体一起平移的伴生 prim
+            （例如架上的动态试管）。仅同 delta 时用；若 reset 已把伴生弹飞，请改用
+            ``seat_object_key`` + ``seat_translate_offset``。
+        seat_object_key / seat_object_prim_path: 需要按相对主物体的父系偏移「坐回」的伴生。
+        seat_translate_offset: 父系平移偏移 ``[dx,dy,dz]``（与 USD ``xformOp:translate``
+            同空间；Sinopec 管架/试管为 scene 下兄弟节点）。
+        pause_during_move: 默认 ``false``。G1D 上 PAUSE 会停掉 OnPlaybackTick，
+            ``/set_prim_attribute`` 随之消失；传送改走 Playing 下的 ``/set_entity_state``。
+        settle_after_s: 伴生写入后等待稳定的墙钟秒数，默认 ``0.8``。
     """
+    objects = getattr(ctx, "objects", None)
     path = resolve_object_prim_path(
         params,
-        objects=getattr(ctx, "objects", None),
+        objects=objects,
         prim_param="object_prim_path",
         key_params="object_key",
         active_object=getattr(ctx, "active_object", None),
@@ -62,7 +72,54 @@ def skill_randomize_object_local_xyz(
     enabled = bool(params.get("enabled", True))
     off = _param_vec3(params, "xyz_offset", (0.04, 0.04, 0.0))
 
-    randomize_object_xyz_after_reset(path, enabled=enabled, xyz_offset=off)
+    also_paths: list[str] = []
+    raw_also_paths = params.get("also_object_prim_paths")
+    if isinstance(raw_also_paths, (list, tuple)):
+        for item in raw_also_paths:
+            p = str(item or "").strip()
+            if p:
+                also_paths.append(p)
+    raw_also_keys = params.get("also_object_keys")
+    if isinstance(raw_also_keys, (list, tuple)):
+        for key in raw_also_keys:
+            p = resolve_object_prim_path(
+                {"object_key": key},
+                objects=objects,
+                required=True,
+                label=f"env.randomize_object_local_xyz also_object_key={key!r}",
+            )
+            assert p
+            also_paths.append(p)
+
+    seat_offsets: dict[str, tuple[float, float, float]] = {}
+    seat_path = resolve_object_prim_path(
+        params,
+        objects=objects,
+        prim_param="seat_object_prim_path",
+        key_params="seat_object_key",
+        use_active_object=False,
+        required=False,
+        label="env.randomize_object_local_xyz seat",
+    )
+    if seat_path:
+        seat_offsets[seat_path] = _param_vec3(
+            params, "seat_translate_offset", (0.0, 0.0, 0.0)
+        )
+        if seat_path not in also_paths:
+            also_paths.append(seat_path)
+
+    pause_during_move = bool(params.get("pause_during_move", False))
+    settle_after_s = float(params.get("settle_after_s", 0.8))
+
+    randomize_object_xyz_after_reset(
+        path,
+        enabled=enabled,
+        xyz_offset=off,
+        also_move_prim_paths=tuple(also_paths),
+        seat_translate_offsets=seat_offsets or None,
+        pause_during_move=pause_during_move,
+        settle_after_s=settle_after_s,
+    )
 
     fid = str(ctx.frame_id).strip() or "base_link"
     return [], ExecutionMeta(

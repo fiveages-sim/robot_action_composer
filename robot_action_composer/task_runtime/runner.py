@@ -415,6 +415,72 @@ def _also_settle_base_path(robot_cfg: Any) -> str:
     return str(getattr(robot_cfg, "base_link_entity_path", "") or "").strip()
 
 
+def _queue_needs_nav_tf(specs: Sequence[QueueBlock]) -> bool:
+    """True if any queue block (including parallel children) is a nav skill."""
+    for spec in specs:
+        if isinstance(spec, ParallelSpec):
+            if any(_is_navigation_skill(sub) for sub in spec.skills):
+                return True
+        elif isinstance(spec, BlockSpec) and _is_navigation_skill(spec):
+            return True
+    return False
+
+
+def _refresh_tf_buffer_after_sim_reset(interface: Any) -> None:
+    """Drop stale TF cache after Isaac STOP/PLAY rewinds ``/clock``.
+
+    Connect-then-reset fills the listener with large sim stamps; after rewind,
+    every new ``/tf`` is rejected as ``TF_OLD_DATA`` until this buffer is replaced.
+    """
+    try:
+        import tf2_ros
+    except Exception as exc:
+        print(f"[WARN] tf2_ros unavailable; cannot refresh TF buffer ({exc})")
+        return
+
+    node = getattr(interface, "robot_node", None)
+    if node is None:
+        print("[WARN] Robot ROS interface not ready; skipped TF buffer refresh")
+        return
+
+    # Drop the old listener before replacing the buffer so it stops feeding
+    # rejected past-stamped transforms into the abandoned Buffer.
+    old_listener = getattr(interface, "tf_listener", None)
+    if old_listener is not None:
+        interface.tf_listener = None
+        del old_listener
+
+    interface.tf_buffer = tf2_ros.Buffer()
+    interface.tf_listener = tf2_ros.TransformListener(interface.tf_buffer, node)
+    print("[OK] TF buffer refreshed after simulation reset")
+
+
+def _wait_wbc_current_state_ready(
+    interface: Any,
+    *,
+    max_wait: float = 60.0,
+    poll_s: float = 0.25,
+) -> bool:
+    """Block until ``/ocs2_wbc_controller/current_state`` has been received.
+
+    After STOP→PLAY, in-process ros2_control reloads; mode commands like
+    ``BASE_LOCK`` need a live ``wbc_state`` or confirmation reports
+    ``base_state: None`` and aborts the queue.
+    """
+    deadline = time.monotonic() + max(0.0, float(max_wait))
+    while time.monotonic() < deadline:
+        state = getattr(interface, "wbc_state", None)
+        if state is not None:
+            print("[OK] WBC current_state ready after reset")
+            return True
+        time.sleep(max(0.05, float(poll_s)))
+    print(
+        f"[WARN] /ocs2_wbc_controller/current_state not received within {max_wait:.1f}s "
+        "(BASE_LOCK / mode confirms will fail — Stop→wait→Play until controllers activate)"
+    )
+    return False
+
+
 def _wait_nav_tf_ready(
     interface: Any,
     *,
@@ -426,7 +492,8 @@ def _wait_nav_tf_ready(
     lookup = getattr(interface, "lookup_transform", None)
     if not callable(lookup):
         return False
-    sleep = sim_time.sleep if sim_time is not None else time.sleep
+    # Wall clock: sim time was just rewound; sim-time sleep is fragile here.
+    sleep = time.sleep
     deadline = time.monotonic() + max(0.0, float(max_wait))
     while time.monotonic() < deadline:
         for base_frame in ("base_footprint", "base_link"):
@@ -461,9 +528,12 @@ def reset_queue_task_environment(
     nav / dex that rely on Isaac GT odom after PLAY do not race re-init.
     """
     also_base = _also_settle_base_path(robot_cfg)
+    # Wall clock after STOP→PLAY: /clock rewound; sim-time sleep can stall or
+    # race TF_OLD_DATA while the listener still holds pre-reset stamps.
+    _ = sim_time  # kept for call-site compatibility / future sim-clock helpers
     reset_kw = dict(
         post_reset_wait=robot_cfg.post_reset_wait,
-        sleep_fn=sim_time.sleep,
+        sleep_fn=time.sleep,
         also_settle_entity_path=also_base,
     )
     if runtime.drawer is not None:
@@ -559,14 +629,23 @@ def run_task_queue(
     signal.signal(signal.SIGINT, shutdown_handler)
 
     try:
+        # Reset BEFORE connect. Connecting first fills the TF cache with large
+        # sim stamps; STOP/PLAY then rewinds /clock → endless TF_OLD_DATA.
+        if reset_env:
+            reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+
         interface.connect()
         robot_connected = True
         print("[OK] Robot connected (unified task queue)")
 
         if reset_env:
-            reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
+            # Safety if anything still held a stale buffer from a prior session.
+            _refresh_tf_buffer_after_sim_reset(interface)
             # Isaac GT odom TF can lag PhysX after STOP→PLAY; nav goals need map←base.
-            _wait_nav_tf_ready(interface, sim_time=sim_time)
+            if _queue_needs_nav_tf(specs):
+                _wait_nav_tf_ready(interface, sim_time=sim_time)
+            # ros2_control/OCS2 re-activate after STOP→PLAY; wait before mode skills.
+            _wait_wbc_current_state_ready(interface)
 
         ctx = build_queue_runtime_context(
             interface=interface,
@@ -645,7 +724,10 @@ def run_task_queue_on_connected_interface(
 
     if reset_env:
         reset_queue_task_environment(specs=specs, runtime=runtime, robot_cfg=robot_cfg, sim_time=sim_time)
-        _wait_nav_tf_ready(interface, sim_time=sim_time)
+        _refresh_tf_buffer_after_sim_reset(interface)
+        if _queue_needs_nav_tf(specs):
+            _wait_nav_tf_ready(interface, sim_time=sim_time)
+        _wait_wbc_current_state_ready(interface)
 
     ctx = build_queue_runtime_context(
         interface=interface,
