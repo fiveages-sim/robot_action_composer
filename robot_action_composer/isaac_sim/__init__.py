@@ -441,13 +441,45 @@ def set_prim_orientation_local(
             request,
             timeout=timeout,
         ),
-        f"set_prim_translate_local('{path}')",
+        f"set_prim_orientation_local('{path}')",
         retries=retries,
         retry_delay=retry_delay,
     )
     if not result.success:
         raise RuntimeError(
             f"set_prim_attribute unsuccessful for '{path}': {result.message or 'unknown error'}"
+        )
+
+
+def set_prim_bool_attribute(
+    path: str,
+    attribute: str,
+    value: bool,
+    *,
+    timeout: float = SERVICE_CALL_TIMEOUT,
+    retries: int = SERVICE_CALL_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> None:
+    """Write a USD bool attribute (e.g. ``physics:kinematicEnabled``) via ROS."""
+    request = SetPrimAttribute.Request()
+    request.path = path
+    request.attribute = attribute
+    request.value = "1" if value else "0"
+    result = _call_service_with_retry(
+        lambda: _call_service_once(
+            SetPrimAttribute,
+            "/set_prim_attribute",
+            request,
+            timeout=timeout,
+        ),
+        f"set_prim_bool_attribute('{path}', {attribute}={value})",
+        retries=retries,
+        retry_delay=retry_delay,
+    )
+    if not result.success:
+        raise RuntimeError(
+            f"set_prim_attribute unsuccessful for '{path}.{attribute}': "
+            f"{result.message or 'unknown error'}"
         )
     
 
@@ -502,6 +534,8 @@ def randomize_object_xyz_after_reset(
     seat_translate_offsets: dict[str, tuple[float, float, float]] | None = None,
     pause_during_move: bool = False,
     settle_after_s: float = 0.8,
+    force_kinematic: bool = False,
+    snap_authored_orientation: bool = True,
     timeout: float = SERVICE_CALL_TIMEOUT,
     retries: int = SERVICE_CALL_RETRIES,
     retry_delay: float = SERVICE_RETRY_DELAY,
@@ -527,6 +561,11 @@ def randomize_object_xyz_after_reset(
     PAUSE for these writes: G1D ``ROS2ServicePrim`` is wired to ``OnPlaybackTick``,
     so ``/set_prim_attribute`` disappears while paused and the task queue dies.
     ``pause_during_move`` is kept for experiments but defaults to false.
+
+    Dynamic racks tip after mid-sim XY teleports (table contact / residual torque).
+    For fixtures set ``force_kinematic=True`` (and/or author ``physics:kinematicEnabled``
+    on the stage). ``snap_authored_orientation`` rebuilds world quat from USD
+    ``xformOp:orient`` so a previously tipped pose is not frozen into the teleport.
     """
     if not enabled:
         return
@@ -575,6 +614,18 @@ def randomize_object_xyz_after_reset(
     def _parent_delta_to_world(delta_xyz: tuple[float, float, float]) -> tuple[float, float, float]:
         return rotate_vector_by_quat(delta_xyz, parent_q)
 
+    def _authored_world_quat(path: str) -> tuple[float, float, float, float] | None:
+        local_q = try_get_prim_orient_local_xyzw(
+            path,
+            timeout=min(timeout, PRIM_ATTR_PROBE_TIMEOUT),
+            retries=1,
+            retry_delay=retry_delay,
+        )
+        if local_q is None:
+            return None
+        # Sinopec: World/room identity → parent local orient ≈ parent world orient.
+        return quat_normalize(quat_multiply(parent_q, local_q))
+
     def _try_set_prim_translate(path: str, xyz: tuple[float, float, float]) -> None:
         try:
             set_prim_translate_local(
@@ -584,6 +635,20 @@ def randomize_object_xyz_after_reset(
             # Entity teleport below is authoritative for PhysX; USD write is best-effort.
             print(f"[WARN] set_prim_translate_local soft-fail '{path}': {exc}")
 
+    if force_kinematic:
+        try:
+            set_prim_bool_attribute(
+                object_prim_path,
+                "physics:kinematicEnabled",
+                True,
+                timeout=timeout,
+                retries=retries,
+                retry_delay=retry_delay,
+            )
+            print(f"[OK] Forced kinematic: {object_prim_path}")
+        except Exception as exc:
+            print(f"[WARN] force_kinematic soft-fail '{object_prim_path}': {exc}")
+
     if pause_during_move:
         print(
             "[WARN] pause_during_move=True stops OnPlaybackTick; "
@@ -592,13 +657,19 @@ def randomize_object_xyz_after_reset(
         set_simulation_state(2, timeout=timeout, retries=retries, retry_delay=retry_delay)
 
     companion_world_targets: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
+    primary_world_target: tuple[tuple[float, float, float], tuple[float, float, float, float]] | None = None
     try:
         (rack_wx, rack_wy, rack_wz), rack_wq = get_entity_pose_world_service(
             object_prim_path, timeout=timeout, retries=retries, retry_delay=retry_delay
         )
+        if snap_authored_orientation:
+            authored_wq = _authored_world_quat(object_prim_path)
+            if authored_wq is not None:
+                rack_wq = authored_wq
         # Primary world origin shifts by R_parent @ (new_local - old_local).
         wdx, wdy, wdz = _parent_delta_to_world((dx, dy, dz))
         new_rack_w = (rack_wx + wdx, rack_wy + wdy, rack_wz + wdz)
+        primary_world_target = (new_rack_w, rack_wq)
 
         # PhysX first (works while Playing via simulation_interfaces), then USD mirror.
         set_entity_pose_world_service(
@@ -617,12 +688,16 @@ def randomize_object_xyz_after_reset(
                 target_local = (new_x + ox, new_y + oy, new_z + oz)
                 sowx, sowy, sowz = _parent_delta_to_world((ox, oy, oz))
                 target_world = (new_rack_w[0] + sowx, new_rack_w[1] + sowy, new_rack_w[2] + sowz)
-                try:
-                    _pos, cq = get_entity_pose_world_service(
-                        path, timeout=timeout, retries=1, retry_delay=retry_delay
-                    )
-                except Exception:
-                    cq = (0.0, 0.0, 0.0, 1.0)
+                cq = None
+                if snap_authored_orientation:
+                    cq = _authored_world_quat(path)
+                if cq is None:
+                    try:
+                        _pos, cq = get_entity_pose_world_service(
+                            path, timeout=timeout, retries=1, retry_delay=retry_delay
+                        )
+                    except Exception:
+                        cq = (0.0, 0.0, 0.0, 1.0)
             else:
                 try:
                     cx, cy, cz = get_prim_translate_local(
@@ -634,6 +709,10 @@ def randomize_object_xyz_after_reset(
                 (cwx, cwy, cwz), cq = get_entity_pose_world_service(
                     path, timeout=timeout, retries=retries, retry_delay=retry_delay
                 )
+                if snap_authored_orientation:
+                    authored_cq = _authored_world_quat(path)
+                    if authored_cq is not None:
+                        cq = authored_cq
                 target_world = (cwx + wdx, cwy + wdy, cwz + wdz)
             companion_world_targets[path] = (target_world, cq)
             set_entity_pose_world_service(
@@ -659,11 +738,23 @@ def randomize_object_xyz_after_reset(
             + ", ".join(companions)
         )
 
-    if companions and settle_after_s > 0.0:
+    if settle_after_s > 0.0 and (primary_world_target is not None or companion_world_targets):
         time.sleep(max(0.05, float(settle_after_s) * 0.25))
+        # Re-assert rack first — dynamic fixtures tip on the table within a few steps.
+        if primary_world_target is not None:
+            try:
+                set_entity_pose_world_service(
+                    object_prim_path,
+                    primary_world_target[0],
+                    primary_world_target[1],
+                    timeout=timeout,
+                    retries=retries,
+                    retry_delay=retry_delay,
+                )
+            except Exception as exc:
+                print(f"[WARN] Post-move primary re-seat soft-fail '{object_prim_path}': {exc}")
         for path, (target_world, cq) in companion_world_targets.items():
             try:
-                # Re-assert in case contact resolved during the first steps after teleport.
                 set_entity_pose_world_service(
                     path,
                     target_world,
@@ -675,7 +766,7 @@ def randomize_object_xyz_after_reset(
             except Exception as exc:
                 print(f"[WARN] Post-move companion re-seat soft-fail '{path}': {exc}")
         wait_entity_position_stable(
-            companions[0],
+            companions[0] if companions else object_prim_path,
             max_wait=max(0.5, float(settle_after_s)),
             sample_interval=0.05,
             stable_samples=3,

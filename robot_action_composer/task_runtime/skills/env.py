@@ -56,6 +56,10 @@ def skill_randomize_object_local_xyz(
         pause_during_move: 默认 ``false``。G1D 上 PAUSE 会停掉 OnPlaybackTick，
             ``/set_prim_attribute`` 随之消失；传送改走 Playing 下的 ``/set_entity_state``。
         settle_after_s: 伴生写入后等待稳定的墙钟秒数，默认 ``0.8``。
+        force_kinematic: 默认 ``false``。对试管架等夹具设 ``true``，避免 Playing
+            中途 XY 传送后与桌面接触把架子掀翻。
+        snap_authored_orientation: 默认 ``true``。用 USD ``xformOp:orient`` 重建
+            世界姿态，避免沿用已翻倒的 entity pose。
     """
     objects = getattr(ctx, "objects", None)
     path = resolve_object_prim_path(
@@ -110,6 +114,8 @@ def skill_randomize_object_local_xyz(
 
     pause_during_move = bool(params.get("pause_during_move", False))
     settle_after_s = float(params.get("settle_after_s", 0.8))
+    force_kinematic = bool(params.get("force_kinematic", False))
+    snap_authored_orientation = bool(params.get("snap_authored_orientation", True))
 
     randomize_object_xyz_after_reset(
         path,
@@ -119,6 +125,8 @@ def skill_randomize_object_local_xyz(
         seat_translate_offsets=seat_offsets or None,
         pause_during_move=pause_during_move,
         settle_after_s=settle_after_s,
+        force_kinematic=force_kinematic,
+        snap_authored_orientation=snap_authored_orientation,
     )
 
     fid = str(ctx.frame_id).strip() or "base_link"
