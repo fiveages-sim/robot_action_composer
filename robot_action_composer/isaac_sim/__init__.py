@@ -492,7 +492,13 @@ def set_entity_pose_world_service(
     retries: int = SERVICE_CALL_RETRIES,
     retry_delay: float = SERVICE_RETRY_DELAY,
 ) -> None:
-    """Teleport an Isaac entity in world frame and zero linear/angular velocity."""
+    """Teleport a **dynamic** Isaac entity in world frame and zero twist.
+
+    Do **not** call this on kinematic rigid bodies: Isaac's ``/set_entity_state``
+    always writes linear/angular velocity, and PhysX rejects
+    ``PxRigidDynamic::setLinearVelocity`` / ``setAngularVelocity`` on kinematic
+    actors. Move kinematic fixtures with USD ``xformOp:*`` instead.
+    """
     request = SetEntityState.Request()
     request.entity = entity
     px, py, pz = position
@@ -523,6 +529,30 @@ def set_entity_pose_world_service(
         retry_delay=retry_delay,
     )
     _ensure_sim_result_ok(result.result, what=f"set_entity_state('{entity}')")
+
+
+def set_kinematic_prim_pose_local(
+    path: str,
+    translate_xyz: tuple[float, float, float],
+    orient_xyzw: tuple[float, float, float, float] | None = None,
+    *,
+    timeout: float = SERVICE_CALL_TIMEOUT,
+    retries: int = SERVICE_CALL_RETRIES,
+    retry_delay: float = SERVICE_RETRY_DELAY,
+) -> None:
+    """Move a kinematic fixture via USD xform (no PhysX twist write)."""
+    set_prim_translate_local(
+        path, translate_xyz, timeout=timeout, retries=retries, retry_delay=retry_delay
+    )
+    if orient_xyzw is not None:
+        qx, qy, qz, qw = orient_xyzw
+        set_prim_orientation_local(
+            path,
+            (qw, qx, qy, qz),
+            timeout=timeout,
+            retries=retries,
+            retry_delay=retry_delay,
+        )
 
 
 def randomize_object_xyz_after_reset(
@@ -564,8 +594,10 @@ def randomize_object_xyz_after_reset(
 
     Dynamic racks tip after mid-sim XY teleports (table contact / residual torque).
     For fixtures set ``force_kinematic=True`` (and/or author ``physics:kinematicEnabled``
-    on the stage). ``snap_authored_orientation`` rebuilds world quat from USD
-    ``xformOp:orient`` so a previously tipped pose is not frozen into the teleport.
+    on the stage). Kinematic prims are moved via USD ``xformOp:*`` only —
+    ``/set_entity_state`` zeros twist and PhysX errors on kinematic bodies.
+    ``snap_authored_orientation`` rebuilds orientation from USD ``xformOp:orient``
+    so a previously tipped pose is not frozen into the teleport.
     """
     if not enabled:
         return
@@ -658,11 +690,20 @@ def randomize_object_xyz_after_reset(
 
     companion_world_targets: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
     primary_world_target: tuple[tuple[float, float, float], tuple[float, float, float, float]] | None = None
+    primary_local_xyzw: tuple[float, float, float, float] | None = None
     try:
         (rack_wx, rack_wy, rack_wz), rack_wq = get_entity_pose_world_service(
             object_prim_path, timeout=timeout, retries=retries, retry_delay=retry_delay
         )
         if snap_authored_orientation:
+            authored_local = try_get_prim_orient_local_xyzw(
+                object_prim_path,
+                timeout=min(timeout, PRIM_ATTR_PROBE_TIMEOUT),
+                retries=1,
+                retry_delay=retry_delay,
+            )
+            if authored_local is not None:
+                primary_local_xyzw = authored_local
             authored_wq = _authored_world_quat(object_prim_path)
             if authored_wq is not None:
                 rack_wq = authored_wq
@@ -671,16 +712,31 @@ def randomize_object_xyz_after_reset(
         new_rack_w = (rack_wx + wdx, rack_wy + wdy, rack_wz + wdz)
         primary_world_target = (new_rack_w, rack_wq)
 
-        # PhysX first (works while Playing via simulation_interfaces), then USD mirror.
-        set_entity_pose_world_service(
-            object_prim_path,
-            new_rack_w,
-            rack_wq,
-            timeout=timeout,
-            retries=retries,
-            retry_delay=retry_delay,
-        )
-        _try_set_prim_translate(object_prim_path, (new_x, new_y, new_z))
+        if force_kinematic:
+            # USD-only: /set_entity_state zeros twist → PhysX "Body must be non-kinematic".
+            try:
+                set_kinematic_prim_pose_local(
+                    object_prim_path,
+                    (new_x, new_y, new_z),
+                    primary_local_xyzw if snap_authored_orientation else None,
+                    timeout=timeout,
+                    retries=retries,
+                    retry_delay=retry_delay,
+                )
+            except Exception as exc:
+                print(f"[WARN] kinematic USD teleport soft-fail '{object_prim_path}': {exc}")
+                _try_set_prim_translate(object_prim_path, (new_x, new_y, new_z))
+        else:
+            # Dynamic: PhysX first (simulation_interfaces), then USD mirror.
+            set_entity_pose_world_service(
+                object_prim_path,
+                new_rack_w,
+                rack_wq,
+                timeout=timeout,
+                retries=retries,
+                retry_delay=retry_delay,
+            )
+            _try_set_prim_translate(object_prim_path, (new_x, new_y, new_z))
 
         for path in companions:
             if path in seat_map:
@@ -715,6 +771,7 @@ def randomize_object_xyz_after_reset(
                         cq = authored_cq
                 target_world = (cwx + wdx, cwy + wdy, cwz + wdz)
             companion_world_targets[path] = (target_world, cq)
+            # Companions (e.g. dynamic tube) still use SetEntityState + zero twist.
             set_entity_pose_world_service(
                 path,
                 target_world,
@@ -743,14 +800,24 @@ def randomize_object_xyz_after_reset(
         # Re-assert rack first — dynamic fixtures tip on the table within a few steps.
         if primary_world_target is not None:
             try:
-                set_entity_pose_world_service(
-                    object_prim_path,
-                    primary_world_target[0],
-                    primary_world_target[1],
-                    timeout=timeout,
-                    retries=retries,
-                    retry_delay=retry_delay,
-                )
+                if force_kinematic:
+                    set_kinematic_prim_pose_local(
+                        object_prim_path,
+                        (new_x, new_y, new_z),
+                        primary_local_xyzw if snap_authored_orientation else None,
+                        timeout=timeout,
+                        retries=retries,
+                        retry_delay=retry_delay,
+                    )
+                else:
+                    set_entity_pose_world_service(
+                        object_prim_path,
+                        primary_world_target[0],
+                        primary_world_target[1],
+                        timeout=timeout,
+                        retries=retries,
+                        retry_delay=retry_delay,
+                    )
             except Exception as exc:
                 print(f"[WARN] Post-move primary re-seat soft-fail '{object_prim_path}': {exc}")
         for path, (target_world, cq) in companion_world_targets.items():
