@@ -385,9 +385,125 @@ def skill_send_mode_command(
     return [], _session_meta(ctx)
 
 
+
+def skill_fsm_command(
+    ctx: QueueRuntimeContext, params: Mapping[str, Any]
+) -> tuple[list[Any], ExecutionMeta]:
+    """切换运控 FSM 状态（``/fsm_command``），无运动阶段、无关节目标。
+
+    **与 ``robot.send_mode_command`` 的区别**：那个改的是「全身模式」
+    （``/mode_command``：BASE_LOCK / ARMS_COUPLED / BODY_* …），本技能改的是
+    **FSM 状态**（HOME / HOLD / OCS2 / MOVEJ）。两者是不同话题、不同层次。
+
+    典型用途：任务末尾**回 HOME 归位**。对多数数采机器人来说，
+    任务起始姿态就是 HOME 位（G1D 已确认），所以「切 HOME」等价于
+    「回到可以开始下一轮的状态」，而且只涉及状态机、不涉及任何关节目标
+    下发 —— 没有 joint_names 映射、没有到位判定失败的风险。
+
+    为什么不推荐 ``joint.goto_cached_joints``：它要按名字把位置数组映射成
+    WBC 消息，依赖 ``config.joint_names``；该配置的默认值是占位符
+    （``left_joint1..7``），在未显式配置的机器人上会把目标发到错误关节
+    （实测 ``joint arrival timeout, left_err=0.225``）。切 FSM 没有这个问题。
+
+    params:
+        state / target (str | int): ``HOME`` / ``HOLD`` / ``OCS2`` / ``MOVEJ``，
+            或对应数值（1=HOME, 2=HOLD, 3=OCS2, 4=MOVEJ）。
+        then (str | int, 可选): 切完之后再切一个状态（通常 ``HOLD``），
+            用于「先回 HOME 再回 HOLD」这种收尾，保证下一轮起始 FSM 一致。
+        settle_time (float, 可选): 每次切换后额外等待（秒），默认 0.3。
+        require_confirmed (bool, 可选): 切换后未确认则抛错。默认 False（只警告）。
+        wait_timeout (float, 可选): 确认超时（秒），默认 8.0。
+    """
+    import time
+
+    from ros2_robot_interface import FSM_HOLD, FSM_HOME, FSM_MOVEJ, FSM_OCS2  # pyright: ignore
+
+    _MAP = {
+        "HOME": FSM_HOME, "HOLD": FSM_HOLD, "OCS2": FSM_OCS2, "MOVEJ": FSM_MOVEJ,
+        "1": FSM_HOME, "2": FSM_HOLD, "3": FSM_OCS2, "4": FSM_MOVEJ,
+    }
+
+    def _resolve(raw: Any, label: str) -> int:
+        key = str(raw).strip().upper()
+        if key in _MAP:
+            return int(_MAP[key])
+        try:
+            v = int(key)
+            if v in (FSM_HOME, FSM_HOLD, FSM_OCS2, FSM_MOVEJ):
+                return v
+        except ValueError:
+            pass
+        raise ValueError(f"robot.fsm_command: bad {label}={raw!r} (want HOME/HOLD/OCS2/MOVEJ)")
+
+    raw_state = params.get("state", params.get("target"))
+    if raw_state is None:
+        raise ValueError("robot.fsm_command requires params.state (HOME/HOLD/OCS2/MOVEJ)")
+    seq = [_resolve(raw_state, "state")]
+    raw_then = params.get("then")
+    if raw_then is not None:
+        seq.append(_resolve(raw_then, "then"))
+
+    settle = float(params.get("settle_time", 0.3))
+    require = bool(params.get("require_confirmed", False))
+    timeout = float(params.get("wait_timeout", 8.0))
+
+    iface = ctx.interface
+    if not hasattr(iface, "send_fsm_command"):
+        raise RuntimeError("robot.fsm_command: interface has no send_fsm_command")
+    sim_time = getattr(ctx, "sim_time", None)
+    sleep_fn = sim_time.sleep if sim_time else time.sleep
+
+    name_of = {FSM_HOME: "HOME", FSM_HOLD: "HOLD", FSM_OCS2: "OCS2", FSM_MOVEJ: "MOVEJ"}
+    for idx, code in enumerate(seq):
+        print(f"[Session] robot.fsm_command → {name_of.get(code, code)}")
+        iface.send_fsm_command(code)
+        sleep_fn(max(0.0, settle))
+        getter = getattr(iface, "get_fsm_state", None)
+        if getter is None:
+            continue
+        t0 = time.monotonic()
+        ok = False
+        while time.monotonic() - t0 < timeout:
+            try:
+                if int(getter()) == int(code):
+                    ok = True
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            sleep_fn(0.1)
+        if ok:
+            print(f"[Session] robot.fsm_command confirmed {name_of.get(code, code)}")
+        else:
+            msg = (f"robot.fsm_command: FSM did not reach {name_of.get(code, code)} "
+                   f"within {timeout:.1f}s")
+            if require:
+                raise RuntimeError(msg)
+            print(f"[Session] WARN: {msg}")
+
+        # ---- 关键：HOME 是**异步插值**，FSM 立刻报 HOME 但动作还没做完 ----
+        #
+        # 运控的 StateHome 会 "Starting interpolation to home configuration
+        # over N seconds"（参数 home_duration，实测 5.0s）。而 /fsm_state 在
+        # 插值**开始时**就已经是 HOME 了。所以「确认到位」不等于「动作完成」——
+        # 立刻切下一个状态（HOLD）会把插值打断，机器人刚往 home 走就停了。
+        #
+        # 这里对 HOME 额外等一段插值时间（motion_wait，默认 6.0s > 5.0s）。
+        # 对其它状态不需要（HOLD/OCS2 是瞬时切换）。
+        is_home = int(code) == int(FSM_HOME)
+        if is_home and idx < len(seq) - 1:
+            wait = float(params.get("motion_wait", 6.0))
+            if wait > 0:
+                print(f"[Session] robot.fsm_command 等 HOME 插值完成 {wait:.1f}s "
+                      f"（home_duration 默认 5.0s）")
+                sleep_fn(wait)
+
+    return [], _session_meta(ctx)
+
+
 register_skill("session.scratch_put", skill_scratch_put)
 register_skill("session.scratch_clear", skill_scratch_clear)
 register_skill("robot.cache_ee_pose", skill_cache_ee_pose)
 register_skill("robot.cache_joint_state", skill_cache_joint_state)
 register_skill("robot.snapshot_state", skill_robot_snapshot_state)
+register_skill("robot.fsm_command", skill_fsm_command)
 register_skill("robot.send_mode_command", skill_send_mode_command)
